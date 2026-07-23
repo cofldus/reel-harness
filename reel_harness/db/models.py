@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import JSON, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def new_uuid() -> str:
+    return str(uuid.uuid4())
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Channel(Base):
+    __tablename__ = "channels"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    name: Mapped[str]
+    niche: Mapped[str]
+    language: Mapped[str]
+    style_preset: Mapped[dict] = mapped_column(JSON, default=dict)
+    auto_approve: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+    jobs: Mapped[list[Job]] = relationship(back_populates="channel")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "idempotency_key", name="uq_job_channel_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"))
+    idempotency_key: Mapped[str]
+    topic: Mapped[str | None] = mapped_column(default=None)
+    script: Mapped[dict | None] = mapped_column(JSON, default=None)
+
+    status: Mapped[str] = mapped_column(default="CREATED")
+    current_stage: Mapped[str | None] = mapped_column(default=None)
+    attempt_number: Mapped[int] = mapped_column(default=1)
+    retry_count: Mapped[int] = mapped_column(default=0)
+
+    retry_target_stage: Mapped[str | None] = mapped_column(default=None)
+    next_retry_at: Mapped[datetime | None] = mapped_column(default=None)
+    failure_code: Mapped[str | None] = mapped_column(default=None)
+    failure_summary: Mapped[str | None] = mapped_column(default=None)
+    reason_code: Mapped[str | None] = mapped_column(default=None)
+
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
+    parent_job_id: Mapped[str | None] = mapped_column(default=None)
+
+    locked_by: Mapped[str | None] = mapped_column(default=None)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+    updated_at: Mapped[datetime] = mapped_column(default=_now, onupdate=_now)
+
+    channel: Mapped[Channel] = relationship(back_populates="jobs")
+    stage_runs: Mapped[list[StageRun]] = relationship(back_populates="job")
+    assets: Mapped[list[Asset]] = relationship(back_populates="job")
+
+
+class StageRun(Base):
+    __tablename__ = "stage_runs"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"))
+    stage: Mapped[str]
+    attempt: Mapped[int]
+    status: Mapped[str]
+    error_detail: Mapped[str | None] = mapped_column(default=None)
+    started_at: Mapped[datetime] = mapped_column(default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    job: Mapped[Job] = relationship(back_populates="stage_runs")
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"))
+    scene_index: Mapped[int]
+    source_provider: Mapped[str]
+    source_url: Mapped[str | None] = mapped_column(default=None)
+    author: Mapped[str | None] = mapped_column(default=None)
+    license_type: Mapped[str | None] = mapped_column(default=None)
+    local_path: Mapped[str]
+    checksum_sha256: Mapped[str]
+    mime_type: Mapped[str]
+    downloaded_at: Mapped[datetime] = mapped_column(default=_now)
+
+    job: Mapped[Job] = relationship(back_populates="assets")
+
+
+class ApprovalDecision(Base):
+    __tablename__ = "approval_decisions"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"))
+    decision: Mapped[str]
+    reason: Mapped[str | None] = mapped_column(default=None)
+    regenerate_from_stage: Mapped[str | None] = mapped_column(default=None)
+    decided_at: Mapped[datetime] = mapped_column(default=_now)
