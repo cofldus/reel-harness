@@ -232,11 +232,16 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
             temp_path.unlink(missing_ok=True)
             raise LeaseLostSignal(stage.value)
         os.replace(temp_path, official_path)
+        # The old manifest described the video that was just replaced -- remove
+        # it immediately so a stale checksum/validation block can never be read
+        # as describing the new render. A fresh manifest is written only after
+        # VALIDATE succeeds.
+        (official_path.parent.parent / "manifest.json").unlink(missing_ok=True)
         context["render"] = stages.RenderOutput(
             video_path=official_path, ffmpeg_version=render.ffmpeg_version,
             width=render.width, height=render.height,
         )
-        storage.write_bytes(
+        storage.write_bytes_atomic(
             job.id,
             RENDER_META_REL_PATH,
             json.dumps(

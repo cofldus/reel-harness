@@ -156,7 +156,18 @@ def run_rendering(
 
 def run_validating(
     job, video_path: Path, expected_width: int = RENDER_WIDTH, expected_height: int = RENDER_HEIGHT,
+    policy: ffprobe_validate.ValidationPolicy | None = None,
 ) -> ValidationResult:
+    """Validates the actual rendered file against the (production-safe by
+    default) ValidationPolicy: existence, non-empty, ffprobe-parseable,
+    exact resolution, H.264/AAC, audio stream present, duration bounds, and
+    faststart atom ordering. Every violated condition is reported together in
+    the TECHNICAL_VALIDATION_FAILED summary."""
+    policy = policy if policy is not None else ffprobe_validate.DEFAULT_VALIDATION_POLICY
+
+    if not video_path.is_file() or video_path.stat().st_size == 0:
+        raise ValidationFailedError("final video is missing or empty")
+
     deps = check_ffmpeg_available()
     if not deps.ffprobe_available:
         raise DependencyError("ffprobe executable not found on PATH")
@@ -172,11 +183,9 @@ def run_validating(
     except (ValueError, KeyError) as exc:
         raise ValidationFailedError(f"could not parse ffprobe output: {exc}") from exc
 
-    if (validation.width, validation.height) != (expected_width, expected_height):
-        raise ValidationFailedError(
-            f"unexpected resolution {validation.width}x{validation.height}, "
-            f"expected {expected_width}x{expected_height}",
-        )
-    if not validation.has_audio_stream:
-        raise ValidationFailedError("rendered video has no audio stream")
+    failures = ffprobe_validate.check_against_policy(validation, expected_width, expected_height, policy)
+    if policy.require_faststart and not ffprobe_validate.has_faststart(video_path):
+        failures.append("moov atom does not precede mdat (faststart not applied)")
+    if failures:
+        raise ValidationFailedError("; ".join(failures))
     return validation
