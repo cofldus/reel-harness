@@ -95,13 +95,17 @@ def release_lease(session, job: Job, lease_token: str | None = None) -> None:
         job.lease_token = None
         session.commit()
         return
-    session.execute(
+    result = session.execute(
         update(Job)
         .where(Job.id == job.id, Job.lease_token == lease_token)
         .values(locked_by=None, lease_token=None),
     )
     session.commit()
-    session.expire(job)
+    if result.rowcount == 1:
+        # Mirror the DB change on the in-memory object (without expiring it) so
+        # callers can keep using the instance after the session closes.
+        job.locked_by = None
+        job.lease_token = None
 
 
 def find_orphaned_active_jobs(session) -> list[str]:
