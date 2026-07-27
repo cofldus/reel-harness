@@ -17,6 +17,7 @@ class AppContext:
         self.settings = settings or load_settings()
         configure_logging(self.settings.log_level)
         register_secret(self.settings.app_api_key)
+        register_secret(self.settings.llm_api_key)
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
@@ -31,7 +32,7 @@ class AppContext:
         )
 
         return ProviderBundle(
-            llm=resolve_llm_provider("fake"),
+            llm=resolve_llm_provider(self.settings.llm_provider, self.settings),
             tts=resolve_tts_provider("fake"),
             stock_media=resolve_stock_media_provider("fake"),
         )

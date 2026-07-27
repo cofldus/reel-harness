@@ -18,6 +18,9 @@ class TopicResult:
     topic: str
     provider_id: str
     model_id: str
+    # Optional provider-side correlation id. Never contains the request/response
+    # body or any credential.
+    request_id: str | None = None
 
 
 @dataclass
@@ -26,6 +29,10 @@ class ScriptResult:
     provider_id: str
     model_id: str
     prompt_version: str
+    request_id: str | None = None
+    # Token usage metadata as reported by the provider (prompt/completion/total
+    # counts) -- cost accounting only, never message content.
+    usage: dict | None = None
 
 
 @dataclass

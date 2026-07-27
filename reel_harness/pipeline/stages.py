@@ -62,6 +62,13 @@ def run_script_generating(job, channel, llm) -> None:
         "llm_model_id": result.model_id,
         "prompt_version": result.prompt_version,
     }
+    # Correlation metadata only -- never the request/response body or a secret.
+    request_id = getattr(result, "request_id", None)
+    if request_id:
+        job.script["llm_request_id"] = request_id
+    usage = getattr(result, "usage", None)
+    if usage:
+        job.script["llm_token_usage"] = usage
 
 
 def run_policy_checking(job) -> None:

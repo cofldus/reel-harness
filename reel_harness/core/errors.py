@@ -36,6 +36,14 @@ class TransientProviderError(PipelineError):
     retryable = True
 
 
+class ProviderAuthError(PipelineError):
+    """401/403 from an external provider: the configured credential is wrong or
+    lacks permission. Never auto-retried -- retrying cannot fix a bad key."""
+
+    code = "UPSTREAM_AUTH"
+    retryable = False
+
+
 class MissingPrerequisiteError(PipelineError):
     """Resuming a stage requires an earlier stage's persisted output (script,
     assets, tts audio, rendered video, render metadata) and it is missing or
