@@ -104,12 +104,26 @@ def run_tts_generating(job, tts, storage) -> list[TTSResult]:
 
 def run_rendering(
     job, assets: list[AssetFetchResult], tts_results: list[TTSResult], storage,
+    width: int = RENDER_WIDTH, height: int = RENDER_HEIGHT,
 ) -> RenderOutput:
+    """`width`/`height` default to the fast-test resolution used by the normal
+    per-job pipeline. A separate production-smoke check calls this with
+    width=1080, height=1920 to prove the same ffmpeg toolchain produces a
+    real target-resolution vertical video, without changing the resolution
+    every ordinary Fake-provider job renders at (see docs/STATUS.md).
+    """
     deps = check_ffmpeg_available()
     if not deps.ffmpeg_available:
         raise DependencyError("ffmpeg executable not found on PATH")
     ffmpeg_path = deps.ffmpeg.path
     assert ffmpeg_path is not None  # guaranteed by ffmpeg_available above
+
+    # Stale-output policy: a final.mp4 left over from an earlier attempt must
+    # never be mistaken for this run's result, so it is removed before any
+    # rendering starts. If this run fails midway there is no final.mp4 at all.
+    output_path = storage.job_dir(job.id) / "final" / "final.mp4"
+    if output_path.exists():
+        output_path.unlink()
 
     work_dir = storage.job_dir(job.id) / "render"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -117,7 +131,7 @@ def run_rendering(
     for asset, tts_result in zip(assets, tts_results, strict=True):
         clip_path = work_dir / f"scene_{asset.scene_index}.mp4"
         argv = ffmpeg_render.render_scene_clip(
-            ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, RENDER_WIDTH, RENDER_HEIGHT,
+            ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
         )
         result = run(argv, timeout=60)
         if result.returncode != 0:
@@ -126,17 +140,16 @@ def run_rendering(
 
     concat_list_path = work_dir / "concat_list.txt"
     ffmpeg_render.write_concat_list(clip_paths, concat_list_path)
-    output_path = storage.job_dir(job.id) / "final" / "final.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result = run(ffmpeg_render.concat_clips_argv(ffmpeg_path, concat_list_path, output_path), timeout=60)
     if result.returncode != 0:
         raise TransientProviderError(f"ffmpeg concat failed: {result.stderr[-500:]}")
-    return RenderOutput(
-        video_path=output_path, ffmpeg_version=deps.ffmpeg.version, width=RENDER_WIDTH, height=RENDER_HEIGHT,
-    )
+    return RenderOutput(video_path=output_path, ffmpeg_version=deps.ffmpeg.version, width=width, height=height)
 
 
-def run_validating(job, video_path: Path) -> ValidationResult:
+def run_validating(
+    job, video_path: Path, expected_width: int = RENDER_WIDTH, expected_height: int = RENDER_HEIGHT,
+) -> ValidationResult:
     deps = check_ffmpeg_available()
     if not deps.ffprobe_available:
         raise DependencyError("ffprobe executable not found on PATH")
@@ -152,10 +165,10 @@ def run_validating(job, video_path: Path) -> ValidationResult:
     except (ValueError, KeyError) as exc:
         raise ValidationFailedError(f"could not parse ffprobe output: {exc}") from exc
 
-    if (validation.width, validation.height) != (RENDER_WIDTH, RENDER_HEIGHT):
+    if (validation.width, validation.height) != (expected_width, expected_height):
         raise ValidationFailedError(
             f"unexpected resolution {validation.width}x{validation.height}, "
-            f"expected {RENDER_WIDTH}x{RENDER_HEIGHT}",
+            f"expected {expected_width}x{expected_height}",
         )
     if not validation.has_audio_stream:
         raise ValidationFailedError("rendered video has no audio stream")

@@ -39,8 +39,31 @@ def lease_next_job(session, worker_id: str, now: datetime | None = None) -> Job 
 
 
 def release_lease(session, job: Job) -> None:
-    job.locked_by = None
+    """Releases the worker's lease -- unless the job is still in an ACTIVE stage
+    status. Invariant: an ACTIVE job must always have a lease owner; a job whose
+    lease is released must be terminal, RETRY_WAIT, or otherwise leaseable.
+    Unlocking an ACTIVE job would strand it forever (lease_next_job only picks
+    QUEUED/RETRY_WAIT and recover_stale_jobs only looks at locked jobs), so if a
+    caller ever reaches here with an ACTIVE status -- e.g. a crash path that
+    failed to record a final state -- the lease is kept and recover_stale_jobs
+    reclaims the job once the heartbeat goes stale."""
+    if JobStatus(job.status) not in ACTIVE_STAGE_STATUSES:
+        job.locked_by = None
     session.commit()
+
+
+def find_orphaned_active_jobs(session) -> list[str]:
+    """Forbidden-state detector: returns ids of jobs persisted in an ACTIVE
+    stage status with no lease owner. Outside of a transaction in flight, this
+    must always be empty -- such a job can never be leased or recovered."""
+    return list(
+        session.execute(
+            select(Job.id).where(
+                Job.status.in_([s.value for s in ACTIVE_STAGE_STATUSES]),
+                Job.locked_by.is_(None),
+            ),
+        ).scalars(),
+    )
 
 
 def recover_stale_jobs(session, lease_timeout_seconds: int, now: datetime | None = None) -> list[str]:

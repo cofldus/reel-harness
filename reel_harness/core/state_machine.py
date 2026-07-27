@@ -35,6 +35,16 @@ class Stage(StrEnum):
     PUBLISH = "PUBLISH"
 
 
+# Stages a user-facing reject/retry command may name as the resume target.
+# TOPIC is excluded (regenerating a topic is meaningless for user-supplied
+# topics; SCRIPT regeneration covers auto-topic jobs) and PUBLISH is excluded
+# (no publish pipeline exists yet). The worker's own automatic RETRY_WAIT
+# bookkeeping is not restricted by this set.
+RESUMABLE_STAGES: frozenset[Stage] = frozenset({
+    Stage.SCRIPT, Stage.POLICY, Stage.ASSET, Stage.TTS, Stage.RENDER, Stage.VALIDATE,
+})
+
+
 class ReasonCode(StrEnum):
     CONTENT_POLICY_REVIEW = "CONTENT_POLICY_REVIEW"
     ASSET_NOT_FOUND = "ASSET_NOT_FOUND"

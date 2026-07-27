@@ -3,8 +3,38 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, ForeignKey, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, TypeDecorator, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class UTCDateTime(TypeDecorator):
+    """Single datetime policy for the whole schema: store naive UTC in the DB,
+    hand back timezone-aware UTC to Python.
+
+    SQLite has no timezone type -- SQLAlchemy silently drops tzinfo on write, so
+    a value read back in a *new* session is naive while freshly-computed
+    `datetime.now(UTC)` values are aware, and comparing the two raises
+    TypeError. Normalizing at this bind/result boundary means every datetime an
+    application sees is aware UTC, regardless of which session loaded it.
+    Storage format is unchanged (naive UTC), so existing rows stay readable.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
+        return value  # naive values are by convention already UTC
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 def _now() -> datetime:
@@ -16,7 +46,7 @@ def new_uuid() -> str:
 
 
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = {datetime: UTCDateTime}
 
 
 class Channel(Base):

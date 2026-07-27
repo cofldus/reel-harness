@@ -36,6 +36,24 @@ class TransientProviderError(PipelineError):
     retryable = True
 
 
+class MissingPrerequisiteError(PipelineError):
+    """Resuming a stage requires an earlier stage's persisted output (script,
+    assets, tts audio, rendered video, render metadata) and it is missing or
+    corrupted. Never auto-retried: re-running the same stage cannot recreate a
+    predecessor's output -- the operator must retry from the stage that owns it."""
+
+    code = "MISSING_PREREQUISITE"
+    retryable = False
+
+
+class UnsupportedResumeStageError(PipelineError):
+    """retry_target_stage names a stage the pipeline cannot resume from (e.g.
+    PUBLISH, or an unknown value persisted by older code). Never auto-retried."""
+
+    code = "UNSUPPORTED_RESUME_STAGE"
+    retryable = False
+
+
 class ReviewRequiredSignal(Exception):
     """Not a failure: routes the job to REVIEW_REQUIRED with a reason_code."""
 

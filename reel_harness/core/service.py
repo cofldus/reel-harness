@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from reel_harness.core.state_machine import JobStatus, Stage, apply_transition
+from reel_harness.core.state_machine import RESUMABLE_STAGES, JobStatus, Stage, apply_transition
 from reel_harness.db.models import ApprovalDecision, Channel, Job
 from reel_harness.manifest.schema import ApprovalInfo, Manifest
 from reel_harness.manifest.writer import write_manifest
@@ -18,6 +18,20 @@ class JobNotFoundError(Exception):
 
 class InvalidActionError(Exception):
     pass
+
+
+def _parse_retry_target(value: str) -> Stage:
+    """Validates a user-supplied resume target at the service boundary, before
+    any job state is touched. Only RESUMABLE_STAGES are accepted -- PUBLISH and
+    unknown values are user errors here, never worker crashes later."""
+    try:
+        stage = Stage(value)
+    except ValueError as exc:
+        raise InvalidActionError(f"unknown stage: {value!r}") from exc
+    if stage not in RESUMABLE_STAGES:
+        allowed = ", ".join(sorted(s.value for s in RESUMABLE_STAGES))
+        raise InvalidActionError(f"stage {stage.value} is not a supported retry target (allowed: {allowed})")
+    return stage
 
 
 class JobService:
@@ -149,10 +163,7 @@ class JobService:
             job = self._require_job(session, job_id)
             if job.status != JobStatus.REVIEW_REQUIRED.value:
                 raise InvalidActionError(f"job is not awaiting review (status={job.status})")
-            try:
-                Stage(regenerate_from_stage)
-            except ValueError as exc:
-                raise InvalidActionError(f"unknown stage: {regenerate_from_stage!r}") from exc
+            _parse_retry_target(regenerate_from_stage)
 
             session.add(
                 ApprovalDecision(
@@ -180,10 +191,7 @@ class JobService:
             job = self._require_job(session, job_id)
             if job.status != JobStatus.FAILED.value:
                 raise InvalidActionError(f"can only manually retry a FAILED job (status={job.status})")
-            try:
-                Stage(stage)
-            except ValueError as exc:
-                raise InvalidActionError(f"unknown stage: {stage!r}") from exc
+            _parse_retry_target(stage)
 
             job.retry_count = 0
             apply_transition(
