@@ -132,9 +132,10 @@ first argument. `reel-harness doctor` reports the resolved absolute path,
 version string (parsed from `<binary> -version`), and which tier it came from
 (`env` / `project_local` / `path` / `not_found`) for both binaries. None of
 this installs or downloads anything — a miss at every tier is reported as
-`not_found`/`BLOCKED_DEPENDENCY`, not silently worked around. As of this
-session, this dev machine has no ffmpeg/ffprobe at any tier — see
-`docs/STATUS.md` for exactly what that blocks.
+`not_found`/`BLOCKED_DEPENDENCY`, not silently worked around. This machine
+currently resolves both binaries via the project-local
+`.tools/ffmpeg/bin/` tier (gitignored, provisioned locally, not committed) —
+see `docs/STATUS.md` for the resolved version and how that was verified.
 
 Subtitle overlay burn-in and BGM mixing are **not implemented** — `RENDERING`
 currently produces a still-image-plus-TTS-audio clip per scene and concatenates

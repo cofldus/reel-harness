@@ -1,7 +1,7 @@
 # Status
 
-Last updated: 2026-07-23 (Phase 1 completion-gate session, following the
-initial Phase 0/1 implementation session the same day).
+Last updated: 2026-07-27 (Phase 1 critical remediation session, following an
+independent audit).
 
 ## Phase 0 — COMPLETE
 
@@ -12,182 +12,227 @@ Protocol, CLI entry point, FastAPI entry point), test config, `.gitignore`,
 `.env.example`.
 
 - `reel_harness`, `reel_harness.api.app`, `reel_harness.cli.main` import successfully.
-- `reel-harness doctor` runs and reports resolved ffmpeg/ffprobe path, version, and source.
+- `reel-harness doctor` reports resolved ffmpeg/ffprobe path, version, and source.
 - `ruff check reel_harness tests` — all checks passed.
 - `mypy reel_harness` — no issues found in 40 source files.
-- `pytest` — 87 passed, 0 skipped, 0 failed.
 
-## Phase 1 — IN_PROGRESS (corrected from an earlier, premature "DONE")
+## Phase 1 — COMPLETE
 
-An earlier report in this session marked Phase 1 complete. That was wrong:
-real FFmpeg rendering, ffprobe validation, and the approve/reject flow
-against an actually-rendered video had never been executed. This section
-supersedes that claim.
+Two earlier reports in this session marked Phase 1 complete, then walked that
+back to IN_PROGRESS once it became clear real ffmpeg rendering had never
+actually executed. Both were superseded by placing real ffmpeg/ffprobe
+binaries at `.tools/ffmpeg/bin/{ffmpeg,ffprobe}.exe` (project-local, gitignored)
+and re-running every completion criterion for real. This time all of them
+passed:
 
-**Verified for real, against actual binaries/files, no mocking of success:**
+- **ffmpeg/ffprobe resolved from the project-local tier**: `reel-harness
+  doctor` reports `path=.tools/ffmpeg/bin/ffmpeg.exe`,
+  `version=8.1.2-essentials_build-www.gyan.dev`, `source=project_local` (and
+  the same for ffprobe).
+- **Full vertical slice, real binaries, no mocking**: a real CLI-driven job
+  went `CREATED -> QUEUED -> SCRIPT_GENERATING -> POLICY_CHECKING ->
+  ASSET_FETCHING -> TTS_GENERATING -> RENDERING -> VALIDATING ->
+  REVIEW_REQUIRED -> (approve) -> READY -> COMPLETED`. Every stage transition
+  was logged live via the structured JSON logger.
+- **Real artifacts confirmed on disk**: `jobs/{id}/final/final.mp4` (14.5KB,
+  a real playable H.264/AAC mp4), `jobs/{id}/manifest.json` with real,
+  non-null values -- see the manifest excerpt below.
+- **production-smoke, 1080x1920, real ffmpeg**:
+  `tests/e2e/test_production_smoke.py::test_production_smoke_1080x1920`
+  renders a 3-scene video at 1080x1920 with the real toolchain and asserts:
+  resolution exactly 1080x1920, `video_codec=="h264"`, `audio_codec=="aac"`,
+  `has_audio_stream is True`, duration within `[4.5s, 60s]`, and `moov`
+  precedes `mdat` in the file (the real, file-level signature of
+  `-movflags +faststart` actually taking effect). Passed for real.
+- **Approve flow, real manifest**: `job-approve` on a real REVIEW_REQUIRED job
+  transitioned it to `COMPLETED` and stamped the *real* `manifest.json`'s
+  `approval.decision="approve"` / `approval.decided_at=<real timestamp>` --
+  read back from disk after the CLI call, not asserted from memory.
+- **Reject/regenerate flow, real re-execution**: `job-reject --from-stage
+  SCRIPT` on a second real REVIEW_REQUIRED job moved it to `RETRY_WAIT`
+  (`retry_target_stage=SCRIPT`, `failure_code=USER_REJECTED`), and the next
+  `worker-run-once` call re-ran the *entire* remaining pipeline for real
+  (SCRIPT through VALIDATE, each stage logged) and reached `REVIEW_REQUIRED`
+  again with a freshly rendered `final.mp4`.
+- **Manifest completeness, real values** (see excerpt below): `job_id`,
+  `schema_version`, `topic`, structured `script` (via `job.script`, not
+  shown in the manifest file itself but present on the `Job` row), provider
+  identifiers, per-asset checksums, `FAKE_TEST_LICENSE` on every asset,
+  real `ffmpeg_version`, real `final_video_checksum_sha256`, real
+  `validation` block, real `approval` block after approve.
+- **Secret redaction**: unchanged from the prior pass, still passing;
+  structured logs observed live during this session's CLI runs never
+  contained the app API key or an Authorization/Bearer value.
+- **Test gate**: `ruff check` all clean, `mypy` 40 files no issues, `pytest`
+  **88 passed, 0 failed, 0 skipped** -- zero skips anywhere, core or
+  otherwise. (Superseded by the remediation section below: the suite is now
+  99 tests, and two of the claims in this section were later disproven and
+  fixed.)
 
-- Channel creation, idempotent job creation (`job_id` returned immediately),
-  worker lease, crash recovery.
-- `FakeLLMProvider` script generation + Pydantic schema validation.
-- Deterministic policy check.
-- `FakeStockMediaProvider` asset fetch — writes real, checksummed, valid PNGs
-  under `jobs/{job_id}/assets/scene_*/`.
-- `FakeTTSProvider` synthesis — writes real WAV files under
-  `jobs/{job_id}/tts/scene_*/`, duration scaled to voiceover length.
-- ffmpeg/ffprobe path resolution (env var -> `.tools/ffmpeg/bin` ->
-  `PATH`), exposed via `reel-harness doctor` with absolute path/version/source.
-- Structured JSON stage logs (`job_id`/`stage`/`attempt`/`event`/`duration_ms`/
-  `error_code`) with secret redaction, observed live on stderr during a real
-  CLI run.
-- `JobService.reject()` -> `RETRY_WAIT` -> resume -> re-executes the targeted
-  stage for real (not skipped due to missing ffmpeg — see Test results).
-- `JobService.approve()` -> `READY` -> `COMPLETED`, and stamps
-  `manifest.json`'s `approval.decision`/`approval.decided_at` for real.
-- Manifest schema extended with `render`/`validation`/
-  `final_video_checksum_sha256` fields (populated only when a real
-  RENDER/VALIDATE pass supplies them) and an `is_publish_eligible()` helper
-  that rejects `FAKE_TEST_LICENSE` assets and unapproved jobs.
+## Phase 1 critical remediation — 2026-07-27
 
-**Genuinely blocked, not attempted, not faked — requires an operator decision:**
+An independent read-only audit disproved two Phase 1 completion claims with
+live reproductions. Both were fixed this session, plus the underlying
+worker-safety gap. Nothing below is synthesized: every "reproduced" and
+"verified" line was an actual CLI/pytest run against real ffmpeg/ffprobe.
 
-- **A real end-to-end run reaching `COMPLETED` with an actual `final.mp4`.**
-  This machine has no ffmpeg/ffprobe at any resolution tier (env var,
-  `.tools/ffmpeg/bin`, PATH). `RENDERING` correctly raises
-  `DependencyError(code=BLOCKED_DEPENDENCY)` (non-retryable) and the job lands
-  in `FAILED` / `current_stage=RENDER`. Confirmed live via CLI in this session
-  (see Manual verification below), not mocked.
-- **production-smoke** (1080x1920, H.264/AAC, faststart, real ffprobe JSON) —
-  cannot be produced without a real ffmpeg/ffprobe binary. Not attempted.
-- **ffmpeg version / final video checksum in a real manifest** — the schema
-  fields exist and are unit-tested with synthetic data, but no real value has
-  ever been written into them on this machine.
+### Defects found (all reproduced before fixing)
 
-This session did **not** install ffmpeg, did **not** download a binary, and
-did **not** mock `shutil.which`/the resolver to fake success in the E2E path
-— per instruction. `reel-harness doctor` and `check_ffmpeg_available()`
-report the real, current state of this machine every time they're called.
+1. **BLOCKER: resume context was never restored.** `run_job()` passed
+   inter-stage data only through an in-memory dict, so any resume targeting
+   TTS/RENDER/VALIDATE (reject, automatic RENDER retry, manual retry) crashed
+   the worker with `KeyError: 'assets'`, and the CLI's unconditional lease
+   release then stranded the job as `RENDERING` + `locked_by=NULL` -- a state
+   no lease or recovery path could ever pick up again.
+2. **BLOCKER: stale-lease recovery crashed cross-process.** `heartbeat_at`
+   read back from SQLite is naive while the recovery threshold was aware UTC:
+   `recover_stale_jobs()` raised `TypeError` in any fresh process, and since
+   recovery runs before leasing, one crashed worker bricked every subsequent
+   `worker-run-once`. The old test compared same-session aware objects and
+   could not catch this.
+3. **HIGH: unexpected exceptions stranded jobs.** Any non-`PipelineError`
+   escaping a stage left the job ACTIVE while the lease was released.
 
-**To unblock**: install ffmpeg (bundles ffprobe) so both resolve via any of
-the three tiers, then run a fresh job (or `reel-harness job-retry <id>
---stage RENDER` on an existing `FAILED` one). No code changes are needed —
-every stage after RENDER already has real code and passing unit-level tests;
-they have never executed against a real binary on this machine.
+### Fixes
+
+- **Persistent resume context** (`worker/runner.py`): ASSET success now
+  persists `Asset` rows (replace-per-attempt); RENDER success persists
+  `render/render_meta.json`; `_restore_context()` rebuilds assets (checksum-
+  verified against the files on disk), TTS results (duration re-read from the
+  actual WAV headers), and render output purely from DB + job storage. A
+  missing/corrupt prerequisite fails explicitly with `MISSING_PREREQUISITE`
+  naming the gap; an unsupported persisted resume target fails with
+  `UNSUPPORTED_RESUME_STAGE`. Stale-output policy: `run_rendering()` deletes
+  any pre-existing `final.mp4` before rendering, and the manifest checksum is
+  always recomputed from the file on disk after success.
+- **Datetime policy** (`db/models.py`): a `UTCDateTime` TypeDecorator on every
+  datetime column stores naive UTC and returns aware UTC, so values compare
+  correctly regardless of which session loaded them. Storage format is
+  unchanged; existing rows stay readable.
+- **Unexpected-exception boundary** (`worker/runner.py`): `run_job()` no
+  longer propagates non-`PipelineError` exceptions; it rolls back, closes any
+  running StageRun as failed, and moves the job to FAILED with
+  `UNEXPECTED_PIPELINE_ERROR` (short summary, no traceback).
+  `KeyboardInterrupt`/`SystemExit` still propagate.
+- **Lease invariant** (`worker/lease.py`): `release_lease()` refuses to unlock
+  a job still in an ACTIVE stage status (recovery reclaims it instead), and
+  `find_orphaned_active_jobs()` detects the forbidden ACTIVE+unlocked state.
+- **Retry-target validation** (`core/service.py` + `core/state_machine.py`):
+  reject/manual-retry targets are validated against `RESUMABLE_STAGES`
+  (SCRIPT/POLICY/ASSET/TTS/RENDER/VALIDATE); PUBLISH/TOPIC/unknown values are
+  clean user errors that change no job state.
+- **StageRun attempts** (`worker/runner.py`): attempt numbers now come from
+  the StageRun history (`max(attempt)+1`), not `retry_count+1`, so a reject
+  re-run records attempt 2 instead of a second attempt 1. History is never
+  deleted or overwritten.
+
+### Verification (this session, all real)
+
+- Targeted regression tests: 11 new tests in
+  `tests/integration/test_resume_from_stage.py` (reject->RENDER/TTS/VALIDATE
+  resume with StageRun/checksum assertions, automatic RENDER retry with a real
+  nonzero-exit "ffmpeg" and a planted stale final.mp4, manual retry of a
+  FAILED job, invalid-target rejection at both the service boundary and the
+  worker, missing-prerequisite failure) and
+  `tests/integration/test_worker_crash_recovery.py` (stale recovery after a
+  real engine-dispose/reopen DB roundtrip, unexpected-exception containment,
+  release-lease guard). All passed.
+- Full suite: **99 passed, 0 failed, 0 skipped** (88 pre-existing + 11 new).
+- production-smoke (real ffmpeg 8.1.2, 1080x1920, h264/aac/faststart/duration
+  checks): passed.
+- Manual CLI E2E on a scratch DB: `job-reject --from-stage RENDER` then
+  `worker-run-once` resumed with RENDER/VALIDATE attempt 2 only (earlier
+  stages untouched), reached REVIEW_REQUIRED, manifest checksum matched the
+  current `final.mp4`, `approval` unset.
+- Manual cross-process stale recovery on the audit session's stuck DB: the
+  previously bricked `worker-run-once` now recovers the dead-worker job to
+  RETRY_WAIT (`WORKER_CRASHED`); the legacy pre-fix job (no persisted Asset
+  rows) then failed explicitly with `MISSING_PREREQUISITE` and was fully
+  revived via `job-retry --stage ASSET` through to REVIEW_REQUIRED.
+- Forbidden-state sweep (`ACTIVE` + `locked_by IS NULL`): 0 rows in every DB
+  touched by the fixed code.
+- `mypy`: no issues in 40 source files. `ruff check`: **not verified this
+  session** -- the ruff native executable (and `uv.exe`) is blocked by this
+  machine's OS Application Control policy; no equivalent execution path
+  exists in the venv. The 2026-07-23 "ruff all clean" claim predates this
+  session's changes.
+
+### Known limitation
+
+Jobs that were already stranded as ACTIVE+unlocked by the *old* code are not
+retroactively repaired (the fixed code can no longer create that state, and
+`release_lease` now prevents new occurrences). Any such legacy row needs a
+one-time manual DB edit.
+
+### Real manifest excerpt (from the approved job, `approval` block added after approve)
+
+```json
+{
+  "job_id": "24dc85b5-1f7d-4eb5-8ae5-226b0b21f8fe",
+  "topic": "5 minute fried rice",
+  "assets": [{"license_type": "FAKE_TEST_LICENSE", "checksum_sha256": "ed301f72..."}, "... x3"],
+  "render": {"ffmpeg_version": "8.1.2-essentials_build-www.gyan.dev", "width": 360, "height": 640},
+  "validation": {"duration_sec": 8.074, "video_codec": "h264", "audio_codec": "aac", "has_audio_stream": true},
+  "final_video_checksum_sha256": "4fa62f31872b4eb541328d2d8cb8cdd22fa3a763f9596b1945688686e2161c72",
+  "approval": {"decision": "approve", "decided_at": "2026-07-23T08:23:58.515499Z"}
+}
+```
+
+Standard per-job renders (via `worker.run_job`) still use the fast-test
+resolution (360x640) by design -- `pipeline.stages.run_rendering`/
+`run_validating` now take optional `width`/`height` parameters (default
+360x640) precisely so the separate production-smoke check could exercise
+1080x1920 through the same code path without changing what every ordinary
+job renders at. `FAKE_TEST_LICENSE` is confirmed to still make
+`manifest.is_publish_eligible()` return `False`.
 
 ## worker/marker naming — investigated, no issue found
 
-A later instruction referred to `reel_harness/marker/{policy,lease,runner}.py`
-and asked whether that was a typo. It is not present anywhere in this
-codebase (confirmed via `grep`/`glob` across the repo) — the module has always
-been `reel_harness/worker/{policy,lease,runner}.py`. No rename was needed;
-the "marker" reference did not originate from this code or from this
-project's own documentation.
+`reel_harness/marker` does not exist anywhere in this codebase; the module
+has always been `reel_harness/worker/{policy,lease,runner}.py`.
 
 ## Known environment issue (Windows + non-ASCII path) — WORKED AROUND
 
-This repo's absolute path (`C:\Users\이채연\umma`) contains Korean characters.
-`uv sync`'s default project install writes an editable-install `.pth` file
-containing that literal path; Python's `site.py` opens `.pth` files using the
-system **locale** encoding (cp949 here) regardless of UTF-8 mode, and Python
-3.11.0 crashes with `Fatal Python error: init_import_site` /
-`UnicodeDecodeError: 'cp949' codec can't decode byte 0xec ...` merely by
-starting the interpreter in the venv.
-
-**Workaround in place** (already reflected in how every command in this repo
-must be run):
+This repo's absolute path (`C:\Users\이채연\umma`) contains Korean characters,
+which breaks `uv`'s default editable project install (`site.py` decodes
+`.pth` files using the cp949 locale codec regardless of UTF-8 mode). Fix in
+use, unchanged from before:
 
 ```
-uv sync --extra dev --no-install-project      # installs deps only, once
-uv run --no-sync <command>                     # --no-sync stops uv from
-                                                # re-installing the project
-                                                # (which recreates the bad .pth)
+uv sync --extra dev --no-install-project
+uv run --no-sync <command>          # with PYTHONPATH=. set for ad-hoc invocations
 ```
 
-`pytest` picks up the package via `[tool.pytest.ini_options] pythonpath =
-["."]` in `pyproject.toml`. For ad-hoc `python -m ...` invocations outside
-pytest, set `PYTHONPATH=.` explicitly (see Manual verification below).
+## ffmpeg/ffprobe resolution
 
-This is a workaround, not a fix — `reel_harness` is never `pip install`-ed
-into the venv at all right now. Changing the Windows system locale to UTF-8
-would fix it at the root cause, but that's a system-wide, reboot-requiring
-change this session did not make.
-
-## Manual CLI verification (this session, scratch dirs deleted afterward)
-
-```
-reel-harness doctor
-  -> ffmpeg: {"available": false, "path": null, "version": null, "source": "not_found"}
-  -> ffprobe: same
-reel-harness channel-create --name cooking-shorts --niche "quick recipes" --language en
-reel-harness job-create --channel-id <id> --topic "5 minute fried rice"   # -> QUEUED
-reel-harness worker-run-once
-  -> real stderr log lines: stage_started/stage_succeeded for SCRIPT, POLICY, ASSET, TTS
-  -> stage_failed for RENDER, error_code=BLOCKED_DEPENDENCY
-  -> final status: FAILED, current_stage=RENDER, failure_code=BLOCKED_DEPENDENCY
-```
-
-Confirmed on disk before cleanup: real checksummed PNGs under
-`assets/scene_*/`, real WAV files under `tts/scene_*/`, all isolated under
-that one job's directory. `final/final.mp4` and `manifest.json` do **not**
-exist for this job, consistent with RENDER never succeeding.
+Resolution order (`reel_harness/media/deps.py`): `REEL_HARNESS_FFMPEG_PATH` /
+`REEL_HARNESS_FFPROBE_PATH` env var -> `<project_root>/.tools/ffmpeg/bin/` ->
+system `PATH`. On this machine both binaries are now present at
+`.tools/ffmpeg/bin/{ffmpeg,ffprobe}.exe` (gitignored via `.tools/` in
+`.gitignore` -- not intended to be committed). `reel-harness doctor` reports
+the resolved absolute path, version, and which tier resolved it.
 
 ## Test results (`pytest -v`, this session)
 
 ```
-87 passed, 0 skipped, 0 failed
+99 passed, 0 skipped, 0 failed   (88 collected before this session's 11 new regression tests)
 ```
 
-Zero skips in the core suite — the one skip present in the prior session's
-run (`test_reject_routes_back_to_the_requested_stage_via_retry_wait`, which
-used to require a real REVIEW_REQUIRED reached via rendering) was eliminated
-by redesigning that test to synthesize the REVIEW_REQUIRED state the same way
-a real render would leave it, so the reject/approve *mechanics* are verified
-independently of whether ffmpeg is installed. This is documented in the
-test's own docstring so it is not mistaken for a claim that rendering
-succeeded.
-
-Newly covered in this gate-completion pass: ffmpeg/ffprobe resolution
-priority (env var / project-local `.tools` / PATH) and version parsing,
-structured-log redaction (Authorization/Bearer patterns and a registered
-secret value, verified via `caplog`), manifest `render`/`validation`/checksum
-field population and JSON roundtrip, `is_publish_eligible()` against
-FAKE_TEST_LICENSE/missing-license/no-assets/unapproved cases, approve's real
-manifest-stamping, reject's real resume-and-re-execute behavior.
-
-Previously covered (still passing): allowed/forbidden state transitions incl.
-required-field validation, idempotent job creation incl. a 16-thread race
-test, three concurrent jobs' directory isolation, worker lease race (two
-sessions), RETRY_WAIT backoff timing, crash recovery via stale heartbeat,
-cancel-before-next-stage, manual retry-from-FAILED, malformed/too-few-scenes
-script rejection, Fake provider failure-injection modes, ffmpeg/ffprobe argv
-construction (incl. the Windows-backslash concat-list bug fixed via
-`Path.as_posix()`), process-tree cancellation, FastAPI auth + job-creation
-smoke test, real-network-blocked sanity check, no-temp-leak check.
-
-## Phase 1 completion criteria — outstanding
-
-Phase 1 becomes COMPLETE only once, on a machine with ffmpeg/ffprobe
-resolvable by `reel-harness doctor`:
-
-- [ ] A real job reaches `COMPLETED` with a real `jobs/{id}/final/final.mp4`
-- [ ] `manifest.json` contains a real ffmpeg version, real render dimensions,
-      real ffprobe validation results, and a real final-video checksum
-- [ ] A production-smoke run (1080x1920, H.264/AAC, faststart) passes real
-      ffprobe validation
-- [ ] The approve flow is re-verified against that real manifest (already
-      verified against a synthesized one — see Test results)
-
-None of these are satisfied on this machine as of this update.
+All previously-skipped tests were fixed to synthesize their precondition
+state when the real environment doesn't naturally produce it (rather than
+skip), so there are zero conditional skips left in the suite regardless of
+whether ffmpeg is present on a given machine.
 
 ## Phase 2 entry conditions
 
-Phase 2 (a real LLM provider) is **not started**, per instruction. Before
-starting it: pick a real vendor (open decision below) and resolve the Phase 1
-completion criteria above.
+Phase 1's completion criteria are now satisfied. Phase 2 (a real LLM
+provider) has **not** been started, per instruction -- picking a vendor
+remains an open decision for the user to make first.
 
 ## Open decisions (not made this session)
 
 - Which real LLM/TTS/stock-media/publish vendors to integrate in Phase 2/3.
-- Whether/when to install ffmpeg on this machine (or point
-  `REEL_HARNESS_FFMPEG_PATH`/`REEL_HARNESS_FFPROBE_PATH` at an existing
-  install, or place one under `.tools/ffmpeg/bin`).
 - Whether to move off SQLite/local-only before real usage data exists.
+- Whether/how `.tools/ffmpeg/bin` binaries should be provisioned on other
+  machines (this session did not commit or distribute them; they are
+  gitignored and were placed locally by the user).
