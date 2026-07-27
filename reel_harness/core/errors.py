@@ -36,6 +36,16 @@ class TransientProviderError(PipelineError):
     retryable = True
 
 
+class ProviderNotConfiguredError(PipelineError):
+    """A job's pinned provider snapshot cannot be satisfied by the current
+    configuration (provider unregistered, credentials missing, or endpoint host
+    mismatch). Never auto-retried and never silently replaced by another
+    provider -- the operator must fix the configuration and retry explicitly."""
+
+    code = "PROVIDER_NOT_CONFIGURED"
+    retryable = False
+
+
 class ProviderAuthError(PipelineError):
     """401/403 from an external provider: the configured credential is wrong or
     lacks permission. Never auto-retried -- retrying cannot fix a bad key."""

@@ -151,11 +151,72 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
         )
         heartbeat.start()
         try:
-            run_job(session, job, channel, ctx.default_providers(), ctx.storage, lease_token=lease_token)
+            run_job(session, job, channel, ctx.providers_for_job(job), ctx.storage, lease_token=lease_token)
         finally:
             heartbeat.stop()
             release_lease(session, job, lease_token=lease_token)
     _print_job(job)
+    return 0
+
+
+def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Opt-in check of the configured real LLM provider: one minimal script
+    generation with retries disabled, schema-validated, secrets redacted. The
+    default test suites never run this -- it is an operator command."""
+    from reel_harness.config import normalize_provider_name
+    from reel_harness.core.errors import (
+        ProviderAuthError,
+        SchemaValidationError,
+        TransientProviderError,
+    )
+    from reel_harness.observability import redact
+    from reel_harness.pipeline.script_schema import parse_script
+    from reel_harness.providers.base import ChannelContext
+    from reel_harness.providers.registry import resolve_llm_provider
+
+    name = normalize_provider_name(ctx.settings.llm_provider)
+    if name == "fake":
+        print(
+            "llm provider is 'fake' -- nothing to smoke. Set "
+            "REEL_HARNESS_LLM_PROVIDER=openai_compatible (plus base URL, model, "
+            "API key) to check a real provider.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Startup validation already guaranteed base URL/model/key are present.
+    smoke_settings = ctx.settings.model_copy(update={"llm_max_retries": 0})
+    provider = resolve_llm_provider(name, smoke_settings)
+    try:
+        result = provider.generate_script(
+            "a 30 second kitchen tip",  # minimal, fixed topic: one request, no retries
+            ChannelContext(channel_id="provider-smoke", niche="general", language="en", style_preset={}),
+        )
+        script = parse_script(result.raw_text)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient provider error (timeout/rate limit/5xx): {redact(str(exc))}", file=sys.stderr)
+        return 4
+    except SchemaValidationError as exc:
+        print(f"response schema error (malformed/empty/refusal): {redact(str(exc))}", file=sys.stderr)
+        return 5
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+
+    print(json.dumps({
+        "provider": result.provider_id,
+        "model": result.model_id,
+        "prompt_version": result.prompt_version,
+        "request_id": result.request_id,
+        "token_usage": result.usage,
+        "script_title": script.title,
+        "scene_count": len(script.scenes),
+        "schema_valid": True,
+    }, indent=2))
     return 0
 
 
@@ -265,13 +326,26 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Exit (code 1) after the first job that ends FAILED")
     worker_run.set_defaults(func=cmd_worker_run)
 
+    provider_smoke = sub.add_parser(
+        "provider-smoke", help="One real request against the configured provider (opt-in)",
+    )
+    provider_smoke.add_argument("target", choices=["llm"])
+    provider_smoke.set_defaults(func=cmd_provider_smoke)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    from reel_harness.config import ProviderConfigurationError
+
     parser = build_parser()
     args = parser.parse_args(argv)
-    ctx = AppContext()
+    try:
+        ctx = AppContext()
+    except ProviderConfigurationError as exc:
+        # Clear operator-facing failure, no traceback, no network attempted.
+        print(f"provider configuration error: {exc}", file=sys.stderr)
+        return 2
     return args.func(args, ctx)
 
 

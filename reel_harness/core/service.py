@@ -40,9 +40,15 @@ class JobService:
     exactly one place. Each method opens and closes its own session -- callers
     never see a live SQLAlchemy session, only detached ORM objects."""
 
-    def __init__(self, session_factory, storage: StorageBackend | None = None) -> None:
+    def __init__(
+        self, session_factory, storage: StorageBackend | None = None,
+        provider_snapshot: dict | None = None,
+    ) -> None:
         self._session_factory = session_factory
         self._storage = storage
+        # Captured onto every created job so retries/resumes keep using the
+        # provider configuration the job was created with (never the API key).
+        self._provider_snapshot = provider_snapshot
 
     def _record_approval_in_manifest(self, job_id: str, decision: str, decided_at: datetime) -> None:
         """Best-effort: if manifest.json exists for this job (it does once a
@@ -97,6 +103,7 @@ class JobService:
             job = Job(
                 channel_id=channel_id, idempotency_key=idempotency_key,
                 topic=topic, status=JobStatus.CREATED.value,
+                provider_config=dict(self._provider_snapshot) if self._provider_snapshot else None,
             )
             session.add(job)
             try:
