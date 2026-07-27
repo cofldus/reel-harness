@@ -1,7 +1,59 @@
 # Status
 
-Last updated: 2026-07-27 (Phase 1 critical remediation session, following an
-independent audit).
+Last updated: 2026-07-27 (Phase 2A reliability-foundation session, on branch
+`phase2/reliability-foundation`).
+
+## Phase 2A — reliability foundation + real LLM plumbing (IN PROGRESS, this branch)
+
+Implemented and tested this session (each landed as its own commit; all
+verification real, no mocked E2E claims):
+
+- **Persisted-error redaction**: one `observability.redact()` rule set backs
+  the logging filter AND every persisted error field (`failure_summary`,
+  `StageRun.error_detail`, the reject reason, the failure fields now echoed
+  by the job API). Patterns cover bearer/basic auth, authorization headers,
+  api-key style headers/params/JSON fields, credential-named URL query
+  values, and `sk-` style keys; registered secrets are replaced
+  longest-first, values under 8 chars are never registered.
+- **Renewable leases + fencing**: every lease mints a `lease_token`;
+  heartbeats, stage commits, status transitions, manifest writes, and
+  release are token-guarded at the DB level (the fence UPDATE holds SQLite's
+  write lock through the commit — no check-then-commit gap). A
+  `LeaseHeartbeat` thread refreshes the heartbeat during long stages
+  (defaults: 60s interval vs 300s timeout, both settings). RENDER goes to a
+  worker-private temp file and is promoted under a held fence; recovery
+  rotates the token. Multi-worker takeover is covered by a real two-thread
+  test on a file DB: the late worker's commit is refused, its StageRun is
+  closed as `lease_lost`, attempt numbers never duplicate, and only the new
+  owner's manifest/output are official.
+- **Atomic manifests + strict validation**: manifest/render-metadata writes
+  are temp-file + fsync + `os.replace`; a new render deletes the stale
+  manifest at promote time. Pipeline VALIDATE now enforces H.264/AAC, audio
+  stream presence, exact resolution, duration bounds, and faststart on every
+  render (fake 360x640 included), reporting all violated conditions together.
+- **Real LLM plumbing (no live calls)**: a vendor-neutral OpenAI-compatible
+  adapter behind the registry, fully configured via settings/.env
+  (`llm_provider=openai-compatible`, base URL, model, API key, timeouts,
+  retries). Error mapping: 401/403 non-retryable `UPSTREAM_AUTH`; 429
+  (Retry-After honored) / 5xx / timeouts retried within bounds; empty or
+  refused responses are `SCHEMA_INVALID`. The API key is env-only, redacted
+  everywhere, and never persisted. Contract tests use `httpx.MockTransport`
+  (no sockets), so the whole suite still runs with the network-block fixture
+  and the fake provider remains the default. `httpx` is currently a dev
+  dependency; promote it to a runtime dependency (pyproject + uv.lock) before
+  actually enabling a real provider — `uv` could not be run on this machine
+  (blocked by the OS application-control policy), so the lockfile was left
+  untouched.
+
+Not in scope / not yet: real TTS or stock-media vendors, publishing, OAuth,
+multi-node queues, live API calls. Multi-worker operation is now protected by
+fencing but the polling loop is still `worker-run-once` per invocation.
+
+Suite after Phase 2A: **142 passed, 0 failed, 0 skipped** (99 -> 142; new
+lease/heartbeat, multi-worker, redaction, atomic-manifest/validation, and
+adapter contract tests). mypy clean (42 files). ruff remains blocked by the
+OS application-control policy on this machine (NOT VERIFIED — run it once in
+an unrestricted environment).
 
 ## Phase 0 — COMPLETE
 
