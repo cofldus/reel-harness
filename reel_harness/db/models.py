@@ -90,6 +90,11 @@ class Job(Base):
     parent_job_id: Mapped[str | None] = mapped_column(default=None)
 
     locked_by: Mapped[str | None] = mapped_column(default=None)
+    # Rotated on every lease acquisition and cleared by stale recovery: the
+    # fencing token. Stage results/status transitions only commit through a
+    # guarded UPDATE that matches this value, so a worker whose lease was
+    # reclaimed can never write results over the new owner's.
+    lease_token: Mapped[str | None] = mapped_column(default=None)
     heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
 
     created_at: Mapped[datetime] = mapped_column(default=_now)

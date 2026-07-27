@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import uuid
 import wave
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,7 +23,14 @@ from reel_harness.manifest.writer import build_manifest, write_manifest
 from reel_harness.observability import log_stage_event, redact
 from reel_harness.pipeline import stages
 from reel_harness.providers.base import LLMProvider, Publisher, StockMediaProvider, TTSProvider, TTSResult
+from reel_harness.worker.lease import assert_lease
 from reel_harness.worker.policy import ACTIVE_STAGE_STATUSES, STAGE_ENTRY_STATUS, STAGE_ORDER, STAGE_RETRY_POLICY
+
+
+class LeaseLostSignal(Exception):
+    """Internal worker outcome: this worker's lease was reclaimed while it was
+    executing. Not a job failure -- the new lease owner is responsible for the
+    job now; this worker must stop without writing any job state."""
 
 TTS_VOICE_ID = "fake-voice-1"
 
@@ -179,7 +188,7 @@ def _restore_context(session, job, providers: ProviderBundle, storage, full_orde
 
 
 def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundle, storage,
-                   context: dict) -> None:
+                   context: dict, lease_token: str | None = None) -> None:
     if stage is Stage.TOPIC:
         stages.run_topic_generating(job, channel, providers.llm)
     elif stage is Stage.SCRIPT:
@@ -208,8 +217,25 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
     elif stage is Stage.TTS:
         context["tts_results"] = stages.run_tts_generating(job, providers.tts, storage)
     elif stage is Stage.RENDER:
-        render = stages.run_rendering(job, context["assets"], context["tts_results"], storage)
-        context["render"] = render
+        # Render into a worker-private temp file, then promote it to the
+        # official final.mp4 only while the lease is provably held (the guarded
+        # UPDATE in assert_lease keeps SQLite's write lock until this stage's
+        # commit), so a fenced-out worker can never clobber the new owner's
+        # output. On lease loss only our own temp file is cleaned up.
+        official_path = storage.job_dir(job.id) / "final" / "final.mp4"
+        temp_path = official_path.parent / f"final-inprogress-{uuid.uuid4().hex}.mp4"
+        render = stages.run_rendering(
+            job, context["assets"], context["tts_results"], storage, output_path=temp_path,
+        )
+        if not assert_lease(session, job.id, lease_token):
+            session.rollback()
+            temp_path.unlink(missing_ok=True)
+            raise LeaseLostSignal(stage.value)
+        os.replace(temp_path, official_path)
+        context["render"] = stages.RenderOutput(
+            video_path=official_path, ffmpeg_version=render.ffmpeg_version,
+            width=render.width, height=render.height,
+        )
         storage.write_bytes(
             job.id,
             RENDER_META_REL_PATH,
@@ -266,9 +292,32 @@ def _next_attempt_number(session, job, stage: Stage) -> int:
     return (previous or 0) + 1
 
 
-def _run_single_stage(session, job, channel, providers, storage, stage: Stage, context: dict) -> bool:
+def _abandon_stage_run(session, stage_run_id: str, note: str) -> None:
+    """Closes this worker's own (already committed) StageRun row after a lost
+    lease. Touches only the stage_runs table -- never the fenced jobs row."""
+    run = session.get(StageRun, stage_run_id)
+    if run is not None and run.status == "running":
+        run.status = "lease_lost"
+        run.error_detail = note
+        run.finished_at = _utcnow()
+        session.commit()
+
+
+def _fenced_commit(session, job, lease_token: str | None, stage: Stage) -> None:
+    """Commits the pending stage result iff this worker still owns the lease.
+    On a lost lease the transaction is rolled back untouched and LeaseLostSignal
+    is raised -- no status change, no StageRun success, no manifest."""
+    if not assert_lease(session, job.id, lease_token):
+        session.rollback()
+        raise LeaseLostSignal(stage.value)
+    session.commit()
+
+
+def _run_single_stage(session, job, channel, providers, storage, stage: Stage, context: dict,
+                      lease_token: str | None = None) -> bool:
     """Runs one stage; returns True to keep advancing, False if the job landed in
-    a stopping state (RETRY_WAIT / FAILED / REVIEW_REQUIRED / CANCELLED)."""
+    a stopping state (RETRY_WAIT / FAILED / REVIEW_REQUIRED / CANCELLED).
+    Raises LeaseLostSignal if this worker's lease was reclaimed."""
     now = _utcnow()
     attempt = _next_attempt_number(session, job, stage)
     apply_transition(job, STAGE_ENTRY_STATUS[stage])
@@ -278,18 +327,23 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
         job_id=job.id, stage=stage.value, attempt=attempt, status="running", started_at=now,
     )
     session.add(stage_run)
-    session.commit()
+    _fenced_commit(session, job, lease_token, stage)
+    stage_run_id = stage_run.id
     log_stage_event(job_id=job.id, stage=stage.value, attempt=attempt, event="stage_started")
 
     try:
-        _execute_stage(session, stage, job, channel, providers, storage, context)
+        _execute_stage(session, stage, job, channel, providers, storage, context, lease_token)
     except ReviewRequiredSignal as signal:
         finished_at = _utcnow()
         stage_run.status = "review_required"
         stage_run.finished_at = finished_at
         apply_transition(job, JobStatus.REVIEW_REQUIRED, reason_code=signal.reason_code)
         job.retry_count = 0
-        session.commit()
+        try:
+            _fenced_commit(session, job, lease_token, stage)
+        except LeaseLostSignal:
+            _abandon_stage_run(session, stage_run_id, "lease lost before review_required commit")
+            raise
         log_stage_event(
             job_id=job.id, stage=stage.value, attempt=attempt, event="stage_review_required",
             duration_ms=(finished_at - now).total_seconds() * 1000, error_code=signal.reason_code,
@@ -301,7 +355,11 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
         stage_run.error_detail = _persisted_error_text(error, 2000)
         stage_run.finished_at = finished_at
         _handle_pipeline_error(job, stage, error, finished_at)
-        session.commit()
+        try:
+            _fenced_commit(session, job, lease_token, stage)
+        except LeaseLostSignal:
+            _abandon_stage_run(session, stage_run_id, "lease lost before failure commit")
+            raise
         log_stage_event(
             job_id=job.id, stage=stage.value, attempt=attempt, event="stage_failed",
             duration_ms=(finished_at - now).total_seconds() * 1000, error_code=error.code,
@@ -312,7 +370,11 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
         stage_run.status = "success"
         stage_run.finished_at = finished_at
         job.retry_count = 0
-        session.commit()
+        try:
+            _fenced_commit(session, job, lease_token, stage)
+        except LeaseLostSignal:
+            _abandon_stage_run(session, stage_run_id, "lease lost before success commit")
+            raise
         log_stage_event(
             job_id=job.id, stage=stage.value, attempt=attempt, event="stage_succeeded",
             duration_ms=(finished_at - now).total_seconds() * 1000,
@@ -320,7 +382,7 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
         return True
 
 
-def _fail_resume(session, job, error: PipelineError) -> None:
+def _fail_resume(session, job, error: PipelineError, lease_token: str | None = None) -> None:
     """A resume could not even start (unsupported target stage or missing/corrupt
     prerequisite artifacts). The job moves to an explicit FAILED with the cause
     in failure_code/failure_summary -- never left ACTIVE, never crashed out of."""
@@ -328,6 +390,9 @@ def _fail_resume(session, job, error: PipelineError) -> None:
         job, JobStatus.FAILED,
         failure_code=error.code, failure_summary=_persisted_error_text(error, 500),
     )
+    if not assert_lease(session, job.id, lease_token):
+        session.rollback()
+        raise LeaseLostSignal("RESUME")
     session.commit()
     log_stage_event(
         job_id=job.id, stage=job.retry_target_stage or "RESUME", attempt=0,
@@ -335,12 +400,15 @@ def _fail_resume(session, job, error: PipelineError) -> None:
     )
 
 
-def _handle_unexpected_error(session, job, error: Exception) -> None:
+def _handle_unexpected_error(session, job, error: Exception, lease_token: str | None = None) -> None:
     """Last-resort safety boundary for non-PipelineError exceptions. Guarantees
     the job is never persisted as ACTIVE + unlocked: the session is rolled back,
     any running StageRun is closed as failed, and the job moves to FAILED with a
     stable failure code. The summary carries only the exception type and a short
-    message -- no traceback, no request bodies. Never re-raises."""
+    message -- no traceback, no request bodies. Never re-raises.
+
+    If this worker's lease was reclaimed while it was failing, only its own
+    StageRun row is closed -- the job now belongs to the new owner."""
     try:
         session.rollback()
     except Exception:  # pragma: no cover - session teardown must not mask the outcome
@@ -353,6 +421,8 @@ def _handle_unexpected_error(session, job, error: Exception) -> None:
         .order_by(StageRun.started_at.desc())
         .limit(1),
     ).scalar_one_or_none()
+    stage_run_id = stage_run.id if stage_run is not None else None
+    stage_run_attempt = stage_run.attempt if stage_run is not None else 0
     if stage_run is not None:
         stage_run.status = "failed"
         stage_run.error_detail = f"{type(error).__name__}: {_persisted_error_text(error, 500)}"
@@ -370,15 +440,28 @@ def _handle_unexpected_error(session, job, error: Exception) -> None:
         # an invalid transition.
         job.failure_code = "UNEXPECTED_PIPELINE_ERROR"
         job.failure_summary = summary
+
+    # Single fenced commit: if the lease was reclaimed while this worker was
+    # failing, drop every job mutation and only close our own StageRun row.
+    if not assert_lease(session, job.id, lease_token):
+        session.rollback()
+        if stage_run_id is not None:
+            _abandon_stage_run(session, stage_run_id, f"lease lost during {type(error).__name__}")
+        log_stage_event(
+            job_id=job.id, stage=job.current_stage or "NONE", attempt=stage_run_attempt,
+            event="lease_lost", error_code="LEASE_LOST",
+        )
+        return
     session.commit()
     log_stage_event(
         job_id=job.id, stage=job.current_stage or "NONE",
-        attempt=stage_run.attempt if stage_run is not None else 0,
+        attempt=stage_run_attempt,
         event="stage_unexpected_error", error_code="UNEXPECTED_PIPELINE_ERROR",
     )
 
 
-def run_job(session, job, channel, providers: ProviderBundle, storage) -> None:
+def run_job(session, job, channel, providers: ProviderBundle, storage,
+            lease_token: str | None = None) -> None:
     """Runs a leased job forward from wherever it currently is, through as many
     stages as succeed in this call, stopping at the first RETRY_WAIT / FAILED /
     REVIEW_REQUIRED / CANCELLED outcome. On full success it writes manifest.json
@@ -391,31 +474,44 @@ def run_job(session, job, channel, providers: ProviderBundle, storage) -> None:
     on a previous process's memory. Unexpected exceptions are converted to an
     explicit FAILED via _handle_unexpected_error; this function does not raise
     (KeyboardInterrupt/SystemExit still propagate).
+
+    When lease_token is given (the CLI worker always passes it), every job-state
+    commit is fenced on the token: if the lease is reclaimed mid-run, this
+    worker stops without writing any job state, manifest, or official output.
     """
     try:
-        _run_job_impl(session, job, channel, providers, storage)
+        _run_job_impl(session, job, channel, providers, storage, lease_token)
+    except LeaseLostSignal as signal:
+        session.rollback()
+        log_stage_event(
+            job_id=job.id, stage=str(signal) or "UNKNOWN", attempt=0,
+            event="lease_lost", error_code="LEASE_LOST",
+        )
     except Exception as error:  # noqa: BLE001 - safety net: a job must never stay ACTIVE + unlocked
-        _handle_unexpected_error(session, job, error)
+        _handle_unexpected_error(session, job, error, lease_token)
 
 
-def _run_job_impl(session, job, channel, providers: ProviderBundle, storage) -> None:
+def _run_job_impl(session, job, channel, providers: ProviderBundle, storage,
+                  lease_token: str | None = None) -> None:
     try:
         start_stage = _start_stage(job)
         full_order = [Stage.TOPIC, *STAGE_ORDER] if start_stage is Stage.TOPIC else STAGE_ORDER
         if start_stage not in full_order:
             raise UnsupportedResumeStageError(f"cannot resume from stage {start_stage.value}")
         context = _restore_context(session, job, providers, storage, full_order, start_stage)
+    except LeaseLostSignal:
+        raise
     except PipelineError as error:
-        _fail_resume(session, job, error)
+        _fail_resume(session, job, error, lease_token)
         return
 
     remaining = full_order[full_order.index(start_stage):]
     for stage in remaining:
         if job.cancel_requested:
             apply_transition(job, JobStatus.CANCELLED)
-            session.commit()
+            _fenced_commit(session, job, lease_token, stage)
             return
-        if not _run_single_stage(session, job, channel, providers, storage, stage, context):
+        if not _run_single_stage(session, job, channel, providers, storage, stage, context, lease_token):
             return
 
     final_video_checksum = hashlib.sha256(context["render"].video_path.read_bytes()).hexdigest()
@@ -423,6 +519,13 @@ def _run_job_impl(session, job, channel, providers: ProviderBundle, storage) -> 
         job, context["assets"], providers.tts.provider_id, TTS_VOICE_ID,
         render=context["render"], validation=context["validation"], final_video_checksum=final_video_checksum,
     )
+    # Fence BEFORE writing the manifest file: assert_lease's guarded UPDATE
+    # holds SQLite's write lock from here through the commit, so a takeover can
+    # neither slip between the manifest write and the status transition nor be
+    # overwritten by a fenced-out worker.
+    if not assert_lease(session, job.id, lease_token):
+        session.rollback()
+        raise LeaseLostSignal("MANIFEST")
     write_manifest(storage, job.id, manifest)
     apply_transition(job, JobStatus.REVIEW_REQUIRED, reason_code=ReasonCode.USER_APPROVAL_REQUIRED.value)
     session.commit()

@@ -105,12 +105,18 @@ def run_tts_generating(job, tts, storage) -> list[TTSResult]:
 def run_rendering(
     job, assets: list[AssetFetchResult], tts_results: list[TTSResult], storage,
     width: int = RENDER_WIDTH, height: int = RENDER_HEIGHT,
+    output_path: Path | None = None,
 ) -> RenderOutput:
     """`width`/`height` default to the fast-test resolution used by the normal
     per-job pipeline. A separate production-smoke check calls this with
     width=1080, height=1920 to prove the same ffmpeg toolchain produces a
     real target-resolution vertical video, without changing the resolution
     every ordinary Fake-provider job renders at (see docs/STATUS.md).
+
+    `output_path=None` renders straight to the official final/final.mp4
+    (removing any stale copy first). The fenced worker instead passes a
+    worker-private temp path and promotes it to the official name only after
+    proving it still owns the lease -- see worker.runner.
     """
     deps = check_ffmpeg_available()
     if not deps.ffmpeg_available:
@@ -118,12 +124,13 @@ def run_rendering(
     ffmpeg_path = deps.ffmpeg.path
     assert ffmpeg_path is not None  # guaranteed by ffmpeg_available above
 
-    # Stale-output policy: a final.mp4 left over from an earlier attempt must
-    # never be mistaken for this run's result, so it is removed before any
-    # rendering starts. If this run fails midway there is no final.mp4 at all.
-    output_path = storage.job_dir(job.id) / "final" / "final.mp4"
-    if output_path.exists():
-        output_path.unlink()
+    if output_path is None:
+        # Stale-output policy: a final.mp4 left over from an earlier attempt
+        # must never be mistaken for this run's result, so it is removed before
+        # any rendering starts. If this run fails midway there is no final.mp4.
+        output_path = storage.job_dir(job.id) / "final" / "final.mp4"
+        if output_path.exists():
+            output_path.unlink()
 
     work_dir = storage.job_dir(job.id) / "render"
     work_dir.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     app_api_key: str = "changeme-local-dev-key"
     log_level: str = "INFO"
 
+    # Worker lease policy. The heartbeat interval must stay well below the
+    # timeout (<= 1/3) so a healthy worker in a long ffmpeg/provider stage is
+    # never reclaimed as stale.
+    lease_timeout_seconds: int = 300
+    lease_heartbeat_seconds: int = 60
+
 
 def load_settings() -> Settings:
     return Settings()

@@ -9,6 +9,7 @@ from reel_harness.bootstrap import AppContext
 from reel_harness.core.service import InvalidActionError, JobNotFoundError
 from reel_harness.db.models import Channel
 from reel_harness.media.deps import check_ffmpeg_available
+from reel_harness.worker.heartbeat import LeaseHeartbeat
 from reel_harness.worker.lease import lease_next_job, recover_stale_jobs, release_lease
 from reel_harness.worker.runner import run_job
 
@@ -131,17 +132,27 @@ def cmd_job_retry(args: argparse.Namespace, ctx: AppContext) -> int:
 
 
 def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
+    lease_timeout = args.lease_timeout or ctx.settings.lease_timeout_seconds
     with ctx.session_factory() as session:
-        recover_stale_jobs(session, lease_timeout_seconds=args.lease_timeout)
+        recover_stale_jobs(session, lease_timeout_seconds=lease_timeout)
         job = lease_next_job(session, worker_id=args.worker_id)
         if job is None:
             print("no job ready to lease")
             return 0
         channel = session.get(Channel, job.channel_id)
+        lease_token = job.lease_token
+        assert lease_token is not None  # minted by lease_next_job on every successful claim
+        # The heartbeat runs on its own thread with its own sessions so a long
+        # ffmpeg render or provider call cannot make a healthy job look stale.
+        heartbeat = LeaseHeartbeat(
+            ctx.session_factory, job.id, lease_token, ctx.settings.lease_heartbeat_seconds,
+        )
+        heartbeat.start()
         try:
-            run_job(session, job, channel, ctx.default_providers(), ctx.storage)
+            run_job(session, job, channel, ctx.default_providers(), ctx.storage, lease_token=lease_token)
         finally:
-            release_lease(session, job)
+            heartbeat.stop()
+            release_lease(session, job, lease_token=lease_token)
     _print_job(job)
     return 0
 
@@ -193,7 +204,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker_run_once = sub.add_parser("worker-run-once")
     worker_run_once.add_argument("--worker-id", default="cli-worker")
-    worker_run_once.add_argument("--lease-timeout", type=int, default=300)
+    worker_run_once.add_argument(
+        "--lease-timeout", type=int, default=None,
+        help="Seconds before a locked job with no heartbeat is considered stale "
+             "(default: settings.lease_timeout_seconds)",
+    )
     worker_run_once.set_defaults(func=cmd_worker_run_once)
 
     return parser
