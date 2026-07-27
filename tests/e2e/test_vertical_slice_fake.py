@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime
 
-from reel_harness.core.state_machine import JobStatus
+from reel_harness.core.state_machine import JobStatus, apply_transition
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.worker.runner import run_job
 
@@ -52,13 +52,29 @@ def test_vertical_slice_persists_script_and_assets_before_render(
 def test_manual_retry_from_render_after_dependency_block(
     job_service, channel, session_factory, storage, fake_providers,
 ) -> None:
-    if FFMPEG_PRESENT:
-        pytest.skip("only meaningful on a machine without ffmpeg/ffprobe")
-
+    """Exercises JobService.retry_from_stage()'s operator-override mechanics
+    against a FAILED/BLOCKED_DEPENDENCY job. On a machine without ffmpeg/
+    ffprobe this occurs naturally via a real run_job() call. On a machine
+    that has them (this one, as of this pass) the real pipeline no longer
+    fails at RENDER, so the same FAILED/BLOCKED_DEPENDENCY state a missing
+    binary would produce is synthesized instead of skipping coverage of the
+    manual-retry mechanism whenever ffmpeg happens to be present.
+    """
     job, _ = job_service.create_job(channel.id, idempotency_key="vslice-3", topic="topic")
     with session_factory() as session:
         db_job = session.get(type(job), job.id)
         run_job(session, db_job, channel, fake_providers, storage)
+        if db_job.status != JobStatus.FAILED.value:
+            apply_transition(
+                db_job, JobStatus.RETRY_WAIT,
+                retry_target_stage="RENDER", next_retry_at=datetime.now(UTC),
+                failure_code="TEST_SETUP_ONLY", failure_summary="simulating a missing ffmpeg for this test",
+            )
+            apply_transition(
+                db_job, JobStatus.FAILED,
+                failure_code="BLOCKED_DEPENDENCY", failure_summary="simulated: ffmpeg executable not found",
+            )
+            session.commit()
         assert db_job.status == JobStatus.FAILED.value
 
     retried = job_service.retry_from_stage(job.id, stage="RENDER")
