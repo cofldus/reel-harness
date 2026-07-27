@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import uuid
 
@@ -9,6 +10,7 @@ from reel_harness.bootstrap import AppContext
 from reel_harness.core.service import InvalidActionError, JobNotFoundError
 from reel_harness.db.models import Channel
 from reel_harness.media.deps import check_ffmpeg_available
+from reel_harness.worker.daemon import DaemonConfig, WorkerDaemon, default_worker_id
 from reel_harness.worker.heartbeat import LeaseHeartbeat
 from reel_harness.worker.lease import lease_next_job, recover_stale_jobs, release_lease
 from reel_harness.worker.runner import run_job
@@ -157,6 +159,44 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
+    settings = ctx.settings
+    config = DaemonConfig(
+        worker_id=args.worker_id or default_worker_id(),
+        poll_interval_seconds=(
+            args.poll_interval if args.poll_interval is not None else settings.worker_poll_interval_seconds
+        ),
+        lease_timeout_seconds=args.lease_timeout or settings.lease_timeout_seconds,
+        heartbeat_interval_seconds=(
+            args.heartbeat_interval if args.heartbeat_interval is not None
+            else settings.lease_heartbeat_seconds
+        ),
+        max_jobs=args.max_jobs if args.max_jobs is not None else settings.worker_max_jobs,
+        idle_exit_after_seconds=(
+            args.idle_exit_after if args.idle_exit_after is not None
+            else settings.worker_idle_exit_after_seconds
+        ),
+        stop_on_error=args.stop_on_error or settings.worker_stop_on_error,
+    )
+    daemon = WorkerDaemon(
+        ctx.session_factory, ctx.storage, ctx.providers_for_job, config,
+    )
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        daemon.request_stop(f"signal_{signum}")
+
+    # Ctrl+C / SIGINT everywhere; SIGTERM where the platform delivers it;
+    # SIGBREAK for Windows console Ctrl+Break. A hard console close on Windows
+    # cannot be intercepted -- stale-lease recovery covers that case.
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return daemon.run()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reel-harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -210,6 +250,20 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: settings.lease_timeout_seconds)",
     )
     worker_run_once.set_defaults(func=cmd_worker_run_once)
+
+    worker_run = sub.add_parser("worker-run", help="Continuous polling worker daemon")
+    worker_run.add_argument("--worker-id", default=None, help="Default: generated unique id")
+    worker_run.add_argument("--poll-interval", type=float, default=None,
+                            help="Seconds to wait when no job is leasable")
+    worker_run.add_argument("--lease-timeout", type=int, default=None)
+    worker_run.add_argument("--heartbeat-interval", type=float, default=None)
+    worker_run.add_argument("--max-jobs", type=int, default=None,
+                            help="Exit normally after processing this many jobs")
+    worker_run.add_argument("--idle-exit-after", type=float, default=None,
+                            help="Exit normally after this many idle seconds")
+    worker_run.add_argument("--stop-on-error", action="store_true",
+                            help="Exit (code 1) after the first job that ends FAILED")
+    worker_run.set_defaults(func=cmd_worker_run)
 
     return parser
 

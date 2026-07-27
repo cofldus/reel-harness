@@ -24,6 +24,12 @@ class AppContext:
         self.storage = LocalFilesystemStorage(self.settings.jobs_dir)
         self.jobs = JobService(self.session_factory, storage=self.storage)
 
+    def providers_for_job(self, job) -> ProviderBundle:
+        """Providers to use for one leased job. (Snapshot-aware resolution is
+        introduced with the provider-configuration work; the default bundle is
+        the fallback.)"""
+        return self.default_providers()
+
     def default_providers(self) -> ProviderBundle:
         from reel_harness.providers.registry import (
             resolve_llm_provider,

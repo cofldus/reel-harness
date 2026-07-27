@@ -87,6 +87,18 @@ def configure_logging(level: str = "INFO") -> None:
         _logger.addHandler(handler)
 
 
+def log_worker_event(*, event: str, worker_id: str, **fields: object) -> None:
+    """One structured JSON line per worker-daemon lifecycle event
+    (worker_started / worker_idle / job_leased / job_completed / job_failed /
+    lease_lost / worker_shutdown_requested / worker_stopped /
+    stale_jobs_recovered). Only identifiers and outcome fields -- never full
+    lease tokens (callers pass a short prefix), request bodies, or secrets;
+    the redacting filter applies regardless."""
+    payload: dict[str, object] = {"event": event, "worker_id": worker_id}
+    payload.update(fields)
+    _logger.info(json.dumps(payload))
+
+
 def log_stage_event(
     *,
     job_id: str,

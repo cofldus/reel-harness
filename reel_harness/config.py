@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     lease_timeout_seconds: int = 300
     lease_heartbeat_seconds: int = 60
 
+    # Continuous worker daemon (reel-harness worker-run). CLI flags override
+    # these per invocation.
+    worker_poll_interval_seconds: float = 5.0
+    worker_idle_exit_after_seconds: float | None = None  # None = run until stopped
+    worker_max_jobs: int | None = None  # None = unlimited
+    worker_stop_on_error: bool = False
+
     # LLM provider selection and its adapter configuration. "fake" needs none
     # of the rest; "openai-compatible" talks to any /chat/completions-style
     # endpoint chosen via llm_base_url/llm_model. The API key is read from the
