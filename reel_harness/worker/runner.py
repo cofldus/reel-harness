@@ -18,7 +18,7 @@ from reel_harness.core.errors import (
 from reel_harness.core.state_machine import JobStatus, ReasonCode, Stage, apply_transition
 from reel_harness.db.models import Asset, StageRun
 from reel_harness.manifest.writer import build_manifest, write_manifest
-from reel_harness.observability import log_stage_event
+from reel_harness.observability import log_stage_event, redact
 from reel_harness.pipeline import stages
 from reel_harness.providers.base import LLMProvider, Publisher, StockMediaProvider, TTSProvider, TTSResult
 from reel_harness.worker.policy import ACTIVE_STAGE_STATUSES, STAGE_ENTRY_STATUS, STAGE_ORDER, STAGE_RETRY_POLICY
@@ -33,6 +33,13 @@ RENDER_META_REL_PATH = "render/render_meta.json"
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _persisted_error_text(text: object, limit: int) -> str:
+    """Every error string persisted to the DB (failure_summary, error_detail)
+    goes through the shared redaction rules first -- provider exception messages
+    may embed Authorization headers, URLs with tokens, or raw API keys."""
+    return (redact(str(text)) or "")[:limit]
 
 
 @dataclass
@@ -221,7 +228,10 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
 
 def _handle_pipeline_error(job, stage: Stage, error: PipelineError, now: datetime) -> None:
     if not error.retryable:
-        apply_transition(job, JobStatus.FAILED, failure_code=error.code, failure_summary=str(error)[:500])
+        apply_transition(
+            job, JobStatus.FAILED,
+            failure_code=error.code, failure_summary=_persisted_error_text(error, 500),
+        )
         return
 
     max_retries, backoffs = STAGE_RETRY_POLICY.get(stage, (0, []))
@@ -229,7 +239,9 @@ def _handle_pipeline_error(job, stage: Stage, error: PipelineError, now: datetim
         apply_transition(
             job, JobStatus.FAILED,
             failure_code="RETRIES_EXHAUSTED",
-            failure_summary=f"{stage.value} failed after {job.retry_count} retries: {error}"[:500],
+            failure_summary=_persisted_error_text(
+                f"{stage.value} failed after {job.retry_count} retries: {error}", 500,
+            ),
         )
         return
 
@@ -240,7 +252,7 @@ def _handle_pipeline_error(job, stage: Stage, error: PipelineError, now: datetim
         retry_target_stage=stage.value,
         next_retry_at=now + timedelta(seconds=delay),
         failure_code=error.code,
-        failure_summary=str(error)[:500],
+        failure_summary=_persisted_error_text(error, 500),
     )
 
 
@@ -286,7 +298,7 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
     except PipelineError as error:
         finished_at = _utcnow()
         stage_run.status = "failed"
-        stage_run.error_detail = str(error)[:2000]
+        stage_run.error_detail = _persisted_error_text(error, 2000)
         stage_run.finished_at = finished_at
         _handle_pipeline_error(job, stage, error, finished_at)
         session.commit()
@@ -312,7 +324,10 @@ def _fail_resume(session, job, error: PipelineError) -> None:
     """A resume could not even start (unsupported target stage or missing/corrupt
     prerequisite artifacts). The job moves to an explicit FAILED with the cause
     in failure_code/failure_summary -- never left ACTIVE, never crashed out of."""
-    apply_transition(job, JobStatus.FAILED, failure_code=error.code, failure_summary=str(error)[:500])
+    apply_transition(
+        job, JobStatus.FAILED,
+        failure_code=error.code, failure_summary=_persisted_error_text(error, 500),
+    )
     session.commit()
     log_stage_event(
         job_id=job.id, stage=job.retry_target_stage or "RESUME", attempt=0,
@@ -340,10 +355,10 @@ def _handle_unexpected_error(session, job, error: Exception) -> None:
     ).scalar_one_or_none()
     if stage_run is not None:
         stage_run.status = "failed"
-        stage_run.error_detail = f"{type(error).__name__}: {str(error)[:500]}"
+        stage_run.error_detail = f"{type(error).__name__}: {_persisted_error_text(error, 500)}"
         stage_run.finished_at = now
 
-    summary = f"unexpected {type(error).__name__}: {str(error)[:300]}"
+    summary = f"unexpected {type(error).__name__}: {_persisted_error_text(error, 300)}"
     current = JobStatus(job.status)
     if current in ACTIVE_STAGE_STATUSES or current is JobStatus.RETRY_WAIT:
         apply_transition(
