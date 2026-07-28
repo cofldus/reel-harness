@@ -105,13 +105,23 @@ automation, automatic remote video delete, thumbnail/subtitle upload,
 analytics collection, an OAuth account-management UI, web dashboard,
 PostgreSQL, cloud secret manager, cloud queue.
 
-Suite after Phase 3B: **532 passed, 0 failed, 1 skipped** (439 → 533
-collected, 94 new tests). The one skip is the same pre-existing,
+Suite after Phase 3B: **535 passed, 0 failed, 1 skipped** (439 → 536
+collected, 97 new tests). The one skip is the same pre-existing,
 unrelated one from Phase 3A (`test_secret_store.py`'s symlink-rejection
 test, skipped only because this Windows machine doesn't permit symlink
 creation without elevated privileges -- its NTFS-junction counterpart,
 added this phase, passes for real here instead). mypy clean (65 source
 files). ruff clean (`reel_harness` + `tests`).
+
+A real live-smoke attempt (`publisher-doctor youtube --check-remote`,
+`provider-smoke publisher youtube`, and the private-upload variant --
+all correctly printed `NOT RUN` with no credentials configured) also
+surfaced a genuine pre-existing bug: printing "NOT RUN -- credentials
+not configured" (an em dash) crashed with `UnicodeEncodeError` on this
+machine's actual Windows console codepage (cp949), present since Phase
+3A's `provider-smoke` and never previously hit by a real restrictive
+console. Fixed by reconfiguring `sys.stdout`/`stderr` to UTF-8 with
+error-tolerant encoding in `cli.main.main()`.
 
 ## Phase 3A — publisher foundation and YouTube upload (merged to `main`)
 
