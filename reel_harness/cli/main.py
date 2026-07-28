@@ -5,6 +5,7 @@ import json
 import signal
 import sys
 import uuid
+from urllib.parse import urlsplit
 
 from reel_harness.bootstrap import AppContext
 from reel_harness.core.service import InvalidActionError, JobNotFoundError, asset_safe_metadata
@@ -310,12 +311,100 @@ def _smoke_tts(ctx: AppContext) -> int:
     return 0
 
 
+def _smoke_asset(ctx: AppContext) -> int:
+    import shutil
+    import tempfile
+    import time
+    from pathlib import Path
+
+    from reel_harness.config import normalize_provider_name
+    from reel_harness.core.errors import DependencyError, ProviderAuthError, TransientProviderError
+    from reel_harness.observability import redact
+    from reel_harness.pipeline.asset_selection import SelectionPolicy, select_asset
+    from reel_harness.providers.registry import resolve_stock_media_provider
+
+    name = normalize_provider_name(ctx.settings.asset_provider)
+    if name == "fake":
+        print(
+            "asset provider is 'fake' -- nothing to smoke. Set "
+            "REEL_HARNESS_ASSET_PROVIDER=pexels (plus base URL, API key) to "
+            "check a real provider.",
+            file=sys.stderr,
+        )
+        return 2
+
+    smoke_settings = ctx.settings.model_copy(update={"asset_max_retries": 0})
+    provider = resolve_stock_media_provider(name, smoke_settings)
+    scratch = Path(tempfile.mkdtemp(prefix="reel-harness-asset-smoke-"))
+    query = "ocean waves"  # fixed, safe, one search
+    try:
+        started = time.monotonic()
+        candidates = provider.search(
+            query, orientation=ctx.settings.asset_orientation,
+            min_duration=ctx.settings.asset_min_duration_seconds,
+            max_duration=ctx.settings.asset_max_duration_seconds, min_width=ctx.settings.asset_min_width,
+            min_height=ctx.settings.asset_min_height, per_page=ctx.settings.asset_per_page,
+            safe_search=ctx.settings.asset_safe_search,
+        )
+        policy = SelectionPolicy(
+            min_width=ctx.settings.asset_min_width, min_height=ctx.settings.asset_min_height,
+            min_duration_sec=ctx.settings.asset_min_duration_seconds,
+            max_duration_sec=ctx.settings.asset_max_duration_seconds,
+            target_orientation=ctx.settings.asset_orientation,
+        )
+        chosen = select_asset(candidates, policy)
+        if chosen is None:
+            print(
+                f"no eligible candidates for {query!r} among {len(candidates)} search result(s)",
+                file=sys.stderr,
+            )
+            return 6
+        result = provider.download(chosen, scratch)
+        latency_ms = (time.monotonic() - started) * 1000
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except DependencyError as exc:
+        print(f"media toolchain unavailable: {redact(str(exc))}", file=sys.stderr)
+        return 5
+    except TransientProviderError as exc:
+        print(f"transient provider or asset-validation error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+        shutil.rmtree(scratch, ignore_errors=True)  # never leave smoke asset files behind
+
+    print(json.dumps({
+        "provider": result.provider_id,
+        "query": query,
+        "result_count": len(candidates),
+        "selected_asset_id": result.provider_asset_id,
+        "width": result.width,
+        "height": result.height,
+        "duration_sec": round(result.duration_sec, 3) if result.duration_sec else None,
+        "codec": "h264",
+        "container": "mp4",
+        "license_type": result.license_type,
+        "creator": result.author,
+        "source_page_host": urlsplit(result.source_page_url).netloc if result.source_page_url else None,
+        "checksum_prefix": (result.checksum_sha256 or "")[:12],
+        "request_id_present": result.request_id is not None,
+        "latency_ms": round(latency_ms, 1),
+        "asset_valid": True,
+    }, indent=2))
+    return 0
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
     The default test suites never run this."""
     if args.target == "llm":
         return _smoke_llm(ctx)
+    if args.target == "asset":
+        return _smoke_asset(ctx)
     return _smoke_tts(ctx)
 
 
@@ -430,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",
     )
-    provider_smoke.add_argument("target", choices=["llm", "tts"])
+    provider_smoke.add_argument("target", choices=["llm", "tts", "asset"])
     provider_smoke.set_defaults(func=cmd_provider_smoke)
 
     return parser
