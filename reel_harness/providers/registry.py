@@ -30,6 +30,21 @@ class _UnconfiguredLLMProvider:
         raise ProviderNotConfiguredError(self._reason)
 
 
+class _UnconfiguredTTSProvider:
+    """TTS counterpart of _UnconfiguredLLMProvider: any synthesis attempt fails
+    the stage with PROVIDER_NOT_CONFIGURED."""
+
+    provider_id = "unconfigured"
+    model_id = "unconfigured"
+    voice_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def synthesize(self, text: str, voice_id: str, lang: str, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
 def _build_openai_compatible_llm(
     settings: Settings | None,
     *,
@@ -81,6 +96,84 @@ def llm_provider_snapshot(settings: Settings | None) -> dict:
         "temperature": settings.llm_temperature,
         "max_output_tokens": settings.llm_max_output_tokens,
     }
+
+
+def tts_provider_snapshot(settings: Settings | None) -> dict:
+    """TTS configuration captured onto a job at creation: provider id, model,
+    safe base-URL host, voice, format, speed, adapter version, and the
+    canonical output policy -- NEVER the API key, headers, or URLs with
+    credentials."""
+    from reel_harness.media.tts_audio import CANONICAL_CHANNELS, CANONICAL_CODEC, CANONICAL_SAMPLE_RATE
+
+    output_policy = {
+        "sample_rate": CANONICAL_SAMPLE_RATE,
+        "channels": CANONICAL_CHANNELS,
+        "codec": CANONICAL_CODEC,
+    }
+    name = normalize_provider_name(settings.tts_provider) if settings else "fake"
+    if name == "fake":
+        return {
+            "tts_provider": "fake",
+            "tts_model": "fake-tts-v1",
+            "tts_voice": "fake-voice-1",
+            "tts_adapter_version": "fake-tts-v1",
+            "tts_output_policy": output_policy,
+        }
+    from reel_harness.providers.openai_compatible_tts import ADAPTER_VERSION
+
+    assert settings is not None
+    return {
+        "tts_provider": name,
+        "tts_model": settings.tts_model,
+        "tts_base_url_host": urlsplit(settings.tts_base_url).netloc,
+        "tts_voice": settings.tts_voice,
+        "tts_format": settings.tts_format,
+        "tts_speed": settings.tts_speed,
+        "tts_adapter_version": ADAPTER_VERSION,
+        "tts_output_policy": output_policy,
+    }
+
+
+def provider_snapshot(settings: Settings | None) -> dict:
+    """Combined per-job provider snapshot (LLM + TTS blocks)."""
+    return {**llm_provider_snapshot(settings), **tts_provider_snapshot(settings)}
+
+
+def resolve_tts_for_snapshot(snapshot: dict | None, settings: Settings | None) -> TTSProvider:
+    """Resolves the TTS provider a leased job must run with, honoring the
+    job's creation-time snapshot. Legacy jobs whose snapshot predates the TTS
+    block (or have no snapshot) use the current settings. Every unsatisfiable
+    case fails explicitly -- there is no silent fallback."""
+    if not snapshot or "tts_provider" not in snapshot:
+        return resolve_tts_provider(
+            normalize_provider_name(settings.tts_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("tts_provider"))
+    if name == "fake":
+        return FakeTTSProvider()
+    if name != "openai-compatible":
+        return _UnconfiguredTTSProvider(
+            f"job is pinned to tts provider {name!r}, which is not registered"
+        )
+    if settings is None or not settings.tts_base_url or not settings.tts_api_key.get_secret_value():
+        return _UnconfiguredTTSProvider(
+            "job is pinned to the openai-compatible tts provider but "
+            "REEL_HARNESS_TTS_BASE_URL / REEL_HARNESS_TTS_API_KEY are not configured"
+        )
+    pinned_host = snapshot.get("tts_base_url_host")
+    current_host = urlsplit(settings.tts_base_url).netloc
+    if pinned_host and current_host != pinned_host:
+        return _UnconfiguredTTSProvider(
+            f"configured tts endpoint host {current_host!r} does not match the "
+            f"job's pinned host {pinned_host!r}"
+        )
+    return _build_openai_compatible_tts(
+        settings,
+        model_override=snapshot.get("tts_model"),
+        voice_override=snapshot.get("tts_voice"),
+        format_override=snapshot.get("tts_format"),
+        speed_override=snapshot.get("tts_speed"),
+    )
 
 
 def resolve_llm_for_snapshot(snapshot: dict | None, settings: Settings | None) -> LLMProvider:
