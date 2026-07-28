@@ -1,9 +1,88 @@
 # Status
 
-Last updated: 2026-07-27 (Phase 2B runtime-worker session, on branch
-`phase2/runtime-worker`).
+Last updated: 2026-07-28 (Phase 2C real-tts session, on branch
+`phase2/real-tts`). Phase 2A and Phase 2B are merged into `main`.
 
-## Phase 2B — production worker + real LLM execution path (this branch)
+## Phase 2C — real TTS execution path + runtime dependency closure (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
+
+- **Runtime dependency gate closed**: `uv` now runs unrestricted on this
+  machine (uv 0.11.27), closing the `BLOCKED_ENVIRONMENT` item carried from
+  Phase 2A/2B. `httpx` moved from the dev extra to `[project.dependencies]`
+  and `uv.lock` was regenerated with `uv lock` (verified via `uv lock
+  --check`); both the fake-only and real-provider import paths work in the
+  installed environment.
+- **`OpenAICompatibleTTSProvider`**: an OpenAI-compatible `/audio/speech`
+  adapter isolated behind the `TTSProvider` Protocol — pipeline and worker
+  code depend only on the Protocol, never on a vendor name. The Fake TTS
+  provider is unchanged and remains the default.
+- **TTS configuration**: `REEL_HARNESS_TTS_PROVIDER` (`fake` |
+  `openai_compatible`), `_BASE_URL`, `_MODEL`, `_API_KEY` (`SecretStr`),
+  `_VOICE`, `_FORMAT` (closed set: `wav`, `mp3`), `_SPEED`,
+  `_CONNECT_TIMEOUT`, `_READ_TIMEOUT`, `_MAX_RETRIES`, `_RETRY_BACKOFF`.
+  Selecting the real provider with any field missing, an unsupported
+  format, an out-of-range speed, a non-positive timeout, or a negative
+  retry count fails at startup with a clear `ProviderConfigurationError` —
+  no traceback, no network call.
+- **TTS provider snapshot pinning**: `provider_snapshot()` now emits a
+  combined LLM+TTS block persisted on `Job.provider_config` (the same
+  additive JSON column added in Phase 2B — no new migration needed).
+  Retries/rejects/resumes resolve the TTS provider from the job's snapshot
+  via `resolve_tts_for_snapshot()`; a snapshot pinned to a provider that's
+  since been deregistered, had its host changed, or lost its credentials
+  fails explicitly (`PROVIDER_NOT_CONFIGURED`-style `_UnconfiguredTTSProvider`)
+  instead of silently falling back to a different provider.
+- **Real audio validation + normalization** (`reel_harness/media/
+  tts_audio.py`): provider audio is never trusted on HTTP status alone —
+  it's parsed (WAV via the stdlib, everything else via real `ffprobe`),
+  checked for a non-zero audio stream and duration, then normalized through
+  real `ffmpeg` to canonical PCM WAV (`44100` Hz, mono, `pcm_s16le`)
+  regardless of the source format. Both the raw and normalized checksums
+  are tracked.
+- **Lease-fenced atomic publish**: synthesized/normalized audio is written
+  to a worker-private temp path first and only `os.replace()`'d onto the
+  job's official path after the fenced commit succeeds — a worker that has
+  lost its lease (or a late response racing a retake) can never overwrite
+  the current lease owner's audio or manifest.
+- **`provider-smoke tts`**: opt-in, single fixed-sentence synthesis,
+  retries disabled, real audio validation, scratch-only temp storage,
+  cleaned up on exit. Redacted summary (provider, model, voice, format,
+  duration, codec, sample rate, channels, checksum prefix, latency) — never
+  the key, header, or full request/response body. Distinct exit codes:
+  0 success, 2 not configured, 3 auth error, 4 transient, 5 audio
+  validation failure.
+- **Hybrid E2E** (`tests/integration/test_hybrid_real_tts_pipeline.py`):
+  real OpenAI-compatible LLM contract transport → policy → fake asset →
+  real OpenAI-compatible TTS contract transport → real audio
+  validation/normalization → real ffmpeg → real ffprobe → `REVIEW_REQUIRED`,
+  with LLM+TTS metadata on the manifest, `publish_eligible=false` on the
+  fake asset license, no key anywhere, and provider/voice pinning verified
+  across reject-from-TTS (re-synthesizes) vs. reject-from-RENDER (does not).
+  This is contract-transport wiring coverage, NOT a live provider call.
+- **`job-show --json` is machine-readable**: the human-readable
+  `REVIEW_REQUIRED` hint that used to print alongside `--json` output (and
+  broke JSON parsing) now goes to stderr / a JSON field only; stdout is
+  exactly one JSON document.
+- **`REVIEW_REQUIRED` (and other unleased idle states) cancel immediately**:
+  `request_cancel` used to only set `cancel_requested` even when no worker
+  was ever going to observe it (`REVIEW_REQUIRED`/`RETRY_WAIT`/`QUEUED`/
+  `CREATED` jobs with no active lease aren't leasable), leaving the job
+  stuck. It now transitions those states straight to `CANCELLED`; a
+  leased/running job still only gets the flag and the worker honors it at
+  its next stage boundary. API and CLI share the same service method.
+  Artifacts are preserved; approve/reject/retry/re-cancel are refused
+  afterward.
+- **Live smoke**: `NOT RUN — credentials not configured` for both LLM and
+  TTS (no `REEL_HARNESS_LLM_API_KEY` / `REEL_HARNESS_TTS_API_KEY` set on
+  this machine). `provider-smoke llm` / `provider-smoke tts` are the
+  documented paths to run them once credentials exist.
+
+Suite after Phase 2C: **203 passed, 0 failed, 0 skipped** (171 → 203,
+4 of those from the `REVIEW_REQUIRED` cancel fix). mypy clean (45 files).
+ruff clean.
+
+## Phase 2B — production worker + real LLM execution path (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
 
@@ -41,7 +120,7 @@ ruff remains NOT VERIFIED on this machine for the same reason.
 Suite after Phase 2B: **171 passed, 0 failed, 0 skipped** (142 -> 171).
 mypy clean (43 files).
 
-## Phase 2A — reliability foundation + real LLM plumbing (IN PROGRESS, this branch)
+## Phase 2A — reliability foundation + real LLM plumbing (merged to `main`)
 
 Implemented and tested this session (each landed as its own commit; all
 verification real, no mocked E2E claims):
