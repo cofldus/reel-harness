@@ -22,6 +22,7 @@ class AppContext:
         register_secret(self.settings.app_api_key)
         register_secret(self.settings.llm_api_key.get_secret_value())
         register_secret(self.settings.tts_api_key.get_secret_value())
+        register_secret(self.settings.asset_api_key.get_secret_value())
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
@@ -40,7 +41,7 @@ class AppContext:
         a provider that fails the stage with PROVIDER_NOT_CONFIGURED."""
         from reel_harness.providers.registry import (
             resolve_llm_for_snapshot,
-            resolve_stock_media_provider,
+            resolve_stock_media_for_snapshot,
             resolve_tts_for_snapshot,
         )
 
@@ -48,7 +49,7 @@ class AppContext:
         return ProviderBundle(
             llm=resolve_llm_for_snapshot(snapshot, self.settings),
             tts=resolve_tts_for_snapshot(snapshot, self.settings),
-            stock_media=resolve_stock_media_provider("fake"),
+            stock_media=resolve_stock_media_for_snapshot(snapshot, self.settings),
         )
 
     def default_providers(self) -> ProviderBundle:
@@ -61,5 +62,5 @@ class AppContext:
         return ProviderBundle(
             llm=resolve_llm_provider(self.settings.llm_provider, self.settings),
             tts=resolve_tts_provider(self.settings.tts_provider, self.settings),
-            stock_media=resolve_stock_media_provider("fake"),
+            stock_media=resolve_stock_media_provider(self.settings.asset_provider, self.settings),
         )
