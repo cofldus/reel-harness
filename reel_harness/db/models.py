@@ -177,3 +177,99 @@ class ApprovalDecision(Base):
     reason: Mapped[str | None] = mapped_column(default=None)
     regenerate_from_stage: Mapped[str | None] = mapped_column(default=None)
     decided_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class Publication(Base):
+    """One upload/publish attempt of a job's approved final video to one
+    provider account. Deliberately separate from Job (see
+    core.state_machine's PublicationStatus docstring and
+    docs/PUBLISHING.md) -- a job finishing render is not the same fact as a
+    video reaching a platform.
+
+    Idempotency (Phase 3A design, see docs/PUBLISHING.md): the DB unique
+    constraint on (provider, account_reference, job_id, final_video_checksum)
+    is the actual duplicate-upload guard, not an application-level check --
+    a second concurrent create_publication() call for the same tuple hits
+    the constraint and the service returns the existing row. If the job's
+    final video changes (new checksum, e.g. after a reject/re-render), that
+    is a genuinely different tuple and a new Publication is allowed.
+
+    Never stores: OAuth access/refresh tokens, client secret, the raw
+    resumable-upload session URI, or any provider response body --
+    upload_session_reference is an opaque local reference into the secret
+    backend (see publisher.secret_store), never the URI itself.
+    """
+
+    __tablename__ = "publications"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "account_reference", "job_id", "final_video_checksum",
+            name="uq_publication_idempotency",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"))
+    provider: Mapped[str]
+    account_reference: Mapped[str]
+    status: Mapped[str] = mapped_column(default="CREATED")
+    privacy_status: Mapped[str] = mapped_column(default="private")
+    provider_video_id: Mapped[str | None] = mapped_column(default=None)
+    publication_url: Mapped[str | None] = mapped_column(default=None)
+    idempotency_key: Mapped[str]
+    final_video_checksum: Mapped[str]
+
+    # Publisher snapshot captured at creation (provider id, adapter version,
+    # safe account reference, default privacy/category/madeForKids policy,
+    # template versions -- never a credential). Mirrors Job.provider_config.
+    publisher_config: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Deterministic upload metadata actually sent (title/description/tags/
+    # category/privacy/madeForKids) -- see providers.base.PublicationMetadata.
+    metadata_snapshot: Mapped[dict | None] = mapped_column(JSON, default=None)
+
+    upload_session_reference: Mapped[str | None] = mapped_column(default=None)
+    bytes_uploaded: Mapped[int] = mapped_column(default=0)
+    total_bytes: Mapped[int | None] = mapped_column(default=None)
+
+    retry_count: Mapped[int] = mapped_column(default=0)
+    retry_target_status: Mapped[str | None] = mapped_column(default=None)
+    next_retry_at: Mapped[datetime | None] = mapped_column(default=None)
+    failure_code: Mapped[str | None] = mapped_column(default=None)
+    failure_summary: Mapped[str | None] = mapped_column(default=None)
+    provider_request_id: Mapped[str | None] = mapped_column(default=None)
+
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
+
+    locked_by: Mapped[str | None] = mapped_column(default=None)
+    lease_token: Mapped[str | None] = mapped_column(default=None)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+    updated_at: Mapped[datetime] = mapped_column(default=_now, onupdate=_now)
+    published_at: Mapped[datetime | None] = mapped_column(default=None)
+    processing_completed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    job: Mapped[Job] = relationship()
+    audit_events: Mapped[list[PublicationAuditEvent]] = relationship(back_populates="publication")
+
+
+class PublicationAuditEvent(Base):
+    """Append-only event log for one Publication (eligibility_checked,
+    publication_created, auth_refreshed, upload_session_created,
+    chunk_uploaded, upload_resumed, upload_completed, processing_started,
+    processing_completed, publication_failed, publication_cancelled,
+    privacy_selected -- see worker.publish_runner). `detail` carries only
+    safe structured fields (byte ranges, safe session-reference prefixes,
+    status codes) -- never a full URL, request/response body, or secret;
+    callers are responsible for redacting before constructing it, the same
+    discipline observability.log_stage_event already documents."""
+
+    __tablename__ = "publication_audit_events"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
+    publication_id: Mapped[str] = mapped_column(ForeignKey("publications.id"))
+    event: Mapped[str]
+    detail: Mapped[dict | None] = mapped_column(JSON, default=None)
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+    publication: Mapped[Publication] = relationship(back_populates="audit_events")

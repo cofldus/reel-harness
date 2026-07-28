@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from reel_harness.config import Settings, load_settings, validate_provider_settings
+from reel_harness.core.publish_service import PublicationService
 from reel_harness.core.service import JobService
 from reel_harness.db.schema import create_engine_from_url, init_db, make_session_factory
 from reel_harness.observability import configure_logging, register_secret
@@ -23,6 +24,7 @@ class AppContext:
         register_secret(self.settings.llm_api_key.get_secret_value())
         register_secret(self.settings.tts_api_key.get_secret_value())
         register_secret(self.settings.asset_api_key.get_secret_value())
+        register_secret(self.settings.youtube_client_secret.get_secret_value())
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
@@ -33,6 +35,52 @@ class AppContext:
             self.session_factory, storage=self.storage,
             provider_snapshot=provider_snapshot(self.settings),
         )
+        self.publications = PublicationService(self.session_factory, self.storage)
+        self._secret_store = None
+
+    def _get_secret_store(self):
+        """Lazily constructed and memoized: the secret directory is validated
+        (rejects a repo-internal path) and created only the first time
+        something actually needs it, not on every AppContext startup."""
+        if self._secret_store is None:
+            from reel_harness.publisher.secret_store import FileSecretStore
+
+            self._secret_store = FileSecretStore(self.settings.credential_dir)
+        return self._secret_store
+
+    def credential_backend(self):
+        from reel_harness.publisher.credentials import FileCredentialBackend
+
+        return FileCredentialBackend(self._get_secret_store())
+
+    def bundle_for_publication(self, publication):
+        """The publisher + session store for one leased publication, honoring
+        the publisher snapshot the Publication was created with -- mirrors
+        providers_for_job's pinning discipline. An unsatisfiable snapshot
+        yields a publisher that fails the stage with
+        PROVIDER_NOT_CONFIGURED, never a silent switch to a different
+        account."""
+        from reel_harness.providers.registry import resolve_publisher
+        from reel_harness.publisher.session_store import UploadSessionStore
+        from reel_harness.worker.publish_runner import PublishBundle
+
+        snapshot = getattr(publication, "publisher_config", None) or {}
+        provider_name = snapshot.get("publisher_provider", "fake")
+        account_reference = snapshot.get("publisher_account_reference", "default")
+        publisher = resolve_publisher(
+            provider_name, settings=self.settings,
+            credential_backend=self.credential_backend(), account_reference=account_reference,
+        )
+        return PublishBundle(publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()))
+
+    def channel_niche_for_job(self, job) -> str | None:
+        if job is None:
+            return None
+        from reel_harness.db.models import Channel
+
+        with self.session_factory() as session:
+            channel = session.get(Channel, job.channel_id)
+            return channel.niche if channel is not None else None
 
     def providers_for_job(self, job) -> ProviderBundle:
         """Providers for one leased job, honoring the provider snapshot the job
