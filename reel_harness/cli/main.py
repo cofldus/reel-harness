@@ -79,10 +79,30 @@ def cmd_job_show(args: argparse.Namespace, ctx: AppContext) -> int:
     except JobNotFoundError:
         print(f"job not found: {args.job_id}", file=sys.stderr)
         return 1
+    if args.json:
+        # Machine-readable contract: stdout carries exactly one valid JSON
+        # document, nothing else. Helper paths become fields, not extra lines.
+        payload = {
+            "job_id": job.id,
+            "status": job.status,
+            "current_stage": job.current_stage,
+            "retry_count": job.retry_count,
+            "failure_code": job.failure_code,
+            "failure_summary": job.failure_summary,
+            "reason_code": job.reason_code,
+            "preview_path": None,
+            "manifest_path": None,
+        }
+        if job.status == "REVIEW_REQUIRED":
+            payload["preview_path"] = str(ctx.storage.job_dir(job.id) / "final" / "final.mp4")
+            payload["manifest_path"] = str(ctx.storage.job_dir(job.id) / "manifest.json")
+        print(json.dumps(payload, indent=2))
+        return 0
     _print_job(job)
     if job.status == "REVIEW_REQUIRED":
-        print(f"preview: {ctx.storage.job_dir(job.id) / 'final' / 'final.mp4'}")
-        print(f"manifest: {ctx.storage.job_dir(job.id) / 'manifest.json'}")
+        # Human-readable hints; kept off stdout-JSON via --json above.
+        print(f"preview: {ctx.storage.job_dir(job.id) / 'final' / 'final.mp4'}", file=sys.stderr)
+        print(f"manifest: {ctx.storage.job_dir(job.id) / 'manifest.json'}", file=sys.stderr)
     return 0
 
 
@@ -355,6 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     job_show = sub.add_parser("job-show")
     job_show.add_argument("job_id")
+    job_show.add_argument("--json", action="store_true",
+                          help="Emit exactly one JSON document on stdout (for automation)")
     job_show.set_defaults(func=cmd_job_show)
 
     job_list = sub.add_parser("job-list")
