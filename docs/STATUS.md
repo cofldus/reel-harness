@@ -1,9 +1,94 @@
 # Status
 
-Last updated: 2026-07-28 (Phase 2C real-tts session, on branch
-`phase2/real-tts`). Phase 2A and Phase 2B are merged into `main`.
+Last updated: 2026-07-28 (Phase 2D real-stock-media session, on branch
+`phase2/real-stock-media`). Phase 2A, Phase 2B, and Phase 2C are merged into
+`main`.
 
-## Phase 2C — real TTS execution path + runtime dependency closure (this branch)
+## Phase 2D — real stock-media execution path (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
+
+- **`PexelsStockMediaProvider`**: a real adapter for the Pexels Video API,
+  chosen because it has a stable documented REST contract, returns portrait
+  *video* (not just images -- the pipeline needed video), and its license
+  (commercial use + modification allowed, attribution appreciated but not
+  required) maps cleanly onto the manifest's license fields. Isolated behind
+  the existing `StockMediaProvider` Protocol and the registry -- the vendor
+  name appears nowhere else. `FakeStockMediaProvider` is unchanged and
+  remains the default.
+- **Asset configuration**: `REEL_HARNESS_ASSET_PROVIDER` (`fake` | `pexels`),
+  `_BASE_URL`, `_API_KEY` (`SecretStr`), `_CONNECT_TIMEOUT`, `_READ_TIMEOUT`,
+  `_MAX_RETRIES`, `_RETRY_BACKOFF`, `_PER_PAGE`, `_ORIENTATION`,
+  `_MIN_WIDTH`/`_MIN_HEIGHT`, `_MIN_DURATION`/`_MAX_DURATION`,
+  `_SAFE_SEARCH`. Same startup-validation contract as LLM/TTS: incomplete
+  real-provider config fails loudly before any network call.
+- **Deterministic search + selection** (`pipeline.asset_query` /
+  `pipeline.asset_selection`): a sanitized, bounded query built from each
+  scene's own `visual_query` (never the narration); a hard-filter +
+  scoring selector (license/commercial-use/modification/resolution/duration
+  gates, then aspect-ratio/resolution/duration/provider-rank scoring,
+  tie-broken by provider asset id); a deterministic text-only relaxation
+  ladder on empty results that never loosens a safety/license condition;
+  cross-scene dedup via `exclude_provider_asset_ids`. Exhausting relaxation
+  with nothing eligible raises `ASSET_NOT_FOUND`.
+- **Real download validation + normalization**: streamed with a byte cap, a
+  redirect limit, an https-only redirect-scheme policy, and HTML/JSON
+  error-page rejection; the API key is sent only to the search API, never to
+  the (separately hosted) file download. Downloaded video is validated with
+  real ffprobe (resolution, duration) and normalized with real ffmpeg to
+  canonical H.264/yuv420p/muted/stable-fps -- scaling to the render
+  resolution still happens once, at RENDER time, exactly as it always has
+  for image assets. RENDER gained a video-asset path
+  (`render_scene_clip_from_video`): `-stream_loop -1` + `-shortest` loops a
+  clip shorter than the narration and trims one longer than it, both in one
+  ffmpeg invocation.
+- **Lease-fenced atomic asset publish**: the ASSET stage was the last one
+  still writing straight to its official path with no fencing at all (TTS
+  and RENDER were fenced in Phase 2A/2B). It's now fenced the same way:
+  search/select/download into a worker-private temp root, promote with
+  `os.replace()` only after re-verifying the lease, DB writes in the same
+  fenced transaction. A real second-thread lease-takeover test proves it.
+- **Asset provenance history** (schema v4, additive): `Asset` is now
+  append-only -- a reject/retry inserts a new `attempt_number` and flips the
+  prior attempt's rows to `is_current=False` instead of deleting them.
+  Rendering/resume only ever read `is_current=True` rows, so behavior is
+  unchanged; only the history is now retained and auditable. Pre-v4 rows
+  read as a single current attempt with no history gap.
+- **Strengthened `is_publish_eligible()`**: now also requires
+  `commercial_use_allowed`, `modification_allowed`, non-empty
+  `attribution_text`, and passing technical validation on every asset --
+  previously a non-fake license alone was enough, which never reflected
+  what a real provider's terms actually require. Missing/ambiguous license
+  data still fails closed.
+- **`provider-smoke asset`**: opt-in, one fixed search query, real
+  selection + download + validation, scratch-only storage, redacted
+  summary. Exit codes: 0 success; 2 not configured; 3 auth; 4 transient;
+  5 media-toolchain/validation failure; 6 no eligible candidates.
+- **Safe asset metadata via CLI and API**: `job-show --json` and a new
+  `GET /v1/jobs/{id}/assets` both expose provider/creator/license/
+  dimensions/checksum-prefix for the job's current-attempt assets, sharing
+  one `core.service.asset_safe_metadata()` function -- never a local
+  filesystem path or the CDN download link.
+- **Full hybrid E2E** (`tests/integration/test_hybrid_real_media_pipeline.py`):
+  all three real adapters (LLM + TTS + Pexels) over contract MockTransports
+  driving the real pipeline to `REVIEW_REQUIRED`, with a real ffmpeg-built
+  portrait MP4 standing in for the downloaded stock clip. Proves
+  `publish_eligible=true` once approved for a fully-real-metadata job
+  (unlike any fake-asset job), reject-stage semantics, and provenance
+  history across a reject. This is contract-transport wiring coverage, NOT
+  a live provider call.
+- **Live smoke**: `NOT RUN — credentials not configured` (no
+  `REEL_HARNESS_ASSET_API_KEY` set on this machine). `provider-smoke asset`
+  is the documented path to run it once credentials exist.
+
+Not implemented this session (explicitly out of scope, see
+`docs/OPERATIONS.md`): real publishing/OAuth, PostgreSQL, cloud storage/CDN,
+web UI, smart crop, BGM, subtitle burn-in, dubbing.
+
+Suite after Phase 2D: **284 passed, 0 failed, 0 skipped** (203 → 284,
+81 new tests). mypy clean (all source files). ruff clean.
+
+## Phase 2C — real TTS execution path + runtime dependency closure (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
 
