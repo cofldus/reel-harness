@@ -159,10 +159,7 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
-def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
-    """Opt-in check of the configured real LLM provider: one minimal script
-    generation with retries disabled, schema-validated, secrets redacted. The
-    default test suites never run this -- it is an operator command."""
+def _smoke_llm(ctx: AppContext) -> int:
     from reel_harness.config import normalize_provider_name
     from reel_harness.core.errors import (
         ProviderAuthError,
@@ -218,6 +215,86 @@ def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
         "schema_valid": True,
     }, indent=2))
     return 0
+
+
+def _smoke_tts(ctx: AppContext) -> int:
+    import shutil
+    import tempfile
+    import time
+    from pathlib import Path
+
+    from reel_harness.config import normalize_provider_name
+    from reel_harness.core.errors import (
+        DependencyError,
+        ProviderAuthError,
+        TransientProviderError,
+    )
+    from reel_harness.media.tts_audio import wav_info
+    from reel_harness.observability import redact
+    from reel_harness.providers.registry import resolve_tts_provider
+
+    name = normalize_provider_name(ctx.settings.tts_provider)
+    if name == "fake":
+        print(
+            "tts provider is 'fake' -- nothing to smoke. Set "
+            "REEL_HARNESS_TTS_PROVIDER=openai_compatible (plus base URL, model, "
+            "voice, API key) to check a real provider.",
+            file=sys.stderr,
+        )
+        return 2
+
+    smoke_settings = ctx.settings.model_copy(update={"tts_max_retries": 0})
+    provider = resolve_tts_provider(name, smoke_settings)
+    scratch = Path(tempfile.mkdtemp(prefix="reel-harness-tts-smoke-"))
+    try:
+        started = time.monotonic()
+        result = provider.synthesize(
+            "This is a short configuration check.",  # fixed, safe, one request
+            voice_id=ctx.settings.tts_voice, lang="en", dest_dir=scratch,
+        )
+        latency_ms = (time.monotonic() - started) * 1000
+        info = wav_info(result.audio_path)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except DependencyError as exc:
+        print(f"audio toolchain unavailable: {redact(str(exc))}", file=sys.stderr)
+        return 5
+    except TransientProviderError as exc:
+        print(
+            f"transient provider or audio-validation error: {redact(str(exc))}", file=sys.stderr,
+        )
+        return 4
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+        shutil.rmtree(scratch, ignore_errors=True)  # never leave smoke audio behind
+
+    print(json.dumps({
+        "provider": result.provider_id,
+        "model": getattr(provider, "model_id", None),
+        "voice": result.voice_id,
+        "format": getattr(provider, "audio_format", None),
+        "request_id_present": result.request_id is not None,
+        "duration_sec": round(result.duration_sec, 3),
+        "sample_rate": info.sample_rate,
+        "channels": info.channels,
+        "codec": "pcm_s16le",
+        "checksum_prefix": (result.checksum_sha256 or "")[:12],
+        "latency_ms": round(latency_ms, 1),
+        "audio_valid": True,
+    }, indent=2))
+    return 0
+
+
+def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Opt-in operator check of a configured real provider: one request with
+    retries disabled, real validation, secrets redacted, scratch files cleaned.
+    The default test suites never run this."""
+    if args.target == "llm":
+        return _smoke_llm(ctx)
+    return _smoke_tts(ctx)
 
 
 def cmd_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
@@ -329,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",
     )
-    provider_smoke.add_argument("target", choices=["llm"])
+    provider_smoke.add_argument("target", choices=["llm", "tts"])
     provider_smoke.set_defaults(func=cmd_provider_smoke)
 
     return parser
