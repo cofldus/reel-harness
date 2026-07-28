@@ -22,7 +22,13 @@ class SelectionPolicy:
     max_duration_sec: float = 60.0
     require_commercial_use: bool = True
     require_modification_allowed: bool = True
-    require_content_type_prefix: str = "video/"
+    # None = no content-type restriction (the Protocol is media-type agnostic
+    # -- the Fake provider legitimately returns images). The real pipeline
+    # wiring doesn't need to set this either: Pexels' video-search endpoint
+    # only ever returns video/mp4 candidates in the first place. Set this
+    # explicitly (e.g. "video/") only when a provider's results can mix media
+    # types and only one is acceptable.
+    require_content_type_prefix: str | None = None
     target_orientation: str = "portrait"
     version: str = SELECTION_VERSION
 
@@ -39,8 +45,8 @@ def _passes_hard_filters(candidate: MediaCandidate, policy: SelectionPolicy, exc
         return False
     if policy.require_modification_allowed and not candidate.modification_allowed:
         return False
-    if candidate.content_type is not None and not candidate.content_type.startswith(
-        policy.require_content_type_prefix,
+    if policy.require_content_type_prefix is not None and candidate.content_type is not None and (
+        not candidate.content_type.startswith(policy.require_content_type_prefix)
     ):
         return False
     if candidate.width is not None and candidate.width < policy.min_width:

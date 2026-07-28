@@ -14,6 +14,7 @@ from reel_harness.media import ffmpeg_render, ffprobe_validate
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.ffprobe_validate import ValidationResult
 from reel_harness.media.runner import run
+from reel_harness.pipeline import asset_query, asset_selection
 from reel_harness.pipeline.policy import check_policy
 from reel_harness.pipeline.script_schema import parse_script
 from reel_harness.providers.base import ChannelContext, TTSResult
@@ -31,6 +32,24 @@ class AssetFetchResult:
     source_url: str
     author: str | None
     license_type: str | None
+    # Phase 2D: provenance/license/selection metadata carried from the
+    # selected MediaCandidate/LocalAssetResult through to the Asset DB row
+    # and manifest. Defaults keep existing (Fake-provider, test) call sites
+    # unchanged.
+    provider_id: str = ""
+    provider_asset_id: str = ""
+    source_page_url: str | None = None
+    creator_url: str | None = None
+    commercial_use_allowed: bool = False
+    modification_allowed: bool = False
+    attribution_text: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
+    fps: float | None = None
+    request_id: str | None = None
+    query_text: str = ""
+    selection_score: float = 0.0
 
 
 @dataclass
@@ -75,18 +94,80 @@ def run_policy_checking(job) -> None:
     check_policy(job.script)
 
 
-def run_asset_fetching(job, stock_media, storage) -> list[AssetFetchResult]:
+def run_asset_fetching(
+    job, stock_media, storage, *,
+    dest_root: Path | None = None,
+    search_policy: dict | None = None,
+) -> list[AssetFetchResult]:
+    """Deterministic per-scene search -> select -> download.
+
+    For each scene: build a sanitized query from the scene's own visual_query
+    (never the narration), search, and pick the highest-scoring eligible
+    candidate (license/technical hard filters, then aspect/resolution/
+    duration/provider-rank scoring, tied broken by provider asset id -- see
+    pipeline.asset_selection). If nothing eligible comes back, the query is
+    deterministically relaxed (broader text only -- orientation/min
+    resolution/duration bounds/safe_search never relax) and searched again.
+    Exhausting the relaxation ladder with nothing eligible raises
+    ASSET_NOT_FOUND rather than ever loosening a license condition to force a
+    success. An asset already selected for an earlier scene in this job is
+    excluded from later scenes' candidates.
+
+    `dest_root=None` writes each scene's asset to the official
+    jobs/{id}/assets/scene_{i}/ location. The fenced worker instead passes a
+    worker-private temp root and promotes validated files to the official
+    location only under a held lease -- see worker.runner.
+    """
+    policy = search_policy or {}
+    orientation = policy.get("orientation", "portrait")
+    min_width = policy.get("min_width", 480)
+    min_height = policy.get("min_height", 480)
+    min_duration_floor = policy.get("min_duration_sec", 1.0)
+    max_duration = policy.get("max_duration_sec", 60.0)
+    safe_search = policy.get("safe_search", True)
+    per_page = policy.get("per_page", 15)
+
+    selection_policy = asset_selection.SelectionPolicy(
+        min_width=min_width, min_height=min_height,
+        min_duration_sec=min_duration_floor, max_duration_sec=max_duration,
+        target_orientation=orientation,
+    )
+
+    root = dest_root if dest_root is not None else storage.job_dir(job.id) / "assets"
     results: list[AssetFetchResult] = []
+    used_ids: set[str] = set()
     for index, scene in enumerate(job.script["scenes"]):
-        candidates = stock_media.search(
-            scene["visual_query"], orientation="portrait", min_duration=scene["duration_hint_sec"],
+        query = asset_query.build_scene_query(
+            scene, orientation=orientation, min_width=min_width, min_height=min_height,
+            min_duration=min_duration_floor, max_duration=max_duration, safe_search=safe_search,
         )
-        if not candidates:
-            raise ReviewRequiredSignal(
-                ReasonCode.ASSET_NOT_FOUND.value, f"scene {index}: no candidates for {scene['visual_query']!r}",
+        chosen = None
+        current = query
+        while True:
+            candidates = stock_media.search(
+                current.text, orientation=current.orientation, min_duration=current.min_duration,
+                max_duration=current.max_duration, min_width=current.min_width, min_height=current.min_height,
+                per_page=per_page, safe_search=current.safe_search,
+                exclude_provider_asset_ids=frozenset(used_ids),
             )
-        dest_dir = storage.job_dir(job.id) / "assets" / f"scene_{index}"
-        asset = stock_media.download(candidates[0], dest_dir)
+            chosen = asset_selection.select_asset(candidates, selection_policy, exclude_ids=frozenset(used_ids))
+            if chosen is not None:
+                break
+            relaxed = asset_query.relax_query(current)
+            if relaxed is None:
+                break
+            current = relaxed
+        if chosen is None:
+            raise ReviewRequiredSignal(
+                ReasonCode.ASSET_NOT_FOUND.value,
+                f"scene {index}: no eligible candidates for {query.text!r} "
+                "after exhausting query relaxation",
+            )
+        used_ids.add(chosen.candidate_id)
+        score = asset_selection.score_candidate(chosen, selection_policy)
+
+        dest_dir = root / f"scene_{index}"
+        asset = stock_media.download(chosen, dest_dir)
         results.append(
             AssetFetchResult(
                 scene_index=index,
@@ -96,6 +177,20 @@ def run_asset_fetching(job, stock_media, storage) -> list[AssetFetchResult]:
                 source_url=asset.source_url,
                 author=asset.author,
                 license_type=asset.license_type,
+                provider_id=asset.provider_id,
+                provider_asset_id=asset.provider_asset_id,
+                source_page_url=asset.source_page_url,
+                creator_url=asset.creator_url,
+                commercial_use_allowed=asset.commercial_use_allowed,
+                modification_allowed=asset.modification_allowed,
+                attribution_text=asset.attribution_text,
+                width=asset.width,
+                height=asset.height,
+                duration_sec=asset.duration_sec,
+                fps=asset.fps,
+                request_id=asset.request_id,
+                query_text=query.text,
+                selection_score=score,
             )
         )
     return results
@@ -150,9 +245,21 @@ def run_rendering(
     clip_paths: list[Path] = []
     for asset, tts_result in zip(assets, tts_results, strict=True):
         clip_path = work_dir / f"scene_{asset.scene_index}.mp4"
-        argv = ffmpeg_render.render_scene_clip(
-            ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
-        )
+        if asset.mime_type.startswith("video/"):
+            # Real stock-video asset (already normalized to H.264/yuv420p/
+            # muted at ASSET time -- see media.asset_video): loop it
+            # indefinitely and let -shortest cut to the TTS audio length, so
+            # a clip shorter than the narration repeats from its start and one
+            # longer than the narration is trimmed from its start. One ffmpeg
+            # invocation handles both duration-policy cases (see
+            # docs/OPERATIONS.md).
+            argv = ffmpeg_render.render_scene_clip_from_video(
+                ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
+            )
+        else:
+            argv = ffmpeg_render.render_scene_clip(
+                ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
+            )
         result = run(argv, timeout=60)
         if result.returncode != 0:
             raise TransientProviderError(f"ffmpeg scene render failed: {result.stderr[-500:]}")

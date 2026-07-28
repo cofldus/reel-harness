@@ -96,13 +96,26 @@ def test_selection_hard_filters_reject_non_commercial_or_non_modifiable() -> Non
     assert chosen.candidate_id == "c"
 
 
-def test_selection_hard_filters_reject_missing_license_and_wrong_content_type() -> None:
+def test_selection_hard_filters_reject_missing_license() -> None:
     policy = SelectionPolicy()
     no_license = _candidate("a", license_type=None)
-    wrong_type = _candidate("b", content_type="image/jpeg")
     ok = _candidate("c")
-    assert select_asset([no_license, wrong_type], policy) is None
-    assert select_asset([no_license, wrong_type, ok], policy).candidate_id == "c"
+    assert select_asset([no_license], policy) is None
+    assert select_asset([no_license, ok], policy).candidate_id == "c"
+
+
+def test_selection_content_type_filter_is_opt_in_not_a_default() -> None:
+    """The Protocol is media-type agnostic (the Fake provider legitimately
+    returns images) -- the default policy must not silently reject them."""
+    default_policy = SelectionPolicy()
+    image_candidate = _candidate("a", content_type="image/png")
+    assert select_asset([image_candidate], default_policy) is not None
+
+    video_only_policy = SelectionPolicy(require_content_type_prefix="video/")
+    wrong_type = _candidate("b", content_type="image/jpeg")
+    ok = _candidate("c", content_type="video/mp4")
+    assert select_asset([wrong_type], video_only_policy) is None
+    assert select_asset([wrong_type, ok], video_only_policy).candidate_id == "c"
 
 
 def test_selection_hard_filters_reject_below_min_resolution_and_out_of_duration_range() -> None:
