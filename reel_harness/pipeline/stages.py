@@ -101,11 +101,17 @@ def run_asset_fetching(job, stock_media, storage) -> list[AssetFetchResult]:
     return results
 
 
-def run_tts_generating(job, tts, storage) -> list[TTSResult]:
+def run_tts_generating(job, tts, storage, dest_root: Path | None = None) -> list[TTSResult]:
+    """`dest_root=None` writes each scene's audio to the official
+    jobs/{id}/tts/scene_{i}/ location. The fenced worker instead passes a
+    worker-private temp root and promotes validated files to the official
+    location only under a held lease -- see worker.runner."""
+    root = dest_root if dest_root is not None else storage.job_dir(job.id) / "tts"
+    default_voice = getattr(tts, "voice_id", None) or "fake-voice-1"
     results: list[TTSResult] = []
     for index, scene in enumerate(job.script["scenes"]):
-        dest_dir = storage.job_dir(job.id) / "tts" / f"scene_{index}"
-        results.append(tts.synthesize(scene["voiceover"], voice_id="fake-voice-1", lang="en", dest_dir=dest_dir))
+        dest_dir = root / f"scene_{index}"
+        results.append(tts.synthesize(scene["voiceover"], voice_id=default_voice, lang="en", dest_dir=dest_dir))
     return results
 
 

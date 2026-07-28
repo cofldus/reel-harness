@@ -191,6 +191,16 @@ def test_expired_lease_is_taken_over_and_the_late_worker_is_fenced_out(tmp_path)
         leftovers = list((storage.job_dir(job.id) / "final").glob("final-inprogress-*.mp4"))
         assert leftovers == [], "worker-private temp renders must not linger"
 
+        # Official TTS audio belongs to worker B alone: every scene file
+        # matches B's manifest checksum and no worker-private temp trees linger.
+        for entry in official_manifest["tts_audio"]:
+            scene_wav = (
+                storage.job_dir(job.id) / "tts" / f"scene_{entry['scene_index']}" / "tts.wav"
+            )
+            assert hashlib.sha256(scene_wav.read_bytes()).hexdigest() == entry["checksum_sha256"]
+        assert list(storage.job_dir(job.id).glob("tts-inprogress-*")) == [], \
+            "worker-private tts temp trees must not linger"
+
 
 def test_release_with_rotated_token_cannot_release_new_owner(
     job_service, channel, session_factory,

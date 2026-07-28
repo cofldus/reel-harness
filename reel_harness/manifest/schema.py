@@ -16,6 +16,15 @@ class LLMInfo(BaseModel):
 class TTSInfo(BaseModel):
     provider_id: str
     voice_id: str
+    model_id: str | None = None
+
+
+class TTSAudioInfo(BaseModel):
+    """Per-scene record of the (normalized) audio actually used for the render."""
+
+    scene_index: int
+    checksum_sha256: str | None = None
+    duration_sec: float | None = None
 
 
 class AssetInfo(BaseModel):
@@ -69,6 +78,7 @@ class Manifest(BaseModel):
     script_title: str
     llm: LLMInfo
     tts: TTSInfo
+    tts_audio: list[TTSAudioInfo] = []
     assets: list[AssetInfo]
     render: RenderInfo = RenderInfo()
     validation: ValidationInfo = ValidationInfo()
