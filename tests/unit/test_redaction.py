@@ -33,7 +33,9 @@ def test_url_query_token_is_redacted_but_param_name_kept() -> None:
 
 
 def test_json_error_body_fields_are_redacted() -> None:
-    out = redact('provider said: {"api_key": "FAKEJSONKEY123", "access_token": "FAKETOKEN456789", "detail": "quota"}')
+    out = redact(
+        'provider said: {"api_key": "FAKEJSONKEY123", "access_token": "FAKETOKEN456789", "detail": "quota"}'
+    )
     assert "FAKEJSONKEY123" not in out
     assert "FAKETOKEN456789" not in out
     assert "quota" in out
