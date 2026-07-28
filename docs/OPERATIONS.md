@@ -1,9 +1,10 @@
-# Reel Harness — Operations (Phase 2D)
+# Reel Harness — Operations (Phase 3A)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
-LLM provider configuration, smoke checks, and troubleshooting. Design
-rationale lives in `docs/ARCHITECTURE.md`; current completion state in
-`docs/STATUS.md`.
+LLM/TTS/asset provider configuration, YouTube publishing, smoke checks, and
+troubleshooting. Design rationale lives in `docs/ARCHITECTURE.md`; publisher-
+specific API research lives in `docs/PUBLISHING.md`; current completion state
+in `docs/STATUS.md`.
 
 ## Worker daemon
 
@@ -235,6 +236,165 @@ candidates surviving selection. Without an API key configured, every one
 of these refuses before any network I/O. The default pytest suite and
 production-smoke never call a real provider.
 
+## Publishing (YouTube)
+
+Design/API research lives in `docs/PUBLISHING.md`; this section is the
+operational how-to. A `Publication` is a separate object from a `Job` — one
+completed, approved job can have multiple publications (different accounts,
+or a retried one after a failure) — with its own status machine
+(`reel_harness/core/state_machine.py`'s `PublicationStatus`), separate from
+`Job.status`.
+
+### 1. Configure the OAuth client
+
+```
+REEL_HARNESS_YOUTUBE_CLIENT_ID=...
+REEL_HARNESS_YOUTUBE_CLIENT_SECRET=...      # env/.env only; never persisted, always redacted
+REEL_HARNESS_CREDENTIAL_DIR=...             # a directory OUTSIDE this repository checkout
+REEL_HARNESS_YOUTUBE_UPLOAD_CHUNK_SIZE=2097152   # must be a positive multiple of 262144 (256 KiB)
+REEL_HARNESS_YOUTUBE_CATEGORY_ID=22         # default: 22 ("People & Blogs")
+REEL_HARNESS_YOUTUBE_MADE_FOR_KIDS=false    # sent explicitly on every upload, never omitted
+```
+
+`REEL_HARNESS_CREDENTIAL_DIR` must resolve outside the repository — a
+repo-internal path (including the cwd during tests) is rejected at startup
+by `publisher.secret_store.resolve_secret_dir`, since credentials must never
+land somewhere `git add -A` could pick them up. Refresh tokens, access
+tokens, and the resumable upload session URI all live there (JSON files,
+one per account/session), never in the jobs SQLite DB.
+
+### 2. Connect an account
+
+```
+uv run reel-harness publisher-auth youtube [--account ALIAS]
+```
+
+Opens a system browser to Google's consent screen (PKCE + `state`, loopback
+`http://127.0.0.1:{port}` redirect, single-use, times out if left idle).
+Requests `youtube.upload` + `youtube.readonly` only (never the broader
+`youtube`/`youtubepartner` scopes). On success, prints the connected
+channel's id/title and whether a refresh token was issued — never the token
+itself. `--account` lets more than one channel be connected
+(`default` if omitted); every publish/smoke/refresh command below accepts
+the same flag.
+
+### 3. Check readiness without uploading anything
+
+```
+uv run reel-harness publish-job <job_id> --provider youtube --dry-run [--account ALIAS] [--privacy private|unlisted|public]
+```
+
+Re-checks eligibility fresh (job COMPLETED, approved, manifest valid, final
+video checksum matches, technical validation passed, every current asset's
+license/checksum still holds — see `core.publish_eligibility`), previews the
+deterministic title/description/tags/category/madeForKids metadata that
+would be sent, reports whether an OAuth credential is saved for the account,
+the video file size, and the configured chunk size. **Makes no external
+request.** Exit 0 only when every check passes; prints one JSON document
+either way (`{"eligible": ..., "eligibility_reasons": [...], ...}`).
+
+### 4. Create the publication (upload happens asynchronously)
+
+```
+uv run reel-harness publish-job <job_id> --provider youtube [--account ALIAS] [--privacy private]
+```
+
+Re-checks eligibility, then creates a `Publication` row (status
+`READY_TO_UPLOAD`) and returns immediately — this command never uploads
+anything itself. Idempotent: calling it again for the same
+(provider, account, job, final-video-checksum) returns the existing
+publication instead of creating a duplicate upload target. `--privacy` is
+`private` by default; see the public-upload safeguard below.
+
+### 5. Run the publisher worker
+
+```
+uv run reel-harness publisher-run-once [--worker-id ID] [--lease-timeout SEC]
+uv run reel-harness publisher-run [--worker-id ID] [--poll-interval SEC]
+    [--lease-timeout SEC] [--max-publications N] [--idle-exit-after SEC] [--stop-on-error]
+```
+
+A **separate** daemon from `worker-run` (render pipeline) — run both if you
+want jobs to render and publish automatically. Same lease-fencing discipline
+as the render worker, on its own `locked_by`/`heartbeat_at`/`lease_token`
+columns (`Publication`, not `Job`), so the two workers never contend over
+the same lease. Drives a leased publication through session creation →
+chunked resumable upload (resuming from the provider's own confirmed offset
+after any interruption, never guessing) → one processing-status poll. A
+transient upstream error backs off to `RETRY_WAIT`; an auth failure lands in
+`AUTH_REQUIRED` and a quota error in `QUOTA_BLOCKED` (both need a manual fix
+before they'll retry — retrying immediately cannot resolve either).
+
+### 6. Track processing to completion
+
+Uploading a video is not the same as it being published — YouTube processes
+it afterward. `publisher-run`'s single poll per lease only checks once, so
+poll again explicitly:
+
+```
+uv run reel-harness publication-status <publication_id>      # read-only, no external request
+uv run reel-harness publication-refresh <publication_id>     # re-polls PROCESSING publications only
+```
+
+`publication-refresh` only succeeds while the publication is `PROCESSING`;
+it advances to `PUBLISHED` (with the real `publication_url`) once YouTube
+reports `processingStatus=succeeded`, or to `FAILED` on `failed`/
+`terminated`. The equivalent API endpoints are `POST /v1/jobs/{job_id}/publications`,
+`GET /v1/publications/{id}`, `POST /v1/publications/{id}/refresh`, and
+`POST /v1/publications/{id}/cancel`.
+
+### 7. Public-upload safeguard
+
+`private` is always available with no extra confirmation. `public` requires
+**all four** of: `--privacy public`, `--confirm-public-upload`, the job
+already being approved, and the `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true`
+feature flag — missing any one of these refuses the publish with no upload
+attempted. CI, the default pytest suite, and `provider-smoke` never perform
+a real public upload.
+
+### 8. Smoke-check the account
+
+```
+uv run reel-harness provider-smoke publisher youtube [--account ALIAS]
+uv run reel-harness provider-smoke publisher youtube --upload-private-test --confirm-test-upload [--account ALIAS]
+```
+
+Default: read-only — refreshes the token if needed and fetches the
+connected channel's identity, no quota-significant call. With both
+`--upload-private-test` and `--confirm-test-upload`: additionally uploads
+one small, real, always-`private`, clearly-titled
+(`[reel-harness provider-smoke test upload]`) test clip built from a local
+scratch file (never a real job's video) and cleans up the local scratch
+directory. **Never auto-deletes the remote video** — YouTube publisher-smoke
+does not implement remote delete (see below). Without a configured OAuth
+client or a saved credential, prints `NOT RUN — credentials not configured`
+and makes no request.
+
+### Cancellation policy
+
+`reel-harness publication-status`/API `cancel` behavior depends on where the
+publication is: `CREATED`/`READY_TO_UPLOAD`/`RETRY_WAIT`/`AUTH_REQUIRED`/
+`QUOTA_BLOCKED`/`UPLOAD_COMPLETED`/`PROCESSING` cancel immediately (no
+worker has anything in flight, and `UPLOAD_COMPLETED`/`PROCESSING` cancel is
+purely local bookkeeping — it never deletes anything already on YouTube).
+`UPLOADING`/`UPLOAD_PAUSED` only set a flag, honored by the worker at its
+next chunk boundary (an in-flight chunk write is never yanked mid-request).
+`PUBLISHED`/`CANCELLED` are terminal and refuse.
+
+### Remote video delete — not implemented in Phase 3A
+
+There is no `publication-delete`/`--delete-remote` command. Cancelling a
+publication at any status never deletes an already-uploaded or already-
+published YouTube video; removing a real video is left to YouTube Studio
+directly. This is a deliberate Phase 3A scope boundary, not an oversight —
+see `docs/PUBLISHING.md`.
+
+### Out of scope for Phase 3A
+
+TikTok/Instagram publishers, automatic public publishing, scheduled-publish
+automation, automatic remote delete, and an OAuth account-management UI —
+none of these exist yet.
+
 ## Cancelling a job
 
 `reel-harness job-cancel <id>` / `POST /v1/jobs/{id}/cancel` share one
@@ -257,15 +417,15 @@ refused once a job is `CANCELLED`.
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
 
-## Not yet supported (Phase 2D scope ends here)
+## Not yet supported (Phase 3A scope ends here)
 
-Real publishing (the license gate keeps `publish_eligible=false` for every
-fake-asset job, and now correctly evaluates `true`/`false` for a real-asset
-job based on its actual commercial-use/modification/attribution terms), no
-Publisher implementation exists yet to call it. Also not yet supported:
-OAuth (YouTube/TikTok/Instagram), automatic upload, PostgreSQL, cloud
-storage/CDN, web UI, face-recognition smart crop, BGM mixing, subtitle
-burn-in, multi-language dubbing.
+YouTube publishing exists (see "Publishing (YouTube)" above); TikTok and
+Instagram publishers do not. Also not yet supported: automatic public
+publishing (public always requires the explicit double-confirmation +
+feature flag above), scheduled-publish automation, automatic remote video
+delete, an OAuth account-management UI, PostgreSQL, cloud storage/CDN, web
+UI, face-recognition smart crop, BGM mixing, subtitle burn-in, multi-language
+dubbing.
 
 ## Troubleshooting
 
@@ -282,3 +442,10 @@ burn-in, multi-language dubbing.
 | job stuck `RETRY_WAIT` with old `next_retry_at` | no worker running | start `worker-run` |
 | worker exits 1 immediately | DB/storage/schema unusable | check `GET /readyz` / `doctor`, fix, restart |
 | `/readyz` 503 `schema: unsupported version` | DB from a newer schema | upgrade the code or use a matching DB |
+| `publish-job --dry-run` reports `eligible: false` | job/manifest/asset state doesn't pass `core.publish_eligibility` | check `eligibility_reasons` in the JSON output — each is a specific code (e.g. `APPROVAL_MISSING`, `FASTSTART_MISSING`, `ASSET_LICENSE_NOT_PUBLISHABLE`) |
+| `publish-job` / `provider-smoke publisher youtube` print `NOT RUN — credentials not configured` | OAuth client and/or a saved credential missing | set `REEL_HARNESS_YOUTUBE_CLIENT_ID`/`_CLIENT_SECRET`, then `publisher-auth youtube` |
+| `SecretStoreError: credential directory ... is inside the repository` | `REEL_HARNESS_CREDENTIAL_DIR` resolves under the repo checkout | point it outside the repository — credentials must never be `git add`-able |
+| publication stuck `AUTH_REQUIRED` | saved refresh token invalid/revoked | re-run `publisher-auth youtube --account ALIAS`, then let the worker retry |
+| publication stuck `QUOTA_BLOCKED` | provider quota exhausted | wait for the provider's quota reset, then let the worker retry |
+| publication stuck `PROCESSING` | uploaded but YouTube hasn't finished processing yet | `publication-refresh <id>` to re-poll; this never auto-advances on its own schedule |
+| `publish-job --privacy public` refused | missing one of the four required public-upload conditions | add `--confirm-public-upload`, ensure the job is approved, and set `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` |

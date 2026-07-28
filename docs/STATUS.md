@@ -1,10 +1,143 @@
 # Status
 
-Last updated: 2026-07-28 (Phase 2D real-stock-media session, on branch
-`phase2/real-stock-media`). Phase 2A, Phase 2B, and Phase 2C are merged into
-`main`.
+Last updated: 2026-07-28 (Phase 3A publisher-foundation-and-youtube-upload
+session, on branch `phase3/youtube-publisher`). Phase 2A through Phase 2D
+are merged into `main`.
 
-## Phase 2D — real stock-media execution path (this branch)
+## Phase 3A — publisher foundation and YouTube upload (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
+`docs/PUBLISHING.md` for the official API research this is built from):
+
+- **Vendor-neutral `Publisher` Protocol** (`providers/base.py`):
+  `validate_configuration`/`create_upload_session`/`upload_chunk`/
+  `query_upload_offset`/`get_processing_status`, plus `PublicationMetadata`/
+  `UploadSessionHandle`/`UploadChunkResult`/`ProcessingStatusResult`
+  dataclasses. Only `providers/registry.py` and `providers/youtube_publisher.py`
+  know the vendor name "youtube" exists.
+- **A separate `Publication`/`PublicationAuditEvent` state machine**
+  (`core/state_machine.py`), deliberately independent from `Job.status` —
+  15 statuses, an explicit allowed-transition graph (eligibility failure can
+  never reach `UPLOADING`; `FAILED` only leaves via a manual retry;
+  `PUBLISHED`/`CANCELLED` are terminal; no re-upload of an already-uploading
+  attempt), and required-field enforcement per status
+  (`RETRY_WAIT` always carries `retry_target_status`/`next_retry_at`/
+  `failure_code`/`failure_summary`).
+- **`is_publish_eligible()` is a real enforced gate**
+  (`core/publish_eligibility.py`): re-derives job status, approval,
+  manifest validity, the final video's actual checksum/codec/duration/
+  faststart, and every *current* asset's license/commercial-use/
+  modification/attribution terms **and** its on-disk checksum, fresh from
+  DB/disk every call — never trusting an earlier check or an in-memory
+  value. Fails closed with a structured JSON reason list
+  (`core/publish_service.PublicationService.check_eligibility`,
+  `publish-job --dry-run`).
+- **Deterministic, safe metadata generation** (`pipeline/publish_metadata.py`):
+  title/description/tags built only from manifest fields (topic, script
+  title, asset attribution) — never a local path, API key, signed URL, full
+  internal job id, raw provider response, or private prompt. Privacy
+  defaults to `private`; `selfDeclaredMadeForKids` is always sent
+  explicitly, never omitted.
+- **Public-upload safeguard**: `public` requires all four of
+  `--privacy public`, `--confirm-public-upload`, job approval, and the
+  `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD` feature flag; `private` needs none of
+  them. CI/tests/`provider-smoke` never perform a real public upload.
+- **Repository-external OAuth credential storage**
+  (`publisher/secret_store.py`, `publisher/credentials.py`): a
+  `FileSecretStore` that rejects repo-internal directories (via
+  `Path.relative_to`), symlinks, and path traversal; chmod owner-only on
+  POSIX. Access/refresh tokens, the client secret, and the real resumable
+  upload session URI are **never** written to the jobs DB — the DB only
+  ever holds an opaque `Publication.upload_session_reference` key.
+- **`publisher-auth youtube [--account ALIAS]`**: real OAuth 2.0
+  installed-app flow with PKCE + `state`, loopback-only
+  (`http://127.0.0.1:{port}`) callback server, single-use, timed out, never
+  logs a token/code/verifier.
+- **`YouTubePublisher`** (`providers/youtube_publisher.py`): the real
+  official YouTube Data API v3 resumable-upload protocol over plain
+  `httpx` (no Google SDK) — session creation, 256 KiB-granularity chunked
+  upload, offset query + resume after interruption, completion
+  verification, processing-status polling, and full upstream error
+  classification (`UPSTREAM_AUTH`/`UPSTREAM_PERMISSION_DENIED`/
+  `UPSTREAM_QUOTA_EXCEEDED`/`UPSTREAM_RATE_LIMITED`/`UPLOAD_SESSION_EXPIRED`/
+  `UPLOAD_INTERRUPTED`/`UPLOAD_REJECTED`/`PROCESSING_FAILED`/
+  `METADATA_INVALID`), each with an explicit retryable flag and never
+  storing the full provider response body.
+- **Idempotent publication creation**: scoped to
+  (provider, account_reference, job_id, final_video_checksum) via a real DB
+  `UniqueConstraint`, not just an application check — concurrent identical
+  requests and the create/`IntegrityError` race both resolve to the same
+  row, never a duplicate upload target.
+- **A separate publish lease/lock** (`worker/publish_lease.py`) from the
+  render job lease — its own `locked_by`/`heartbeat_at`/`lease_token`
+  columns on `Publication`, its own stale-recovery/backoff policy
+  (`PUBLICATION_RETRY_POLICY`), and `lease_specific_publication` for
+  out-of-turn `publication-refresh` polling of one `PROCESSING` row.
+- **`worker/publish_runner.run_publication`**: drives one leased
+  publication forward (session → chunked upload → completion →
+  processing poll), resuming a real interrupted upload from the provider's
+  own confirmed offset (never guessing, never re-sending confirmed bytes),
+  self-healing an expired session mid-upload, and landing auth/quota
+  failures in dedicated `AUTH_REQUIRED`/`QUOTA_BLOCKED` states an operator
+  can act on directly instead of a generic `FAILED`.
+- **A separate publisher worker daemon** (`worker/publish_daemon.py`,
+  `publisher-run`/`publisher-run-once`) — structurally mirrors the render
+  `WorkerDaemon` but is a distinct process, never conflated with it.
+- **Append-only `PublicationAuditEvent` log**: `eligibility_checked`,
+  `publication_created`, `upload_session_created`, `chunk_uploaded`,
+  `upload_resumed`, `upload_completed`, `processing_started`,
+  `processing_completed`, `publication_failed`, `publication_cancelled` —
+  chunk events store only byte ranges, never a URL or payload.
+- **`publish-job <job_id> --provider youtube [--dry-run]`** and
+  **`provider-smoke publisher youtube [--upload-private-test --confirm-test-upload]`**:
+  dry-run reports eligibility + a metadata/config readiness preview with
+  zero external requests; the smoke command defaults to a read-only channel
+  identity check and only uploads a real, tiny, clearly-labeled private
+  test clip with both opt-in flags. `publication-status`/
+  `publication-refresh` CLI commands and the matching
+  `POST /v1/jobs/{id}/publications` / `GET /v1/publications/{id}` /
+  `POST /v1/publications/{id}/refresh` / `POST /v1/publications/{id}/cancel`
+  API endpoints complete the surface.
+- **Cancellation policy per status**: idle statuses cancel immediately;
+  `UPLOADING`/`UPLOAD_PAUSED` only flag for the worker's next chunk
+  boundary; `UPLOAD_COMPLETED`/`PROCESSING` cancel is purely local
+  bookkeeping and never deletes anything already on YouTube; `PUBLISHED`
+  cannot be cancelled. Remote video delete is explicitly **not
+  implemented** this phase — documented, not silently missing.
+- **Contract test suite**: unit-level `YouTubePublisher` adapter contract
+  tests (`tests/unit/test_youtube_publisher.py`, all via
+  `httpx.MockTransport`) plus a full resumable-upload "contract E2E"
+  (`tests/e2e/test_youtube_publisher_e2e.py`) that drives a real
+  ffmpeg-built `final.mp4` through the entire Publication state machine
+  against the real adapter and a stateful fake YouTube server —
+  real Content-Range/Content-Length wire validation, a byte-for-byte
+  checksum of everything the fake server received, a transient mid-upload
+  failure that resumes from the provider's own confirmed offset without
+  re-sending an already-confirmed chunk, idempotency, the full audit
+  trail, and real (polled) processing completion. Still contract-transport
+  coverage, **not** a live YouTube upload.
+- **Live smoke**: `NOT RUN — credentials not configured` (no
+  `REEL_HARNESS_YOUTUBE_CLIENT_ID`/`_CLIENT_SECRET` set on this machine).
+  `provider-smoke publisher youtube` is the documented path to run the
+  read-only check once credentials exist; add
+  `--upload-private-test --confirm-test-upload` for a real private test
+  upload. **Live YouTube publishing remains unverified because OAuth
+  credentials were not configured on this machine.**
+
+Explicitly out of scope this phase (see `docs/OPERATIONS.md`): TikTok/
+Instagram publishers, automatic public publishing, scheduled-publish
+automation, automatic remote video delete, an OAuth account-management UI,
+web dashboard, PostgreSQL, cloud secret manager, cloud queue,
+auto-commenting, analytics collection, thumbnail upload, subtitle upload.
+
+Suite after Phase 3A: **439 passed, 0 failed, 1 skipped** (284 → 439, 155
+new tests). The one skip is pre-existing and unrelated to publishing
+(`test_secret_store.py`'s symlink-rejection test, skipped because this
+Windows machine doesn't permit symlink creation without elevated
+privileges). mypy clean (62 source files). ruff clean (`reel_harness` +
+`tests`).
+
+## Phase 2D — real stock-media execution path (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
 
