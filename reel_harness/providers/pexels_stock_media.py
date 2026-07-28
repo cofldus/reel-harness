@@ -229,7 +229,12 @@ class PexelsStockMediaProvider:
             local_path=output_path,
             checksum_sha256=checksum,
             mime_type="video/mp4",
-            source_url=candidate.download_url,
+            # The canonical *page* URL, matching FakeStockMediaProvider's
+            # convention -- the CDN file link (candidate.download_url) is used
+            # only transiently to fetch the bytes and is never persisted to
+            # the DB or manifest, the same way a signed/temporary URL never
+            # would be (see docs/OPERATIONS.md).
+            source_url=candidate.source_url,
             author=candidate.author,
             license_type=candidate.license_type,
             provider_id=self.provider_id,
