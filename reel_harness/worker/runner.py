@@ -199,24 +199,52 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
     elif stage is Stage.POLICY:
         stages.run_policy_checking(job)
     elif stage is Stage.ASSET:
-        context["assets"] = stages.run_asset_fetching(job, providers.stock_media, storage)
-        # Replace (not append) this job's Asset rows so a later resume restores
-        # exactly the current attempt's assets. StageRun history is unaffected.
-        session.execute(delete(Asset).where(Asset.job_id == job.id))
-        for result in context["assets"]:
-            session.add(
-                Asset(
-                    job_id=job.id,
-                    scene_index=result.scene_index,
-                    source_provider=providers.stock_media.provider_id,
-                    source_url=result.source_url,
-                    author=result.author,
-                    license_type=result.license_type,
-                    local_path=str(result.local_path),
-                    checksum_sha256=result.checksum_sha256,
-                    mime_type=result.mime_type,
-                )
+        # Same fenced-promote pattern as TTS/RENDER: search/select/download
+        # into a worker-private temp root, then move each scene's asset to
+        # the official assets/scene_i/ location only while the lease is
+        # provably held. A fenced-out worker cleans up only its own temp tree
+        # and never touches the official assets or the Asset table.
+        official_root = storage.job_dir(job.id) / "assets"
+        temp_root = storage.job_dir(job.id) / f"assets-inprogress-{uuid.uuid4().hex}"
+        search_policy = (getattr(job, "provider_config", None) or {}).get("asset_search_policy")
+        try:
+            fetched_assets = stages.run_asset_fetching(
+                job, providers.stock_media, storage, dest_root=temp_root, search_policy=search_policy,
             )
+            if not assert_lease(session, job.id, lease_token):
+                session.rollback()
+                raise LeaseLostSignal(stage.value)
+            promoted_assets: list[stages.AssetFetchResult] = []
+            for fetched in fetched_assets:
+                official_dir = official_root / fetched.local_path.parent.name
+                official_dir.mkdir(parents=True, exist_ok=True)
+                official_path = official_dir / fetched.local_path.name
+                os.replace(fetched.local_path, official_path)
+                promoted_assets.append(dataclasses.replace(fetched, local_path=official_path))
+            context["assets"] = promoted_assets
+            # Replace (not append) this job's Asset rows so a later resume
+            # restores exactly the current attempt's assets. StageRun history
+            # is unaffected. This is inside the same transaction _fenced_commit
+            # (called by the caller after this returns) commits -- so on a lost
+            # lease at that later point, session.rollback() undoes these writes
+            # too, in addition to the assert_lease check already done above.
+            session.execute(delete(Asset).where(Asset.job_id == job.id))
+            for fetched in promoted_assets:
+                session.add(
+                    Asset(
+                        job_id=job.id,
+                        scene_index=fetched.scene_index,
+                        source_provider=providers.stock_media.provider_id,
+                        source_url=fetched.source_url,
+                        author=fetched.author,
+                        license_type=fetched.license_type,
+                        local_path=str(fetched.local_path),
+                        checksum_sha256=fetched.checksum_sha256,
+                        mime_type=fetched.mime_type,
+                    )
+                )
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
     elif stage is Stage.TTS:
         # Same fenced-promote pattern as RENDER: synthesize (and validate/
         # normalize, for real providers) into a worker-private temp root, then
