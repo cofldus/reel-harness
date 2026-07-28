@@ -33,6 +33,20 @@ class AssetInfo(BaseModel):
     author: str | None
     license_type: str | None
     checksum_sha256: str
+    # Phase 2D: provenance/license metadata a real stock-media provider fills
+    # in (all None/False for Fake-provider jobs, which is exactly why they
+    # stay publish_eligible=False regardless of approval -- see
+    # is_publish_eligible below).
+    provider_id: str = ""
+    provider_asset_id: str = ""
+    source_page_url: str | None = None
+    creator_url: str | None = None
+    commercial_use_allowed: bool = False
+    modification_allowed: bool = False
+    attribution_text: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
 
 
 class ApprovalInfo(BaseModel):
@@ -89,18 +103,27 @@ class Manifest(BaseModel):
 
 def is_publish_eligible(manifest: Manifest) -> bool:
     """False if any asset carries a non-publishable license (FAKE_TEST_LICENSE
-    today), if no asset license is recorded at all, or if the job hasn't been
-    approved yet. This is the license/approval half of a publish gate; there is
-    no Publisher implementation yet for it to actually guard (see
-    docs/ARCHITECTURE.md Extension points), so nothing currently calls this in
-    a real publish path -- it exists so that check is not designed after the
-    fact once publishing is added.
+    today), has no license recorded at all, does not allow commercial use or
+    modification, or has no attribution text recorded; also False if the job
+    hasn't been approved, has no assets, or technical validation didn't pass.
+    Ambiguous or missing license information fails closed (False), never
+    defaults to eligible. This is the license/approval half of a publish
+    gate; there is no Publisher implementation yet for it to actually guard
+    (see docs/ARCHITECTURE.md Extension points), so nothing currently calls
+    this in a real publish path -- it exists so that check is not designed
+    after the fact once publishing is added.
     """
     if manifest.approval.decision != "approve":
         return False
     if not manifest.assets:
         return False
+    if manifest.validation.video_codec is None or manifest.validation.audio_codec is None:
+        return False
     for asset in manifest.assets:
         if asset.license_type is None or asset.license_type in NON_PUBLISHABLE_LICENSES:
+            return False
+        if not asset.commercial_use_allowed or not asset.modification_allowed:
+            return False
+        if not asset.attribution_text:
             return False
     return True

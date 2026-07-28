@@ -53,6 +53,16 @@ def build_manifest(
                 author=a.author,
                 license_type=a.license_type,
                 checksum_sha256=a.checksum_sha256,
+                provider_id=a.provider_id,
+                provider_asset_id=a.provider_asset_id,
+                source_page_url=a.source_page_url,
+                creator_url=a.creator_url,
+                commercial_use_allowed=a.commercial_use_allowed,
+                modification_allowed=a.modification_allowed,
+                attribution_text=a.attribution_text,
+                width=a.width,
+                height=a.height,
+                duration_sec=a.duration_sec,
             )
             for a in assets
         ],

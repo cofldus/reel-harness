@@ -1,4 +1,4 @@
-# Reel Harness — Operations (Phase 2C)
+# Reel Harness — Operations (Phase 2D)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
 LLM provider configuration, smoke checks, and troubleshooting. Design
@@ -66,20 +66,6 @@ host changed, provider unregistered), the job fails explicitly with
 `PROVIDER_NOT_CONFIGURED` instead of silently switching providers. Fix the
 configuration, then `job-retry` the job.
 
-## Real-provider smoke check
-
-```
-uv run reel-harness provider-smoke llm
-```
-
-Opt-in, single request, retries disabled. Prints a redacted summary
-(provider, model, prompt version, request id, token usage, scene count) on
-success. Exit codes: 0 success; 2 not configured / fake provider selected;
-3 auth error; 4 transient (timeout/rate limit/5xx); 5 malformed/empty/refused
-response or schema mismatch. Without an API key configured it refuses before
-any network I/O. The default pytest suite and production-smoke never call a
-real provider.
-
 ## Choosing the TTS provider
 
 Default is the fake provider (no network). To point at a real
@@ -126,23 +112,128 @@ audio path only after the fenced commit succeeds — a worker that lost its
 lease (or a late response racing a retake) can never overwrite the current
 lease owner's audio, and no temp files leak on that path.
 
+## Choosing the stock-media provider
+
+Default is the fake provider (no network; produces stand-in PNG images
+stamped `FAKE_TEST_LICENSE`, never publish-eligible). To point at the real
+Pexels Video API, set:
+
+```
+REEL_HARNESS_ASSET_PROVIDER=pexels
+REEL_HARNESS_ASSET_BASE_URL=https://api.pexels.com/videos   # default; rarely needs changing
+REEL_HARNESS_ASSET_API_KEY=...       # env/.env only; never persisted, always redacted
+REEL_HARNESS_ASSET_CONNECT_TIMEOUT / READ_TIMEOUT / MAX_RETRIES / RETRY_BACKOFF
+REEL_HARNESS_ASSET_PER_PAGE=15
+REEL_HARNESS_ASSET_ORIENTATION=portrait   # portrait | landscape | square
+REEL_HARNESS_ASSET_MIN_WIDTH=480
+REEL_HARNESS_ASSET_MIN_HEIGHT=480
+REEL_HARNESS_ASSET_MIN_DURATION=1.0
+REEL_HARNESS_ASSET_MAX_DURATION=60.0
+REEL_HARNESS_ASSET_SAFE_SEARCH=true
+```
+
+**Why Pexels**: unlike the LLM/TTS adapters (which talk to any
+OpenAI-compatible endpoint via a protocol shape, not a specific vendor),
+stock-video search has no equivalent cross-vendor standard, so a concrete
+vendor had to be picked. Pexels was chosen because (1) its Video Search API
+(`GET /videos/search`) is stable and fully documented
+(https://www.pexels.com/api/documentation/#videos-search), (2) it serves
+real portrait *video* files, not just images, and (3) its license
+(https://www.pexels.com/license/ — free for commercial and non-commercial
+use, modification allowed, attribution appreciated but not legally
+required) maps cleanly onto the manifest's `commercial_use_allowed` /
+`modification_allowed` / `attribution_text` fields, letting
+`is_publish_eligible()` evaluate real terms instead of a placeholder.
+Every Pexels result is tagged `license_type=PEXELS_LICENSE`; attribution
+text (`"Video by {creator} on Pexels"`) is always recorded even though
+Pexels doesn't strictly require it, so the manifest carries full
+provenance regardless.
+
+Selecting the real provider with an unsupported orientation, non-positive
+timeouts/min-dimensions/min-duration, a negative retry count, or a missing
+API key/base URL fails at startup with `provider configuration error: ...`
+(no traceback, no network attempted).
+
+**Search and selection** (`pipeline.asset_query` / `pipeline.asset_selection`):
+each scene's own `visual_query` (never the narration/voiceover) is
+sanitized (control characters and disallowed punctuation stripped,
+length-bounded) into the search query. Candidates are filtered by hard
+license/technical requirements (license present, commercial use +
+modification allowed, minimum resolution, duration range) and scored by
+aspect-ratio fit to the target orientation, resolution, duration fit, and
+the provider's own result ranking; ties are broken by provider asset id so
+selection is fully deterministic. An asset already selected for an earlier
+scene in the same job is excluded from later scenes. If nothing eligible
+survives, the query text is deterministically relaxed to fewer leading
+words and re-searched — orientation, minimum resolution, duration bounds,
+and safe-search are never relaxed — and exhausting that ladder raises
+`ASSET_NOT_FOUND` (`REVIEW_REQUIRED`) rather than ever loosening a license
+condition to force a success.
+
+**Download, validation, and normalization**: streamed with a byte cap, a
+redirect limit, an https-only redirect-scheme policy, and HTML/JSON
+error-page rejection; the API key is sent only to the search API, never to
+the (separately hosted) file download host. A 2xx status is not treated as
+success: the downloaded bytes are validated with real `ffprobe`
+(resolution, duration) and normalized with real `ffmpeg` to canonical
+H.264/yuv420p, muted (the final render's only audio is the TTS track —
+original stock-clip audio is always discarded), stable frame rate.
+Scaling/cropping to the render's target resolution still happens once, at
+RENDER time, exactly as it always has for image assets, avoiding a second
+lossy scale pass. At RENDER time, a video asset shorter than its scene's
+narration loops from its start; one longer than the narration is trimmed
+from its start — both in one ffmpeg invocation (`-stream_loop -1` +
+`-shortest`).
+
+**Provider pinning**: the asset provider id, safe base-URL host, adapter
+version, and search/selection policy (orientation, per-page, min width/
+height, duration bounds, safe-search) join the same per-job provider
+snapshot as the LLM/TTS blocks (`Job.provider_config`, never the key).
+Retries and rejects always re-search/re-download with the pinned
+provider and policy; if the environment no longer satisfies the snapshot,
+the job fails explicitly with `PROVIDER_NOT_CONFIGURED` instead of
+silently switching providers.
+
+**Atomic publish**: search/select/download happens into a worker-private
+temp root first and each scene's file is `os.replace()`'d onto the job's
+official `assets/scene_i/` path only after the fenced commit succeeds — a
+worker that lost its lease can never overwrite the current lease owner's
+asset, and no temp files leak on that path. This closes the one stage
+(ASSET) that was still unfenced after Phase 2A/2B fenced TTS and RENDER.
+
+**Asset provenance history**: the `Asset` table is append-only (schema v4).
+A reject/retry of the ASSET stage inserts a new attempt and marks the
+prior attempt's rows `is_current=False` rather than deleting them —
+rendering and resume only ever read the current attempt, but every earlier
+attempt stays on record for audit. Safe per-scene metadata (provider,
+creator, license, dimensions, checksum prefix — never a local filesystem
+path or the CDN download link) is available via `job-show --json` and
+`GET /v1/jobs/{id}/assets`.
+
+**Cost note**: a stage-level retry of ASSET re-runs the full search and
+download for every scene, which re-counts against the provider's rate
+limit — same caveat as TTS retries documented above.
+
 ## Real-provider smoke checks
 
 ```
 uv run reel-harness provider-smoke llm
 uv run reel-harness provider-smoke tts
+uv run reel-harness provider-smoke asset
 ```
 
-Opt-in, single request, retries disabled. `provider-smoke tts` synthesizes
-one short fixed sentence, validates the audio for real, writes it only to a
-scratch path, and prints a redacted summary (provider, model, voice, format,
-duration, codec, sample rate, channels, checksum prefix, latency) — never the
-key, an auth header, or the full request/response body. Exit codes match
-`provider-smoke llm`: 0 success; 2 not configured / fake provider selected;
-3 auth error; 4 transient (timeout/rate limit/5xx); 5 audio validation
-failure or malformed/empty/refused response. Without an API key configured it
-refuses before any network I/O. The default pytest suite and production-smoke
-never call a real provider.
+Opt-in, single request, retries disabled, secrets redacted, scratch files
+cleaned up on exit. `provider-smoke tts` synthesizes one short fixed
+sentence and validates the audio for real; `provider-smoke asset` searches
+one fixed safe query ("ocean waves"), selects and downloads one real
+candidate, and validates it for real. Printed summaries never include the
+key, an auth header, the full request/response body, or (for `asset`) a
+download URL. Exit codes: 0 success; 2 not configured / fake provider
+selected; 3 auth error; 4 transient (timeout/rate limit/5xx); 5 media-
+toolchain/validation failure; `asset` additionally uses 6 for no eligible
+candidates surviving selection. Without an API key configured, every one
+of these refuses before any network I/O. The default pytest suite and
+production-smoke never call a real provider.
 
 ## Cancelling a job
 
@@ -166,21 +257,25 @@ refused once a job is `CANCELLED`.
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
 
-## Not yet supported (Phase 2C scope ends here)
+## Not yet supported (Phase 2D scope ends here)
 
-Real stock-media vendors, publishing (the license gate keeps
-`publish_eligible=false` for all fake-asset jobs), OAuth, PostgreSQL,
-distributed queues, cloud deployment, automatic channel scheduling, web UI.
-`httpx` is a runtime dependency as of Phase 2C — the `uv`/WDAC blocker from
-Phase 2A/2B is resolved on this machine.
+Real publishing (the license gate keeps `publish_eligible=false` for every
+fake-asset job, and now correctly evaluates `true`/`false` for a real-asset
+job based on its actual commercial-use/modification/attribution terms), no
+Publisher implementation exists yet to call it. Also not yet supported:
+OAuth (YouTube/TikTok/Instagram), automatic upload, PostgreSQL, cloud
+storage/CDN, web UI, face-recognition smart crop, BGM mixing, subtitle
+burn-in, multi-language dubbing.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `provider configuration error: ...` at startup | real provider selected, config incomplete | set the listed `REEL_HARNESS_LLM_*`/`REEL_HARNESS_TTS_*` vars or switch back to `fake` |
-| job FAILED `PROVIDER_NOT_CONFIGURED` | environment no longer matches the job's pinned snapshot | restore config (same endpoint host, same TTS voice/model) and `job-retry` |
+| `provider configuration error: ...` at startup | real provider selected, config incomplete | set the listed `REEL_HARNESS_LLM_*`/`REEL_HARNESS_TTS_*`/`REEL_HARNESS_ASSET_*` vars or switch back to `fake` |
+| job FAILED `PROVIDER_NOT_CONFIGURED` | environment no longer matches the job's pinned snapshot | restore config (same endpoint host, same TTS voice/model, same asset provider) and `job-retry` |
 | TTS stage fails audio validation | provider returned empty/corrupt/wrong-codec audio | check `provider-smoke tts` output; not retried automatically if malformed |
+| ASSET stage fails `ASSET_NOT_FOUND` | nothing eligible survived search + the full relaxation ladder | broaden `REEL_HARNESS_ASSET_MIN_WIDTH`/`_MIN_HEIGHT`/duration bounds, or check the scene's `visual_query` isn't too narrow |
+| ASSET stage fails media validation | provider returned empty/corrupt/audio-only video, or an oversized/redirect-looping download | check `provider-smoke asset` output; not retried automatically if malformed |
 | job stuck `REVIEW_REQUIRED`, cancel had no effect (pre-Phase 2C) | old build without the immediate-cancel fix | upgrade; `job-cancel` now transitions unleased idle states to `CANCELLED` directly |
 | job FAILED `BLOCKED_DEPENDENCY` | ffmpeg/ffprobe not resolvable | `reel-harness doctor`; provision `.tools/ffmpeg/bin/` |
 | job FAILED `MISSING_PREREQUISITE` | resume artifacts missing/corrupt | `job-retry --stage` the stage that owns the artifact (message names it) |

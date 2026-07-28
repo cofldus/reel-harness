@@ -5,6 +5,8 @@ from urllib.parse import urlsplit
 
 from reel_harness.config import Settings, normalize_provider_name
 from reel_harness.core.errors import ProviderNotConfiguredError
+from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSION
+from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
 from reel_harness.providers.base import ChannelContext, LLMProvider, Publisher, StockMediaProvider, TTSProvider
 from reel_harness.providers.fake_llm import PROMPT_VERSION as FAKE_PROMPT_VERSION
 from reel_harness.providers.fake_llm import FakeLLMProvider
@@ -42,6 +44,22 @@ class _UnconfiguredTTSProvider:
         self._reason = reason
 
     def synthesize(self, text: str, voice_id: str, lang: str, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
+class _UnconfiguredStockMediaProvider:
+    """Stock-media counterpart of _UnconfiguredLLMProvider: any search/download
+    attempt fails the stage with PROVIDER_NOT_CONFIGURED."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def search(self, query: str, orientation: str, min_duration: float, **kwargs):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def download(self, candidate, dest_dir):
         raise ProviderNotConfiguredError(self._reason)
 
 
@@ -134,9 +152,81 @@ def tts_provider_snapshot(settings: Settings | None) -> dict:
     }
 
 
+def asset_provider_snapshot(settings: Settings | None) -> dict:
+    """Stock-media configuration captured onto a job at creation: provider id,
+    safe base-URL host, adapter version, search/selection policy (orientation,
+    per-page, min width/height, duration bounds, safe-search), and schema
+    versions -- NEVER the API key, headers, or signed download URLs."""
+    search_policy = {
+        "orientation": settings.asset_orientation if settings else "portrait",
+        "per_page": settings.asset_per_page if settings else 15,
+        "min_width": settings.asset_min_width if settings else 480,
+        "min_height": settings.asset_min_height if settings else 480,
+        "min_duration_sec": settings.asset_min_duration_seconds if settings else 1.0,
+        "max_duration_sec": settings.asset_max_duration_seconds if settings else 60.0,
+        "safe_search": settings.asset_safe_search if settings else True,
+    }
+    name = normalize_provider_name(settings.asset_provider) if settings else "fake"
+    if name == "fake":
+        return {
+            "asset_provider": "fake",
+            "asset_adapter_version": "fake-stock-media-v1",
+            "asset_search_policy": search_policy,
+            "asset_query_version": ASSET_QUERY_VERSION,
+            "asset_selection_version": ASSET_SELECTION_VERSION,
+        }
+    from reel_harness.providers.pexels_stock_media import ADAPTER_VERSION
+
+    assert settings is not None
+    return {
+        "asset_provider": name,
+        "asset_base_url_host": urlsplit(settings.asset_base_url).netloc,
+        "asset_adapter_version": ADAPTER_VERSION,
+        "asset_search_policy": search_policy,
+        "asset_query_version": ASSET_QUERY_VERSION,
+        "asset_selection_version": ASSET_SELECTION_VERSION,
+    }
+
+
 def provider_snapshot(settings: Settings | None) -> dict:
-    """Combined per-job provider snapshot (LLM + TTS blocks)."""
-    return {**llm_provider_snapshot(settings), **tts_provider_snapshot(settings)}
+    """Combined per-job provider snapshot (LLM + TTS + asset blocks)."""
+    return {
+        **llm_provider_snapshot(settings),
+        **tts_provider_snapshot(settings),
+        **asset_provider_snapshot(settings),
+    }
+
+
+def resolve_stock_media_for_snapshot(snapshot: dict | None, settings: Settings | None) -> StockMediaProvider:
+    """Resolves the stock-media provider a leased job must run with, honoring
+    the job's creation-time snapshot. Legacy jobs whose snapshot predates the
+    asset block (or have no snapshot) use the current settings. Every
+    unsatisfiable case fails explicitly -- there is no silent fallback to a
+    different provider."""
+    if not snapshot or "asset_provider" not in snapshot:
+        return resolve_stock_media_provider(
+            normalize_provider_name(settings.asset_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("asset_provider"))
+    if name == "fake":
+        return FakeStockMediaProvider()
+    if name != "pexels":
+        return _UnconfiguredStockMediaProvider(
+            f"job is pinned to asset provider {name!r}, which is not registered"
+        )
+    if settings is None or not settings.asset_base_url or not settings.asset_api_key.get_secret_value():
+        return _UnconfiguredStockMediaProvider(
+            "job is pinned to the pexels asset provider but "
+            "REEL_HARNESS_ASSET_BASE_URL / REEL_HARNESS_ASSET_API_KEY are not configured"
+        )
+    pinned_host = snapshot.get("asset_base_url_host")
+    current_host = urlsplit(settings.asset_base_url).netloc
+    if pinned_host and current_host != pinned_host:
+        return _UnconfiguredStockMediaProvider(
+            f"configured asset endpoint host {current_host!r} does not match the "
+            f"job's pinned host {pinned_host!r}"
+        )
+    return _build_pexels_stock_media(settings)
 
 
 def resolve_tts_for_snapshot(snapshot: dict | None, settings: Settings | None) -> TTSProvider:
@@ -238,10 +328,27 @@ def _build_openai_compatible_tts(
     )
 
 
+def _build_pexels_stock_media(settings: Settings | None) -> StockMediaProvider:
+    if settings is None:
+        raise NotImplementedError("the pexels stock media provider requires application settings")
+    from reel_harness.providers.pexels_stock_media import PexelsStockMediaProvider
+
+    return PexelsStockMediaProvider(
+        api_key=settings.asset_api_key.get_secret_value(),
+        base_url=settings.asset_base_url,
+        connect_timeout=settings.asset_connect_timeout_seconds,
+        read_timeout=settings.asset_read_timeout_seconds,
+        max_retries=settings.asset_max_retries,
+        retry_backoff_seconds=settings.asset_retry_backoff_seconds,
+    )
+
+
 # Real vendor names/SDKs must only ever be registered here, never referenced
 # from reel_harness.pipeline.*. "openai-compatible" is a protocol shape, not a
 # vendor: the concrete vendor is chosen purely via the configured base URL and
-# model/voice.
+# model/voice. "pexels" IS a concrete vendor (stock-video search has no
+# equivalent protocol-shaped standard) -- see docs/OPERATIONS.md for why it
+# was chosen.
 LLM_PROVIDERS: dict[str, Callable[[Settings | None], LLMProvider]] = {
     "fake": lambda settings: FakeLLMProvider(),
     "openai-compatible": _build_openai_compatible_llm,
@@ -250,7 +357,10 @@ TTS_PROVIDERS: dict[str, Callable[[Settings | None], TTSProvider]] = {
     "fake": lambda settings: FakeTTSProvider(),
     "openai-compatible": _build_openai_compatible_tts,
 }
-STOCK_MEDIA_PROVIDERS: dict[str, Callable[[], StockMediaProvider]] = {"fake": FakeStockMediaProvider}
+STOCK_MEDIA_PROVIDERS: dict[str, Callable[[Settings | None], StockMediaProvider]] = {
+    "fake": lambda settings: FakeStockMediaProvider(),
+    "pexels": _build_pexels_stock_media,
+}
 PUBLISHERS: dict[str, Callable[[], Publisher]] = {}
 
 
@@ -268,9 +378,9 @@ def resolve_tts_provider(name: str, settings: Settings | None = None) -> TTSProv
         raise NotImplementedError(f"TTS provider '{name}' is not registered yet") from exc
 
 
-def resolve_stock_media_provider(name: str) -> StockMediaProvider:
+def resolve_stock_media_provider(name: str, settings: Settings | None = None) -> StockMediaProvider:
     try:
-        return STOCK_MEDIA_PROVIDERS[name]()
+        return STOCK_MEDIA_PROVIDERS[normalize_provider_name(name)](settings)
     except KeyError as exc:
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select, update
 
 from reel_harness.core.errors import (
     MissingPrerequisiteError,
@@ -78,7 +78,7 @@ def _restore_assets(session, job) -> list[stages.AssetFetchResult]:
     checksum so a missing or corrupted asset fails explicitly instead of feeding
     bad inputs to RENDER."""
     rows = session.execute(
-        select(Asset).where(Asset.job_id == job.id).order_by(Asset.scene_index),
+        select(Asset).where(Asset.job_id == job.id, Asset.is_current.is_(True)).order_by(Asset.scene_index),
     ).scalars().all()
     if not rows:
         raise MissingPrerequisiteError(
@@ -108,6 +108,20 @@ def _restore_assets(session, job) -> list[stages.AssetFetchResult]:
                 source_url=row.source_url or "",
                 author=row.author,
                 license_type=row.license_type,
+                provider_id=row.source_provider,
+                provider_asset_id=row.provider_asset_id or "",
+                source_page_url=row.source_page_url,
+                creator_url=row.creator_url,
+                commercial_use_allowed=bool(row.commercial_use_allowed),
+                modification_allowed=bool(row.modification_allowed),
+                attribution_text=row.attribution_text,
+                width=row.width,
+                height=row.height,
+                duration_sec=row.duration_sec,
+                fps=row.fps,
+                request_id=row.request_id,
+                query_text=row.query_text or "",
+                selection_score=row.selection_score or 0.0,
             )
         )
     return results
@@ -199,24 +213,74 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
     elif stage is Stage.POLICY:
         stages.run_policy_checking(job)
     elif stage is Stage.ASSET:
-        context["assets"] = stages.run_asset_fetching(job, providers.stock_media, storage)
-        # Replace (not append) this job's Asset rows so a later resume restores
-        # exactly the current attempt's assets. StageRun history is unaffected.
-        session.execute(delete(Asset).where(Asset.job_id == job.id))
-        for result in context["assets"]:
-            session.add(
-                Asset(
-                    job_id=job.id,
-                    scene_index=result.scene_index,
-                    source_provider=providers.stock_media.provider_id,
-                    source_url=result.source_url,
-                    author=result.author,
-                    license_type=result.license_type,
-                    local_path=str(result.local_path),
-                    checksum_sha256=result.checksum_sha256,
-                    mime_type=result.mime_type,
-                )
+        # Same fenced-promote pattern as TTS/RENDER: search/select/download
+        # into a worker-private temp root, then move each scene's asset to
+        # the official assets/scene_i/ location only while the lease is
+        # provably held. A fenced-out worker cleans up only its own temp tree
+        # and never touches the official assets or the Asset table.
+        official_root = storage.job_dir(job.id) / "assets"
+        temp_root = storage.job_dir(job.id) / f"assets-inprogress-{uuid.uuid4().hex}"
+        search_policy = (getattr(job, "provider_config", None) or {}).get("asset_search_policy")
+        try:
+            fetched_assets = stages.run_asset_fetching(
+                job, providers.stock_media, storage, dest_root=temp_root, search_policy=search_policy,
             )
+            if not assert_lease(session, job.id, lease_token):
+                session.rollback()
+                raise LeaseLostSignal(stage.value)
+            promoted_assets: list[stages.AssetFetchResult] = []
+            for fetched in fetched_assets:
+                official_dir = official_root / fetched.local_path.parent.name
+                official_dir.mkdir(parents=True, exist_ok=True)
+                official_path = official_dir / fetched.local_path.name
+                os.replace(fetched.local_path, official_path)
+                promoted_assets.append(dataclasses.replace(fetched, local_path=official_path))
+            context["assets"] = promoted_assets
+            # Append-only: an earlier attempt's rows are marked is_current=False
+            # rather than deleted, so a reject/retry never erases the prior
+            # attempt's provenance (see db.models.Asset). This UPDATE plus the
+            # new INSERTs below are inside the same transaction _fenced_commit
+            # (called by the caller after this returns) commits -- so on a lost
+            # lease at that later point, session.rollback() undoes these writes
+            # too, in addition to the assert_lease check already done above.
+            next_attempt = (session.execute(
+                select(func.max(Asset.attempt_number)).where(Asset.job_id == job.id),
+            ).scalar_one() or 0) + 1
+            session.execute(
+                update(Asset).where(Asset.job_id == job.id, Asset.is_current.is_(True))
+                .values(is_current=False),
+            )
+            for fetched in promoted_assets:
+                session.add(
+                    Asset(
+                        job_id=job.id,
+                        scene_index=fetched.scene_index,
+                        source_provider=providers.stock_media.provider_id,
+                        source_url=fetched.source_url,
+                        author=fetched.author,
+                        license_type=fetched.license_type,
+                        local_path=str(fetched.local_path),
+                        checksum_sha256=fetched.checksum_sha256,
+                        mime_type=fetched.mime_type,
+                        attempt_number=next_attempt,
+                        is_current=True,
+                        provider_asset_id=fetched.provider_asset_id or None,
+                        query_text=fetched.query_text or None,
+                        selection_score=fetched.selection_score,
+                        source_page_url=fetched.source_page_url,
+                        creator_url=fetched.creator_url,
+                        commercial_use_allowed=fetched.commercial_use_allowed,
+                        modification_allowed=fetched.modification_allowed,
+                        attribution_text=fetched.attribution_text,
+                        width=fetched.width,
+                        height=fetched.height,
+                        duration_sec=fetched.duration_sec,
+                        fps=fetched.fps,
+                        request_id=fetched.request_id,
+                    )
+                )
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
     elif stage is Stage.TTS:
         # Same fenced-promote pattern as RENDER: synthesize (and validate/
         # normalize, for real providers) into a worker-private temp root, then

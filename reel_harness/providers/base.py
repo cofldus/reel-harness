@@ -54,6 +54,26 @@ class MediaCandidate:
     author: str | None
     license_type: str | None
     license_url: str | None
+    # Phase 2D: real-provider search/selection metadata. Every field has a
+    # default so Fake-provider call sites and older tests keep constructing
+    # this without changes; a real adapter fills all of them.
+    provider_id: str = ""
+    download_url: str = ""
+    creator_url: str | None = None
+    commercial_use_allowed: bool = False
+    modification_allowed: bool = False
+    attribution_text: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
+    fps: float | None = None
+    file_size_bytes: int | None = None
+    content_type: str | None = None
+    # Position in the provider's own result ordering (0 = top result) -- used
+    # as a selection-score input and, combined with candidate_id, keeps
+    # selection deterministic.
+    provider_rank: int = 0
+    provider_request_id: str | None = None
 
 
 @dataclass
@@ -64,6 +84,21 @@ class LocalAssetResult:
     source_url: str
     author: str | None
     license_type: str | None
+    # Phase 2D: provenance/license metadata carried from the selected
+    # MediaCandidate through to the Asset DB row and manifest. Defaults keep
+    # Fake-provider call sites unchanged.
+    provider_id: str = ""
+    provider_asset_id: str = ""
+    source_page_url: str | None = None
+    creator_url: str | None = None
+    commercial_use_allowed: bool = False
+    modification_allowed: bool = False
+    attribution_text: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
+    fps: float | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -88,7 +123,17 @@ class TTSProvider(Protocol):
 class StockMediaProvider(Protocol):
     provider_id: str
 
-    def search(self, query: str, orientation: str, min_duration: float) -> list[MediaCandidate]: ...
+    def search(
+        self, query: str, orientation: str, min_duration: float,
+        *,
+        max_duration: float | None = None,
+        min_width: int | None = None,
+        min_height: int | None = None,
+        per_page: int = 15,
+        page: int = 1,
+        safe_search: bool = True,
+        exclude_provider_asset_ids: frozenset[str] = frozenset(),
+    ) -> list[MediaCandidate]: ...
     def download(self, candidate: MediaCandidate, dest_dir: Path) -> LocalAssetResult: ...
 
 

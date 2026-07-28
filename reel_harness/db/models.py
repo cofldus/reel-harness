@@ -126,6 +126,12 @@ class StageRun(Base):
 
 
 class Asset(Base):
+    """Append-only: a reject/retry of the ASSET stage never deletes a prior
+    attempt's rows, it inserts a new attempt and flips is_current on the old
+    ones to False (see worker.runner and ADR/docs/OPERATIONS.md). Rendering
+    and resume always query is_current=True rows only; every earlier attempt
+    stays in the table for audit."""
+
     __tablename__ = "assets"
 
     id: Mapped[str] = mapped_column(primary_key=True, default=new_uuid)
@@ -139,6 +145,25 @@ class Asset(Base):
     checksum_sha256: Mapped[str]
     mime_type: Mapped[str]
     downloaded_at: Mapped[datetime] = mapped_column(default=_now)
+
+    # Phase 2D: provenance/license metadata (v4, additive) and append-only
+    # history bookkeeping. attempt_number/is_current default to (1, True) so
+    # pre-v4 rows read as a single current attempt with no history gap.
+    attempt_number: Mapped[int] = mapped_column(default=1)
+    is_current: Mapped[bool] = mapped_column(default=True)
+    provider_asset_id: Mapped[str | None] = mapped_column(default=None)
+    query_text: Mapped[str | None] = mapped_column(default=None)
+    selection_score: Mapped[float | None] = mapped_column(default=None)
+    source_page_url: Mapped[str | None] = mapped_column(default=None)
+    creator_url: Mapped[str | None] = mapped_column(default=None)
+    commercial_use_allowed: Mapped[bool | None] = mapped_column(default=None)
+    modification_allowed: Mapped[bool | None] = mapped_column(default=None)
+    attribution_text: Mapped[str | None] = mapped_column(default=None)
+    width: Mapped[int | None] = mapped_column(default=None)
+    height: Mapped[int | None] = mapped_column(default=None)
+    duration_sec: Mapped[float | None] = mapped_column(default=None)
+    fps: Mapped[float | None] = mapped_column(default=None)
+    request_id: Mapped[str | None] = mapped_column(default=None)
 
     job: Mapped[Job] = relationship(back_populates="assets")
 
