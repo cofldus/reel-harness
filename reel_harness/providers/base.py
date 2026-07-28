@@ -102,9 +102,54 @@ class LocalAssetResult:
 
 
 @dataclass
-class PublishResult:
-    platform_post_id: str
-    url: str
+class PublicationMetadata:
+    """Deterministic, provider-agnostic upload metadata built by
+    publisher.metadata (see docs/PUBLISHING.md) -- never handed to an
+    adapter unvalidated, since every field here becomes part of the actual
+    upload request."""
+
+    title: str
+    description: str
+    tags: list[str]
+    category_id: str
+    privacy_status: str  # "private" | "unlisted" | "public"
+    made_for_kids: bool
+    default_language: str | None = None
+
+
+@dataclass
+class UploadSessionHandle:
+    """What a Publisher hands back after creating a resumable upload
+    session. `session_reference` is a safe, opaque local identifier -- the
+    real session URI (a bearer-style capability URL) is never part of this
+    dataclass's persisted form; adapters keep it only in their own memory or
+    behind the credential/secret backend (see docs/PUBLISHING.md)."""
+
+    session_reference: str
+    total_bytes: int
+    chunk_size: int
+
+
+@dataclass
+class UploadChunkResult:
+    """Result of one PUT chunk (or an upload-completing final chunk).
+    `provider_video_id` is set only once the provider has actually created
+    the video resource (i.e. `completed=True`)."""
+
+    bytes_uploaded: int
+    completed: bool
+    provider_video_id: str | None = None
+    publication_url: str | None = None
+    request_id: str | None = None
+
+
+@dataclass
+class ProcessingStatusResult:
+    processing_status: str  # "processing" | "succeeded" | "failed" | "terminated"
+    privacy_status: str | None = None
+    publication_url: str | None = None
+    failure_reason: str | None = None
+    request_id: str | None = None
 
 
 class LLMProvider(Protocol):
@@ -138,6 +183,24 @@ class StockMediaProvider(Protocol):
 
 
 class Publisher(Protocol):
+    """Real vendor names (YouTube, ...) live only in the adapter module and
+    the registry -- core.publish_service and worker.publish_runner depend
+    only on this Protocol, mirroring LLMProvider/TTSProvider/
+    StockMediaProvider. See docs/PUBLISHING.md for the resumable-upload
+    contract this shape is built from."""
+
     provider_id: str
 
-    def publish(self, video_path: Path, metadata: dict) -> PublishResult: ...
+    def validate_configuration(self) -> None: ...
+
+    def create_upload_session(
+        self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,
+    ) -> UploadSessionHandle: ...
+
+    def upload_chunk(
+        self, session: UploadSessionHandle, chunk: bytes, start_byte: int, total_bytes: int,
+    ) -> UploadChunkResult: ...
+
+    def query_upload_offset(self, session: UploadSessionHandle, total_bytes: int) -> int | None: ...
+
+    def get_processing_status(self, provider_video_id: str) -> ProcessingStatusResult: ...

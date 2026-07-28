@@ -10,8 +10,11 @@ from reel_harness.db.schema import SCHEMA_VERSION, create_engine_from_url, init_
 from reel_harness.worker.runner import run_job
 
 
-def test_schema_version_is_4() -> None:
-    assert SCHEMA_VERSION == 4
+def test_schema_version_is_at_least_4() -> None:
+    # >=4 rather than ==4: later phases add their own additive schema bumps
+    # (see db/schema.py) without invalidating this v3->v4 migration's own
+    # concern, which is that the v4 asset-provenance columns exist.
+    assert SCHEMA_VERSION >= 4
 
 
 def test_v3_shaped_database_upgrades_without_losing_existing_asset_rows(tmp_path) -> None:
