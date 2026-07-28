@@ -43,12 +43,24 @@ class FakeStockMediaProvider:
     def __init__(self, mode: FakeMode = "ok") -> None:
         self.mode = mode
 
-    def search(self, query: str, orientation: str, min_duration: float) -> list[MediaCandidate]:
+    def search(
+        self, query: str, orientation: str, min_duration: float,
+        *,
+        max_duration: float | None = None,
+        min_width: int | None = None,
+        min_height: int | None = None,
+        per_page: int = 15,
+        page: int = 1,
+        safe_search: bool = True,
+        exclude_provider_asset_ids: frozenset[str] = frozenset(),
+    ) -> list[MediaCandidate]:
         if self.mode == "timeout":
             raise TransientProviderError("fake stock media search timed out")
         if self.mode == "empty":
             return []
-        candidate_id = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
+        candidate_id = hashlib.sha256(f"{query}:{page}".encode()).hexdigest()[:12]
+        if candidate_id in exclude_provider_asset_ids:
+            return []
         return [
             MediaCandidate(
                 candidate_id=candidate_id,
@@ -56,6 +68,20 @@ class FakeStockMediaProvider:
                 author="Fake Test Author",
                 license_type=FAKE_TEST_LICENSE,
                 license_url="fake://license/test-only",
+                provider_id=self.provider_id,
+                download_url=f"fake://stock-media/{candidate_id}/download",
+                creator_url="fake://stock-media/author/fake-test-author",
+                commercial_use_allowed=True,
+                modification_allowed=True,
+                attribution_text="Fake Test Author (fake://license/test-only)",
+                width=1080,
+                height=1920,
+                duration_sec=max(min_duration, 4.0),
+                fps=30.0,
+                file_size_bytes=None,
+                content_type="image/png",
+                provider_rank=0,
+                provider_request_id=f"fake-req-{candidate_id}",
             )
         ]
 
@@ -79,4 +105,16 @@ class FakeStockMediaProvider:
             source_url=candidate.source_url,
             author=candidate.author,
             license_type=candidate.license_type,
+            provider_id=self.provider_id,
+            provider_asset_id=candidate.candidate_id,
+            source_page_url=candidate.source_url,
+            creator_url=candidate.creator_url,
+            commercial_use_allowed=candidate.commercial_use_allowed,
+            modification_allowed=candidate.modification_allowed,
+            attribution_text=candidate.attribution_text,
+            width=candidate.width,
+            height=candidate.height,
+            duration_sec=candidate.duration_sec,
+            fps=candidate.fps,
+            request_id=candidate.provider_request_id,
         )
