@@ -21,15 +21,16 @@ class AppContext:
         configure_logging(self.settings.log_level)
         register_secret(self.settings.app_api_key)
         register_secret(self.settings.llm_api_key.get_secret_value())
+        register_secret(self.settings.tts_api_key.get_secret_value())
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
         self.storage = LocalFilesystemStorage(self.settings.jobs_dir)
-        from reel_harness.providers.registry import llm_provider_snapshot
+        from reel_harness.providers.registry import provider_snapshot
 
         self.jobs = JobService(
             self.session_factory, storage=self.storage,
-            provider_snapshot=llm_provider_snapshot(self.settings),
+            provider_snapshot=provider_snapshot(self.settings),
         )
 
     def providers_for_job(self, job) -> ProviderBundle:
@@ -40,12 +41,13 @@ class AppContext:
         from reel_harness.providers.registry import (
             resolve_llm_for_snapshot,
             resolve_stock_media_provider,
-            resolve_tts_provider,
+            resolve_tts_for_snapshot,
         )
 
+        snapshot = getattr(job, "provider_config", None)
         return ProviderBundle(
-            llm=resolve_llm_for_snapshot(getattr(job, "provider_config", None), self.settings),
-            tts=resolve_tts_provider("fake"),
+            llm=resolve_llm_for_snapshot(snapshot, self.settings),
+            tts=resolve_tts_for_snapshot(snapshot, self.settings),
             stock_media=resolve_stock_media_provider("fake"),
         )
 
@@ -58,6 +60,6 @@ class AppContext:
 
         return ProviderBundle(
             llm=resolve_llm_provider(self.settings.llm_provider, self.settings),
-            tts=resolve_tts_provider("fake"),
+            tts=resolve_tts_provider(self.settings.tts_provider, self.settings),
             stock_media=resolve_stock_media_provider("fake"),
         )

@@ -22,6 +22,12 @@ def _llm_alias(canonical: str, *legacy: str) -> AliasChoices:
     return AliasChoices(canonical, *legacy)
 
 
+# Audio formats the pipeline can safely accept from a real TTS provider (every
+# result is normalized to canonical PCM WAV before rendering regardless).
+TTS_SUPPORTED_FORMATS = frozenset({"wav", "mp3"})
+TTS_SPEED_RANGE = (0.25, 4.0)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True,
@@ -75,11 +81,36 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = Field(
         1200, validation_alias=_llm_alias("REEL_HARNESS_LLM_MAX_OUTPUT_TOKENS", "LLM_MAX_OUTPUT_TOKENS"))
 
+    # TTS provider selection and adapter configuration. Same conventions as the
+    # LLM block: "fake" needs nothing, "openai-compatible" talks to any
+    # /audio/speech-style endpoint, the API key is a SecretStr registered for
+    # redaction and never persisted. The audio format is restricted to
+    # TTS_SUPPORTED_FORMATS -- never a free-form string.
+    tts_provider: str = Field(
+        "fake", validation_alias=_llm_alias("REEL_HARNESS_TTS_PROVIDER", "TTS_PROVIDER"))
+    tts_base_url: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_TTS_BASE_URL", "TTS_BASE_URL"))
+    tts_model: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_TTS_MODEL", "TTS_MODEL"))
+    tts_api_key: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_TTS_API_KEY", "TTS_API_KEY"))
+    tts_voice: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_TTS_VOICE", "TTS_VOICE"))
+    tts_format: str = Field(
+        "wav", validation_alias=_llm_alias("REEL_HARNESS_TTS_FORMAT", "TTS_FORMAT"))
+    tts_speed: float = Field(
+        1.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_SPEED", "TTS_SPEED"))
+    tts_connect_timeout_seconds: float = Field(
+        10.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_CONNECT_TIMEOUT", "TTS_CONNECT_TIMEOUT_SECONDS"))
+    tts_read_timeout_seconds: float = Field(
+        60.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_READ_TIMEOUT", "TTS_READ_TIMEOUT_SECONDS"))
+    tts_max_retries: int = Field(
+        3, validation_alias=_llm_alias("REEL_HARNESS_TTS_MAX_RETRIES", "TTS_MAX_RETRIES"))
+    tts_retry_backoff_seconds: float = Field(
+        2.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_RETRY_BACKOFF", "TTS_RETRY_BACKOFF_SECONDS"))
 
-def validate_provider_settings(settings: Settings) -> None:
-    """Startup gate: selecting a real provider with incomplete configuration
-    fails immediately with a clear message (no network is touched). The fake
-    provider never requires anything."""
+
+def _validate_llm_settings(settings: Settings) -> None:
     name = normalize_provider_name(settings.llm_provider)
     if name == "fake":
         return
@@ -99,6 +130,50 @@ def validate_provider_settings(settings: Settings) -> None:
             "llm provider 'openai-compatible' is selected but credentials are not "
             "configured: missing " + ", ".join(missing)
         )
+
+
+def _validate_tts_settings(settings: Settings) -> None:
+    if settings.tts_format not in TTS_SUPPORTED_FORMATS:
+        raise ProviderConfigurationError(
+            f"unsupported tts format {settings.tts_format!r} "
+            f"(supported: {', '.join(sorted(TTS_SUPPORTED_FORMATS))})"
+        )
+    low, high = TTS_SPEED_RANGE
+    if not (low <= settings.tts_speed <= high):
+        raise ProviderConfigurationError(f"tts speed {settings.tts_speed} outside [{low}, {high}]")
+    if settings.tts_connect_timeout_seconds <= 0 or settings.tts_read_timeout_seconds <= 0:
+        raise ProviderConfigurationError("tts timeouts must be positive")
+    if settings.tts_max_retries < 0:
+        raise ProviderConfigurationError("tts retry count must not be negative")
+
+    name = normalize_provider_name(settings.tts_provider)
+    if name == "fake":
+        return
+    if name != "openai-compatible":
+        raise ProviderConfigurationError(
+            f"unknown tts provider {settings.tts_provider!r} (supported: fake, openai_compatible)"
+        )
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_TTS_BASE_URL", settings.tts_base_url),
+            ("REEL_HARNESS_TTS_MODEL", settings.tts_model),
+            ("REEL_HARNESS_TTS_VOICE", settings.tts_voice),
+            ("REEL_HARNESS_TTS_API_KEY", settings.tts_api_key.get_secret_value()),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            "tts provider 'openai-compatible' is selected but credentials are not "
+            "configured: missing " + ", ".join(missing)
+        )
+
+
+def validate_provider_settings(settings: Settings) -> None:
+    """Startup gate: selecting a real provider with incomplete or invalid
+    configuration fails immediately with a clear message (no network is
+    touched). The fake providers never require anything."""
+    _validate_llm_settings(settings)
+    _validate_tts_settings(settings)
 
 
 def load_settings() -> Settings:

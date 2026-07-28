@@ -1,4 +1,4 @@
-# Reel Harness — Operations (Phase 2B)
+# Reel Harness — Operations (Phase 2C)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
 LLM provider configuration, smoke checks, and troubleshooting. Design
@@ -80,6 +80,84 @@ response or schema mismatch. Without an API key configured it refuses before
 any network I/O. The default pytest suite and production-smoke never call a
 real provider.
 
+## Choosing the TTS provider
+
+Default is the fake provider (no network). To point at a real
+OpenAI-compatible `/audio/speech` endpoint, set:
+
+```
+REEL_HARNESS_TTS_PROVIDER=openai_compatible
+REEL_HARNESS_TTS_BASE_URL=...      # e.g. https://.../v1  (POST {base_url}/audio/speech)
+REEL_HARNESS_TTS_MODEL=...
+REEL_HARNESS_TTS_API_KEY=...       # env/.env only; never persisted, always redacted
+REEL_HARNESS_TTS_VOICE=...
+REEL_HARNESS_TTS_FORMAT=wav        # wav | mp3 only -- not a free-form string
+REEL_HARNESS_TTS_SPEED=1.0
+REEL_HARNESS_TTS_CONNECT_TIMEOUT / READ_TIMEOUT / MAX_RETRIES / RETRY_BACKOFF
+```
+
+Selecting the real provider with any field missing, an unsupported format,
+an out-of-range speed, a non-positive timeout, or a negative retry count
+fails at startup with `provider configuration error: ...` (no traceback, no
+network attempted).
+
+**Provider pinning**: TTS provider id/model/voice/format/speed/endpoint host
+join the same per-job provider snapshot as the LLM block (`Job.provider_config`,
+never the key). Retries, rejects, and resumes always resynthesize with the
+pinned provider/voice/format; if the environment no longer satisfies the
+snapshot (credentials removed, host changed, provider unregistered), the job
+fails explicitly instead of silently switching TTS providers or voices.
+
+**Audio validation and normalization**: provider audio is never trusted on
+HTTP status alone. It's parsed (WAV via the stdlib, everything else via real
+`ffprobe`) and checked for byte length, a valid container, a non-zero audio
+stream, and a non-zero duration, then normalized through real `ffmpeg` to
+canonical PCM WAV — `44100` Hz, mono, `pcm_s16le` — regardless of the source
+format, before the render stage ever sees it. Both the raw provider checksum
+and the normalized checksum are tracked. 401/403 map to a non-retryable
+`UPSTREAM_AUTH` error; 429 honors `Retry-After`; 5xx/timeouts retry up to
+`REEL_HARNESS_TTS_MAX_RETRIES` with backoff; malformed/empty/oversized/
+unsupported-codec responses fail without a retry loop that could multiply
+provider cost per scene.
+
+**Atomic publish**: synthesized/normalized audio is written to a
+worker-private temp path first and `os.replace()`'d onto the job's official
+audio path only after the fenced commit succeeds — a worker that lost its
+lease (or a late response racing a retake) can never overwrite the current
+lease owner's audio, and no temp files leak on that path.
+
+## Real-provider smoke checks
+
+```
+uv run reel-harness provider-smoke llm
+uv run reel-harness provider-smoke tts
+```
+
+Opt-in, single request, retries disabled. `provider-smoke tts` synthesizes
+one short fixed sentence, validates the audio for real, writes it only to a
+scratch path, and prints a redacted summary (provider, model, voice, format,
+duration, codec, sample rate, channels, checksum prefix, latency) — never the
+key, an auth header, or the full request/response body. Exit codes match
+`provider-smoke llm`: 0 success; 2 not configured / fake provider selected;
+3 auth error; 4 transient (timeout/rate limit/5xx); 5 audio validation
+failure or malformed/empty/refused response. Without an API key configured it
+refuses before any network I/O. The default pytest suite and production-smoke
+never call a real provider.
+
+## Cancelling a job
+
+`reel-harness job-cancel <id>` / `POST /v1/jobs/{id}/cancel` share one
+service path (`JobService.request_cancel`). A job with no worker attached —
+`CREATED`, `QUEUED`, `REVIEW_REQUIRED`, or an unleased `RETRY_WAIT` —
+transitions straight to `CANCELLED`; there's no active lease that will ever
+observe a flag, and `REVIEW_REQUIRED` jobs specifically are not leasable at
+all. A leased/running job instead gets `cancel_requested=true` and the
+worker honors it at its next stage boundary, so an in-flight stage is never
+yanked mid-write. Either way, artifacts already produced (audio, video,
+manifest) are preserved for post-mortem with `approval.decision` staying
+`null` and `publish_eligible=false`; approve/reject/retry/re-cancel are all
+refused once a job is `CANCELLED`.
+
 ## Health and readiness
 
 - `GET /healthz` — shallow liveness.
@@ -88,23 +166,22 @@ real provider.
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
 
-## Not yet supported (Phase 2B scope ends here)
+## Not yet supported (Phase 2C scope ends here)
 
-Real TTS / stock-media vendors, publishing (the license gate keeps
+Real stock-media vendors, publishing (the license gate keeps
 `publish_eligible=false` for all fake-asset jobs), OAuth, PostgreSQL,
 distributed queues, cloud deployment, automatic channel scheduling, web UI.
-`httpx` is still a dev dependency: promoting it to a runtime dependency
-requires regenerating `uv.lock`, and every `uv` execution path is blocked on
-this machine by the OS application-control policy (WDAC) — run
-`uv sync`/`uv lock` once in an unrestricted environment before enabling the
-real provider outside the dev venv.
+`httpx` is a runtime dependency as of Phase 2C — the `uv`/WDAC blocker from
+Phase 2A/2B is resolved on this machine.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `provider configuration error: ...` at startup | real provider selected, config incomplete | set the listed `REEL_HARNESS_LLM_*` vars or switch back to `fake` |
-| job FAILED `PROVIDER_NOT_CONFIGURED` | environment no longer matches the job's pinned snapshot | restore config (same endpoint host) and `job-retry` |
+| `provider configuration error: ...` at startup | real provider selected, config incomplete | set the listed `REEL_HARNESS_LLM_*`/`REEL_HARNESS_TTS_*` vars or switch back to `fake` |
+| job FAILED `PROVIDER_NOT_CONFIGURED` | environment no longer matches the job's pinned snapshot | restore config (same endpoint host, same TTS voice/model) and `job-retry` |
+| TTS stage fails audio validation | provider returned empty/corrupt/wrong-codec audio | check `provider-smoke tts` output; not retried automatically if malformed |
+| job stuck `REVIEW_REQUIRED`, cancel had no effect (pre-Phase 2C) | old build without the immediate-cancel fix | upgrade; `job-cancel` now transitions unleased idle states to `CANCELLED` directly |
 | job FAILED `BLOCKED_DEPENDENCY` | ffmpeg/ffprobe not resolvable | `reel-harness doctor`; provision `.tools/ffmpeg/bin/` |
 | job FAILED `MISSING_PREREQUISITE` | resume artifacts missing/corrupt | `job-retry --stage` the stage that owns the artifact (message names it) |
 | job stuck `RETRY_WAIT` with old `next_retry_at` | no worker running | start `worker-run` |

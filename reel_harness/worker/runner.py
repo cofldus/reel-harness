@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import uuid
 import wave
 from dataclasses import dataclass
@@ -133,7 +135,8 @@ def _restore_tts(job, providers: ProviderBundle, storage) -> list[TTSResult]:
                 audio_path=audio_path,
                 duration_sec=duration,
                 provider_id=providers.tts.provider_id,
-                voice_id=TTS_VOICE_ID,
+                voice_id=getattr(providers.tts, "voice_id", None) or TTS_VOICE_ID,
+                checksum_sha256=hashlib.sha256(audio_path.read_bytes()).hexdigest(),
             )
         )
     return results
@@ -215,7 +218,33 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
                 )
             )
     elif stage is Stage.TTS:
-        context["tts_results"] = stages.run_tts_generating(job, providers.tts, storage)
+        # Same fenced-promote pattern as RENDER: synthesize (and validate/
+        # normalize, for real providers) into a worker-private temp root, then
+        # move each scene's audio to the official tts/scene_i/ location only
+        # while the lease is provably held. A fenced-out worker cleans up only
+        # its own temp tree and never touches the official audio.
+        official_root = storage.job_dir(job.id) / "tts"
+        temp_root = storage.job_dir(job.id) / f"tts-inprogress-{uuid.uuid4().hex}"
+        try:
+            results = stages.run_tts_generating(job, providers.tts, storage, dest_root=temp_root)
+            if not assert_lease(session, job.id, lease_token):
+                session.rollback()
+                raise LeaseLostSignal(stage.value)
+            promoted: list[TTSResult] = []
+            for result in results:
+                official_dir = official_root / result.audio_path.parent.name
+                official_dir.mkdir(parents=True, exist_ok=True)
+                official_path = official_dir / result.audio_path.name
+                os.replace(result.audio_path, official_path)
+                checksum = result.checksum_sha256 or hashlib.sha256(
+                    official_path.read_bytes()
+                ).hexdigest()
+                promoted.append(
+                    dataclasses.replace(result, audio_path=official_path, checksum_sha256=checksum)
+                )
+            context["tts_results"] = promoted
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
     elif stage is Stage.RENDER:
         # Render into a worker-private temp file, then promote it to the
         # official final.mp4 only while the lease is provably held (the guarded
@@ -338,6 +367,12 @@ def _run_single_stage(session, job, channel, providers, storage, stage: Stage, c
 
     try:
         _execute_stage(session, stage, job, channel, providers, storage, context, lease_token)
+    except LeaseLostSignal:
+        # In-stage fence failure (TTS/RENDER promote): the worker-private temp
+        # outputs were already cleaned by the stage; close our own StageRun and
+        # stop without touching the job row.
+        _abandon_stage_run(session, stage_run_id, "lease lost during stage execution")
+        raise
     except ReviewRequiredSignal as signal:
         finished_at = _utcnow()
         stage_run.status = "review_required"
@@ -513,16 +548,20 @@ def _run_job_impl(session, job, channel, providers: ProviderBundle, storage,
     remaining = full_order[full_order.index(start_stage):]
     for stage in remaining:
         if job.cancel_requested:
-            apply_transition(job, JobStatus.CANCELLED)
-            _fenced_commit(session, job, lease_token, stage)
+            if job.status != JobStatus.CANCELLED.value:
+                apply_transition(job, JobStatus.CANCELLED)
+                _fenced_commit(session, job, lease_token, stage)
             return
         if not _run_single_stage(session, job, channel, providers, storage, stage, context, lease_token):
             return
 
     final_video_checksum = hashlib.sha256(context["render"].video_path.read_bytes()).hexdigest()
+    tts_results = context.get("tts_results") or []
     manifest = build_manifest(
-        job, context["assets"], providers.tts.provider_id, TTS_VOICE_ID,
+        job, context["assets"], providers.tts.provider_id,
+        (tts_results[0].voice_id if tts_results else TTS_VOICE_ID),
         render=context["render"], validation=context["validation"], final_video_checksum=final_video_checksum,
+        tts_results=tts_results, tts_model=getattr(providers.tts, "model_id", None),
     )
     # Fence BEFORE writing the manifest file: assert_lease's guarded UPDATE
     # holds SQLite's write lock from here through the commit, so a takeover can

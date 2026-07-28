@@ -41,6 +41,10 @@ class TTSResult:
     duration_sec: float
     provider_id: str
     voice_id: str
+    # Checksum of the (normalized) audio actually written to audio_path, and
+    # the provider-side correlation id. Never credentials or request bodies.
+    checksum_sha256: str | None = None
+    request_id: str | None = None
 
 
 @dataclass

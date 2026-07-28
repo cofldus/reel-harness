@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from reel_harness.manifest.schema import AssetInfo, LLMInfo, Manifest, RenderInfo, TTSInfo, ValidationInfo
+from reel_harness.manifest.schema import (
+    AssetInfo,
+    LLMInfo,
+    Manifest,
+    RenderInfo,
+    TTSAudioInfo,
+    TTSInfo,
+    ValidationInfo,
+)
 from reel_harness.media.ffprobe_validate import ValidationResult
 from reel_harness.pipeline.stages import AssetFetchResult, RenderOutput
+from reel_harness.providers.base import TTSResult
 from reel_harness.storage.base import StorageBackend
 
 
@@ -14,6 +23,8 @@ def build_manifest(
     render: RenderOutput | None = None,
     validation: ValidationResult | None = None,
     final_video_checksum: str | None = None,
+    tts_results: list[TTSResult] | None = None,
+    tts_model: str | None = None,
 ) -> Manifest:
     script = job.script
     return Manifest(
@@ -26,7 +37,15 @@ def build_manifest(
             model_id=script["llm_model_id"],
             prompt_version=script["prompt_version"],
         ),
-        tts=TTSInfo(provider_id=tts_provider_id, voice_id=tts_voice_id),
+        tts=TTSInfo(provider_id=tts_provider_id, voice_id=tts_voice_id, model_id=tts_model),
+        tts_audio=[
+            TTSAudioInfo(
+                scene_index=index,
+                checksum_sha256=result.checksum_sha256,
+                duration_sec=result.duration_sec,
+            )
+            for index, result in enumerate(tts_results or [])
+        ],
         assets=[
             AssetInfo(
                 scene_index=a.scene_index,
