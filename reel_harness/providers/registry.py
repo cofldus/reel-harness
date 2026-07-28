@@ -119,14 +119,44 @@ def resolve_llm_for_snapshot(snapshot: dict | None, settings: Settings | None) -
     )
 
 
+def _build_openai_compatible_tts(
+    settings: Settings | None,
+    *,
+    model_override: str | None = None,
+    voice_override: str | None = None,
+    format_override: str | None = None,
+    speed_override: float | None = None,
+) -> TTSProvider:
+    if settings is None:
+        raise NotImplementedError("the openai-compatible TTS provider requires application settings")
+    from reel_harness.providers.openai_compatible_tts import OpenAICompatibleTTSProvider
+
+    return OpenAICompatibleTTSProvider(
+        base_url=settings.tts_base_url,
+        model=model_override or settings.tts_model,
+        api_key=settings.tts_api_key.get_secret_value(),
+        voice=voice_override or settings.tts_voice,
+        audio_format=format_override or settings.tts_format,
+        speed=speed_override if speed_override is not None else settings.tts_speed,
+        connect_timeout=settings.tts_connect_timeout_seconds,
+        read_timeout=settings.tts_read_timeout_seconds,
+        max_retries=settings.tts_max_retries,
+        retry_backoff_seconds=settings.tts_retry_backoff_seconds,
+    )
+
+
 # Real vendor names/SDKs must only ever be registered here, never referenced
 # from reel_harness.pipeline.*. "openai-compatible" is a protocol shape, not a
-# vendor: the concrete vendor is chosen purely via llm_base_url/llm_model.
+# vendor: the concrete vendor is chosen purely via the configured base URL and
+# model/voice.
 LLM_PROVIDERS: dict[str, Callable[[Settings | None], LLMProvider]] = {
     "fake": lambda settings: FakeLLMProvider(),
     "openai-compatible": _build_openai_compatible_llm,
 }
-TTS_PROVIDERS: dict[str, Callable[[], TTSProvider]] = {"fake": FakeTTSProvider}
+TTS_PROVIDERS: dict[str, Callable[[Settings | None], TTSProvider]] = {
+    "fake": lambda settings: FakeTTSProvider(),
+    "openai-compatible": _build_openai_compatible_tts,
+}
 STOCK_MEDIA_PROVIDERS: dict[str, Callable[[], StockMediaProvider]] = {"fake": FakeStockMediaProvider}
 PUBLISHERS: dict[str, Callable[[], Publisher]] = {}
 
@@ -138,9 +168,9 @@ def resolve_llm_provider(name: str, settings: Settings | None = None) -> LLMProv
         raise NotImplementedError(f"LLM provider '{name}' is not registered yet") from exc
 
 
-def resolve_tts_provider(name: str) -> TTSProvider:
+def resolve_tts_provider(name: str, settings: Settings | None = None) -> TTSProvider:
     try:
-        return TTS_PROVIDERS[name]()
+        return TTS_PROVIDERS[normalize_provider_name(name)](settings)
     except KeyError as exc:
         raise NotImplementedError(f"TTS provider '{name}' is not registered yet") from exc
 
