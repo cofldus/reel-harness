@@ -141,11 +141,28 @@ class JobService:
             return jobs
 
     def request_cancel(self, job_id: str) -> Job:
+        """Cancels a job. States with no worker process attached
+        (CREATED/QUEUED/REVIEW_REQUIRED/RETRY_WAIT with no lease) transition to
+        CANCELLED immediately; a currently leased/running job gets the
+        cancel_requested flag and the worker honors it at the next stage
+        boundary. Job artifacts (final.mp4, manifest with approval null) are
+        preserved for post-mortem -- see docs/OPERATIONS.md. Both the CLI and
+        the API go through this one method."""
         with self._session_factory() as session:
             job = self._require_job(session, job_id)
             if job.status in {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
                 raise InvalidActionError(f"cannot cancel a job in terminal status {job.status}")
             job.cancel_requested = True
+            immediate = {
+                JobStatus.CREATED.value, JobStatus.QUEUED.value,
+                JobStatus.REVIEW_REQUIRED.value, JobStatus.RETRY_WAIT.value,
+            }
+            if job.status in immediate and job.locked_by is None:
+                # No worker is executing this job, so nothing needs a stage
+                # boundary: transition now instead of leaving a flag that no
+                # worker would ever pick up (REVIEW_REQUIRED jobs are not
+                # leasable).
+                apply_transition(job, JobStatus.CANCELLED)
             session.commit()
             session.refresh(job)
             session.expunge(job)

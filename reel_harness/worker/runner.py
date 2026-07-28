@@ -548,8 +548,9 @@ def _run_job_impl(session, job, channel, providers: ProviderBundle, storage,
     remaining = full_order[full_order.index(start_stage):]
     for stage in remaining:
         if job.cancel_requested:
-            apply_transition(job, JobStatus.CANCELLED)
-            _fenced_commit(session, job, lease_token, stage)
+            if job.status != JobStatus.CANCELLED.value:
+                apply_transition(job, JobStatus.CANCELLED)
+                _fenced_commit(session, job, lease_token, stage)
             return
         if not _run_single_stage(session, job, channel, providers, storage, stage, context, lease_token):
             return
