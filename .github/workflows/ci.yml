@@ -106,3 +106,42 @@ jobs:
         run: uv sync --extra dev
       - name: production-smoke (real ffmpeg, full pipeline, no fake shortcuts)
         run: uv run pytest tests/e2e/test_production_smoke.py -v
+
+  package-smoke:
+    name: package-smoke (build wheel, install into a clean venv, run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: "3.11"
+
+      - name: Build wheel and sdist
+        run: uv build --out-dir dist
+
+      - name: Install the built wheel into a clean venv (not the source tree)
+        run: |
+          uv venv /tmp/clean-venv
+          uv pip install --python /tmp/clean-venv/bin/python dist/*.whl
+
+      - name: Import + CLI entry point smoke (installed package only)
+        working-directory: /tmp
+        run: |
+          /tmp/clean-venv/bin/python -c "
+          import reel_harness, reel_harness.api.app, reel_harness.cli.main
+          import reel_harness.providers.youtube_publisher, reel_harness.publisher.oauth_youtube
+          assert 'site-packages' in reel_harness.__file__, 'imported from source tree, not the installed wheel'
+          print('installed-package imports OK:', reel_harness.__file__)
+          "
+          /tmp/clean-venv/bin/reel-harness --help
+
+      - name: Fake-provider bootstrap + migration init (installed package only)
+        working-directory: /tmp
+        env:
+          DATABASE_URL: "sqlite:////tmp/package-smoke.db"
+          JOBS_DIR: "/tmp/package-smoke-jobs"
+        run: |
+          /tmp/clean-venv/bin/reel-harness doctor
+          /tmp/clean-venv/bin/reel-harness channel-create --name smoke --niche cooking --language en
