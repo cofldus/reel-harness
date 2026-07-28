@@ -9,6 +9,7 @@ from reel_harness.core.state_machine import RESUMABLE_STAGES, JobStatus, Stage, 
 from reel_harness.db.models import ApprovalDecision, Channel, Job
 from reel_harness.manifest.schema import ApprovalInfo, Manifest
 from reel_harness.manifest.writer import write_manifest
+from reel_harness.observability import redact
 from reel_harness.storage.base import StorageBackend
 
 
@@ -177,7 +178,7 @@ class JobService:
                 retry_target_stage=regenerate_from_stage,
                 next_retry_at=datetime.now(UTC),
                 failure_code="USER_REJECTED",
-                failure_summary=reason[:500],
+                failure_summary=(redact(reason) or "")[:500],
             )
             session.commit()
             session.refresh(job)

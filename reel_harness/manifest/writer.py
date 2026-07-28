@@ -50,4 +50,11 @@ def build_manifest(
 
 
 def write_manifest(storage: StorageBackend, job_id: str, manifest: Manifest) -> None:
-    storage.write_bytes(job_id, "manifest.json", manifest.model_dump_json(indent=2).encode("utf-8"))
+    """Serialization happens fully in memory BEFORE any file operation, and the
+    write itself is atomic (temp file + os.replace), so manifest.json on disk
+    is always either the previous complete document or the new complete
+    document -- never truncated JSON. Write order relative to the DB: the
+    manifest is written before the REVIEW_REQUIRED/approval commit inside the
+    same fenced section (see worker.runner / core.service)."""
+    data = manifest.model_dump_json(indent=2).encode("utf-8")
+    storage.write_bytes_atomic(job_id, "manifest.json", data)

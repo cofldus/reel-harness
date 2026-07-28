@@ -109,6 +109,49 @@ rowcount check, which is safe under SQLite's transaction semantics for the
 concurrency levels this is designed for (`tests/integration/test_worker_lease.py`
 exercises the race directly with two sessions).
 
+### Renewable leases, heartbeats, and fencing (Phase 2A)
+
+Every successful lease acquisition mints a `lease_token` (UUID) on the job
+row. From that point:
+
+- A `LeaseHeartbeat` thread (own short-lived sessions, never the worker's main
+  session) refreshes `heartbeat_at` every `lease_heartbeat_seconds` (default
+  60s, vs the 300s `lease_timeout_seconds`) so a healthy worker inside a long
+  ffmpeg render or provider call is never reclaimed as stale. Heartbeat DB
+  errors are counted, logged, and exposed — never silently swallowed.
+- Every job-state commit (stage entry, stage result, status transition,
+  cancel, manifest write, release) is **fenced**: a guarded
+  `UPDATE ... WHERE lease_token = :token` runs inside the same transaction
+  immediately before the commit. Because that UPDATE takes SQLite's write
+  lock, a takeover either already committed (the fence matches 0 rows and the
+  worker rolls back and abandons with an internal `LEASE_LOST` outcome) or
+  must wait until this commit finishes — there is no check-then-commit gap.
+- `recover_stale_jobs()` rotates the token (clears it) when reclaiming, so
+  the old worker can never heartbeat, commit, or release again. Its
+  in-flight `StageRun` is closed as `lease_lost` by the old worker itself;
+  attempt numbers come from StageRun history (`max(attempt)+1`), so the new
+  owner's re-run never duplicates an attempt number.
+- The RENDER stage renders to a worker-private temp file
+  (`final/final-inprogress-<uuid>.mp4`) and promotes it to the official
+  `final/final.mp4` via `os.replace` only under a held fence, deleting the
+  now-stale `manifest.json` in the same step. A fenced-out worker cleans up
+  only its own temp file and never touches the official output.
+
+Schema note: `lease_token` was added via the additive-only migration path in
+`db.schema` (`_ADDITIVE_COLUMNS`, schema v2) — `init_db()` applies
+`ALTER TABLE ADD COLUMN` to pre-existing dev databases; anything beyond
+nullable column additions is the trigger to adopt Alembic.
+
+### Manifest atomicity
+
+All manifest and render-metadata writes go through
+`LocalFilesystemStorage.write_bytes_atomic` (unique temp file in the same
+directory → flush → fsync → `os.replace`), so `manifest.json` on disk is
+always a complete JSON document; a failed write preserves the previous file
+and leaves no temp files. Write order: the manifest file is written inside
+the fenced section immediately before the `REVIEW_REQUIRED` (or approval)
+commit.
+
 ## Dependency gating and resolution (ffmpeg/ffprobe)
 
 `RENDERING` and `VALIDATING` call `media.deps.check_ffmpeg_available()` fresh
@@ -203,11 +246,14 @@ commands that are known to work.
 - **Redis/RQ-backed `JobQueue`** — swap-in behind a not-yet-extracted queue
   interface once single-process polling is insufficient
 - **`S3CompatibleStorage`** — second `StorageBackend` implementation
-- **Real LLM/TTS/StockMedia/Publisher providers** — register in
-  `providers/registry.py`; `pipeline/*` and `worker/*` need zero changes
+- **Real TTS/StockMedia/Publisher providers** — register in
+  `providers/registry.py`; `pipeline/*` and `worker/*` need zero changes. A
+  real **LLM** path already exists: the vendor-neutral
+  `providers/openai_compatible_llm.py` adapter, selected via
+  `llm_provider=openai-compatible` plus `llm_base_url`/`llm_model`/
+  `llm_api_key` settings (see `.env.example`). No live call has been made —
+  contract tests use a mock transport.
 - **Subtitle overlay + BGM mixing** in `media/ffmpeg_render.py`
-- **Structured logging + secret redaction** — nothing beyond `print()`/JSON
-  stdout exists yet; there is no log sink to redact in Phase 0/1
 - **Web admin UI** — CLI is the only interface today
 - **TikTok/YouTube publishing** — `Publisher` Protocol exists, no
   implementation, no publish-gate license check wired up yet (there is

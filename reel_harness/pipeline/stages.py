@@ -62,6 +62,13 @@ def run_script_generating(job, channel, llm) -> None:
         "llm_model_id": result.model_id,
         "prompt_version": result.prompt_version,
     }
+    # Correlation metadata only -- never the request/response body or a secret.
+    request_id = getattr(result, "request_id", None)
+    if request_id:
+        job.script["llm_request_id"] = request_id
+    usage = getattr(result, "usage", None)
+    if usage:
+        job.script["llm_token_usage"] = usage
 
 
 def run_policy_checking(job) -> None:
@@ -105,12 +112,18 @@ def run_tts_generating(job, tts, storage) -> list[TTSResult]:
 def run_rendering(
     job, assets: list[AssetFetchResult], tts_results: list[TTSResult], storage,
     width: int = RENDER_WIDTH, height: int = RENDER_HEIGHT,
+    output_path: Path | None = None,
 ) -> RenderOutput:
     """`width`/`height` default to the fast-test resolution used by the normal
     per-job pipeline. A separate production-smoke check calls this with
     width=1080, height=1920 to prove the same ffmpeg toolchain produces a
     real target-resolution vertical video, without changing the resolution
     every ordinary Fake-provider job renders at (see docs/STATUS.md).
+
+    `output_path=None` renders straight to the official final/final.mp4
+    (removing any stale copy first). The fenced worker instead passes a
+    worker-private temp path and promotes it to the official name only after
+    proving it still owns the lease -- see worker.runner.
     """
     deps = check_ffmpeg_available()
     if not deps.ffmpeg_available:
@@ -118,12 +131,13 @@ def run_rendering(
     ffmpeg_path = deps.ffmpeg.path
     assert ffmpeg_path is not None  # guaranteed by ffmpeg_available above
 
-    # Stale-output policy: a final.mp4 left over from an earlier attempt must
-    # never be mistaken for this run's result, so it is removed before any
-    # rendering starts. If this run fails midway there is no final.mp4 at all.
-    output_path = storage.job_dir(job.id) / "final" / "final.mp4"
-    if output_path.exists():
-        output_path.unlink()
+    if output_path is None:
+        # Stale-output policy: a final.mp4 left over from an earlier attempt
+        # must never be mistaken for this run's result, so it is removed before
+        # any rendering starts. If this run fails midway there is no final.mp4.
+        output_path = storage.job_dir(job.id) / "final" / "final.mp4"
+        if output_path.exists():
+            output_path.unlink()
 
     work_dir = storage.job_dir(job.id) / "render"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +163,18 @@ def run_rendering(
 
 def run_validating(
     job, video_path: Path, expected_width: int = RENDER_WIDTH, expected_height: int = RENDER_HEIGHT,
+    policy: ffprobe_validate.ValidationPolicy | None = None,
 ) -> ValidationResult:
+    """Validates the actual rendered file against the (production-safe by
+    default) ValidationPolicy: existence, non-empty, ffprobe-parseable,
+    exact resolution, H.264/AAC, audio stream present, duration bounds, and
+    faststart atom ordering. Every violated condition is reported together in
+    the TECHNICAL_VALIDATION_FAILED summary."""
+    policy = policy if policy is not None else ffprobe_validate.DEFAULT_VALIDATION_POLICY
+
+    if not video_path.is_file() or video_path.stat().st_size == 0:
+        raise ValidationFailedError("final video is missing or empty")
+
     deps = check_ffmpeg_available()
     if not deps.ffprobe_available:
         raise DependencyError("ffprobe executable not found on PATH")
@@ -165,11 +190,9 @@ def run_validating(
     except (ValueError, KeyError) as exc:
         raise ValidationFailedError(f"could not parse ffprobe output: {exc}") from exc
 
-    if (validation.width, validation.height) != (expected_width, expected_height):
-        raise ValidationFailedError(
-            f"unexpected resolution {validation.width}x{validation.height}, "
-            f"expected {expected_width}x{expected_height}",
-        )
-    if not validation.has_audio_stream:
-        raise ValidationFailedError("rendered video has no audio stream")
+    failures = ffprobe_validate.check_against_policy(validation, expected_width, expected_height, policy)
+    if policy.require_faststart and not ffprobe_validate.has_faststart(video_path):
+        failures.append("moov atom does not precede mdat (faststart not applied)")
+    if failures:
+        raise ValidationFailedError("; ".join(failures))
     return validation

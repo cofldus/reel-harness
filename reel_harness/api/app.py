@@ -37,11 +37,18 @@ class JobResponse(BaseModel):
     status: str
     current_stage: str | None
     idempotent_replay: bool = False
+    # failure_code/failure_summary are persisted already-redacted (see
+    # reel_harness.observability.redact), so echoing them here never exposes a
+    # provider secret.
+    failure_code: str | None = None
+    failure_summary: str | None = None
+    reason_code: str | None = None
 
 
 def _to_response(job, idempotent_replay: bool = False) -> JobResponse:
     return JobResponse(
         job_id=job.id, status=job.status, current_stage=job.current_stage, idempotent_replay=idempotent_replay,
+        failure_code=job.failure_code, failure_summary=job.failure_summary, reason_code=job.reason_code,
     )
 
 
