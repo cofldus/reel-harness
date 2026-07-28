@@ -1512,9 +1512,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _make_console_encoding_safe() -> None:
+    """Some Windows consoles (this project's own primary dev environment
+    included) use a legacy codepage (e.g. cp949) that cannot encode
+    ordinary Unicode punctuation this CLI prints (an em dash in "NOT RUN --
+    credentials not configured", for one) -- without this, printing that
+    exact message crashes with UnicodeEncodeError instead of reporting
+    cleanly. Reconfiguring to UTF-8 with replacement on encode errors means
+    a print statement never crashes the CLI merely because the console's
+    codepage cannot represent one of its characters; on redirected output
+    (a file, CI log, `2>&1`) this also gets the correct encoding regardless
+    of console codepage. `reconfigure` is a real method on the concrete
+    TextIOWrapper streams sys.stdout/stderr normally are; guarded because
+    some non-interactive/test harnesses replace them with objects that
+    don't have it (e.g. pytest's capsys)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     from reel_harness.config import ProviderConfigurationError
 
+    _make_console_encoding_safe()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
