@@ -4,7 +4,7 @@ import hashlib
 import uuid
 from typing import Literal
 
-from reel_harness.core.errors import TransientProviderError, UploadRejectedError
+from reel_harness.core.errors import TransientProviderError, UploadRejectedError, UploadSessionExpiredError
 from reel_harness.providers.base import (
     ProcessingStatusResult,
     PublicationMetadata,
@@ -46,7 +46,7 @@ class FakePublisher:
             raise TransientProviderError("fake: simulated timeout")
         state = self._sessions.get(session.session_reference)
         if state is None:
-            raise TransientProviderError("fake: unknown session (simulated expiry)")
+            raise UploadSessionExpiredError("fake: unknown session (simulated expiry)")
         buf: bytearray = state["bytes"]
         if start_byte > len(buf):
             raise TransientProviderError("fake: chunk out of order")
@@ -61,9 +61,13 @@ class FakePublisher:
         return UploadChunkResult(bytes_uploaded=len(buf), completed=False)
 
     def query_upload_offset(self, session: UploadSessionHandle, total_bytes: int) -> int | None:
+        """Mirrors the real adapter's contract: an unknown session raises
+        UploadSessionExpiredError (never conflated with "already complete",
+        which is a genuine None return only for a session this instance
+        actually knows about and has fully received)."""
         state = self._sessions.get(session.session_reference)
         if state is None:
-            return None
+            raise UploadSessionExpiredError("fake: unknown session (simulated expiry)")
         uploaded = len(state["bytes"])
         return None if uploaded >= total_bytes else uploaded
 

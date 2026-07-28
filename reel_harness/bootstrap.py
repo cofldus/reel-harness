@@ -36,16 +36,51 @@ class AppContext:
             provider_snapshot=provider_snapshot(self.settings),
         )
         self.publications = PublicationService(self.session_factory, self.storage)
+        self._secret_store = None
+
+    def _get_secret_store(self):
+        """Lazily constructed and memoized: the secret directory is validated
+        (rejects a repo-internal path) and created only the first time
+        something actually needs it, not on every AppContext startup."""
+        if self._secret_store is None:
+            from reel_harness.publisher.secret_store import FileSecretStore
+
+            self._secret_store = FileSecretStore(self.settings.credential_dir)
+        return self._secret_store
 
     def credential_backend(self):
-        """Lazily constructed: the secret directory is validated (rejects a
-        repo-internal path) and created only when something actually needs
-        OAuth credentials, not on every AppContext startup."""
         from reel_harness.publisher.credentials import FileCredentialBackend
-        from reel_harness.publisher.secret_store import FileSecretStore
 
-        store = FileSecretStore(self.settings.credential_dir)
-        return FileCredentialBackend(store)
+        return FileCredentialBackend(self._get_secret_store())
+
+    def bundle_for_publication(self, publication):
+        """The publisher + session store for one leased publication, honoring
+        the publisher snapshot the Publication was created with -- mirrors
+        providers_for_job's pinning discipline. An unsatisfiable snapshot
+        yields a publisher that fails the stage with
+        PROVIDER_NOT_CONFIGURED, never a silent switch to a different
+        account."""
+        from reel_harness.providers.registry import resolve_publisher
+        from reel_harness.publisher.session_store import UploadSessionStore
+        from reel_harness.worker.publish_runner import PublishBundle
+
+        snapshot = getattr(publication, "publisher_config", None) or {}
+        provider_name = snapshot.get("publisher_provider", "fake")
+        account_reference = snapshot.get("publisher_account_reference", "default")
+        publisher = resolve_publisher(
+            provider_name, settings=self.settings,
+            credential_backend=self.credential_backend(), account_reference=account_reference,
+        )
+        return PublishBundle(publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()))
+
+    def channel_niche_for_job(self, job) -> str | None:
+        if job is None:
+            return None
+        from reel_harness.db.models import Channel
+
+        with self.session_factory() as session:
+            channel = session.get(Channel, job.channel_id)
+            return channel.niche if channel is not None else None
 
     def providers_for_job(self, job) -> ProviderBundle:
         """Providers for one leased job, honoring the provider snapshot the job

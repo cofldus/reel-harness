@@ -182,6 +182,56 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def _print_publication(publication) -> None:
+    print(json.dumps({
+        "publication_id": publication.id,
+        "job_id": publication.job_id,
+        "provider": publication.provider,
+        "status": publication.status,
+        "privacy_status": publication.privacy_status,
+        "provider_video_id": publication.provider_video_id,
+        "publication_url": publication.publication_url,
+        "bytes_uploaded": publication.bytes_uploaded,
+        "total_bytes": publication.total_bytes,
+        "failure_code": publication.failure_code,
+        "failure_summary": publication.failure_summary,
+    }, indent=2))
+
+
+def cmd_publisher_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.db.models import Job
+    from reel_harness.worker.publish_lease import (
+        lease_next_publication,
+        recover_stale_publications,
+        release_publication_lease,
+    )
+    from reel_harness.worker.publish_runner import run_publication
+
+    lease_timeout = args.lease_timeout or ctx.settings.lease_timeout_seconds
+    with ctx.session_factory() as session:
+        recover_stale_publications(session, lease_timeout_seconds=lease_timeout)
+        publication = lease_next_publication(session, worker_id=args.worker_id)
+        if publication is None:
+            print("no publication ready to lease")
+            return 0
+        lease_token = publication.lease_token
+        assert lease_token is not None  # minted by lease_next_publication on every successful claim
+        job = session.get(Job, publication.job_id)
+        channel_niche = ctx.channel_niche_for_job(job)
+        bundle = ctx.bundle_for_publication(publication)
+        try:
+            run_publication(
+                session, publication, ctx.storage, bundle, channel_niche=channel_niche, lease_token=lease_token,
+            )
+        finally:
+            release_publication_lease(session, publication, lease_token=lease_token)
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    _print_publication(publication)
+    return 0
+
+
 def _smoke_llm(ctx: AppContext) -> int:
     from reel_harness.config import normalize_provider_name
     from reel_harness.core.errors import (
@@ -528,6 +578,40 @@ def cmd_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
     return daemon.run()
 
 
+def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.worker.publish_daemon import (
+        PublisherDaemon,
+        PublisherDaemonConfig,
+        default_publisher_worker_id,
+    )
+
+    settings = ctx.settings
+    config = PublisherDaemonConfig(
+        worker_id=args.worker_id or default_publisher_worker_id(),
+        poll_interval_seconds=(
+            args.poll_interval if args.poll_interval is not None else settings.worker_poll_interval_seconds
+        ),
+        lease_timeout_seconds=args.lease_timeout or settings.lease_timeout_seconds,
+        max_publications=args.max_publications if args.max_publications is not None else None,
+        idle_exit_after_seconds=args.idle_exit_after,
+        stop_on_error=args.stop_on_error,
+    )
+    daemon = PublisherDaemon(
+        ctx.session_factory, ctx.storage, ctx.bundle_for_publication, ctx.channel_niche_for_job, config,
+    )
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        daemon.request_stop(f"signal_{signum}")
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return daemon.run()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reel-harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -597,6 +681,30 @@ def build_parser() -> argparse.ArgumentParser:
     worker_run.add_argument("--stop-on-error", action="store_true",
                             help="Exit (code 1) after the first job that ends FAILED")
     worker_run.set_defaults(func=cmd_worker_run)
+
+    publisher_run_once = sub.add_parser(
+        "publisher-run-once", help="Lease and run one publication, then exit",
+    )
+    publisher_run_once.add_argument("--worker-id", default="cli-publisher-worker")
+    publisher_run_once.add_argument(
+        "--lease-timeout", type=int, default=None,
+        help="Seconds before a locked publication with no heartbeat is considered stale "
+             "(default: settings.lease_timeout_seconds)",
+    )
+    publisher_run_once.set_defaults(func=cmd_publisher_run_once)
+
+    publisher_run = sub.add_parser("publisher-run", help="Continuous polling publisher worker daemon")
+    publisher_run.add_argument("--worker-id", default=None, help="Default: generated unique id")
+    publisher_run.add_argument("--poll-interval", type=float, default=None,
+                               help="Seconds to wait when no publication is leasable")
+    publisher_run.add_argument("--lease-timeout", type=int, default=None)
+    publisher_run.add_argument("--max-publications", type=int, default=None,
+                               help="Exit normally after processing this many publications")
+    publisher_run.add_argument("--idle-exit-after", type=float, default=None,
+                               help="Exit normally after this many idle seconds")
+    publisher_run.add_argument("--stop-on-error", action="store_true",
+                               help="Exit (code 1) after the first publication that ends FAILED")
+    publisher_run.set_defaults(func=cmd_publisher_run)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",
