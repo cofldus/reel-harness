@@ -1,7 +1,45 @@
 # Status
 
-Last updated: 2026-07-27 (Phase 2A reliability-foundation session, on branch
-`phase2/reliability-foundation`).
+Last updated: 2026-07-27 (Phase 2B runtime-worker session, on branch
+`phase2/runtime-worker`).
+
+## Phase 2B — production worker + real LLM execution path (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage):
+
+- **Worker daemon** (`reel-harness worker-run`): continuous polling with
+  stale recovery, fenced execution, background heartbeats, `--max-jobs` /
+  `--idle-exit-after` / `--stop-on-error`, graceful shutdown on
+  Ctrl+C/SIGINT/SIGTERM/SIGBREAK, per-job error isolation, structured
+  worker events. Verified by 10 in-process lifecycle tests (including a
+  real two-daemon race on one DB) plus 2 real-subprocess CLI E2Es.
+- **Provider configuration completed**: canonical `REEL_HARNESS_LLM_*` env
+  vars (legacy `LLM_*` accepted), SecretStr API key (hidden in repr),
+  strict startup validation with a clear no-traceback failure, and
+  `provider-smoke llm` — an opt-in, retries-disabled, redacted single-shot
+  check of the real provider with distinct exit codes per failure class.
+- **Provider snapshot pinning**: every job persists provider id/model/
+  endpoint-host/prompt-version/sampling params at creation (schema v3,
+  additive migration; never the key). Retries and resumes resolve from the
+  snapshot; unsatisfiable snapshots fail explicitly with
+  `PROVIDER_NOT_CONFIGURED` — no silent provider switches.
+- **Hybrid pipeline coverage**: the real OpenAI-compatible adapter over a
+  contract MockTransport driving the real pipeline with fake asset/TTS and
+  real ffmpeg/ffprobe — structured script + provider metadata on job and
+  manifest, no key anywhere, `publish_eligible=false` on fake licenses.
+  This is wiring coverage, NOT a live provider call; no live LLM smoke has
+  been run (no API key configured on this machine).
+- **Health/readiness**: `GET /readyz` (DB, schema version, storage,
+  provider config validity — checked locally, media toolchain) returning
+  503 with named checks; `/healthz` stays shallow.
+
+Environment limitation (unchanged): every `uv` execution path is blocked by
+the OS application-control policy, so `httpx` could not be promoted to a
+runtime dependency (lockfile untouched — recorded as BLOCKED_ENVIRONMENT);
+ruff remains NOT VERIFIED on this machine for the same reason.
+
+Suite after Phase 2B: **171 passed, 0 failed, 0 skipped** (142 -> 171).
+mypy clean (43 files).
 
 ## Phase 2A — reliability foundation + real LLM plumbing (IN PROGRESS, this branch)
 

@@ -74,6 +74,11 @@ class Job(Base):
     idempotency_key: Mapped[str]
     topic: Mapped[str | None] = mapped_column(default=None)
     script: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Provider snapshot captured at job creation (provider id, model, safe
+    # base-URL host, prompt version, sampling params -- NEVER the API key).
+    # Retries and resumes follow this snapshot, so changing environment
+    # variables mid-flight cannot silently switch an existing job's provider.
+    provider_config: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     status: Mapped[str] = mapped_column(default="CREATED")
     current_stage: Mapped[str | None] = mapped_column(default=None)
