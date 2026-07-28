@@ -96,3 +96,17 @@ class FileSecretStore:
 
     def exists(self, namespace: str, key: str) -> bool:
         return self._path_for(namespace, key).is_file()
+
+    def list_keys(self, namespace: str) -> list[str]:
+        """Lists every key currently stored in `namespace` (e.g. every saved
+        OAuth account alias) -- never the values. Returns an empty list for
+        a namespace that has never been written to."""
+        if not namespace or any(c in namespace for c in ("/", "\\", "..")):
+            raise SecretStoreError(f"invalid secret namespace: {namespace!r}")
+        ns_dir = self._root / namespace
+        if not ns_dir.is_dir():
+            return []
+        return sorted(
+            p.stem for p in ns_dir.glob("*.json")
+            if p.is_file() and not p.is_symlink()
+        )

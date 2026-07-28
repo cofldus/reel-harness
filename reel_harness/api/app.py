@@ -125,6 +125,75 @@ def readyz(ctx: AppContext = Depends(get_context)) -> JSONResponse:
     )
 
 
+@app.get("/readyz/publisher")
+def readyz_publisher(account: str = "default", ctx: AppContext = Depends(get_context)) -> JSONResponse:
+    """Publisher-specific readiness: publication schema, credential-backend
+    reachability, the selected account's token state, publisher registry,
+    worker config, and the media toolchain -- all checked locally. Never
+    makes a real YouTube API call (that's `publisher-doctor --check-remote`
+    or `provider-smoke publisher youtube`); never exposes a secret, token,
+    or local credential path."""
+    checks: dict[str, str] = {}
+    ready = True
+
+    try:
+        with ctx.session_factory() as session:
+            session.execute(text("SELECT 1 FROM publications LIMIT 1"))
+            session.execute(text("SELECT 1 FROM publication_audit_events LIMIT 1"))
+        checks["publication_schema"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - readiness must report, not raise
+        checks["publication_schema"] = f"error: {type(exc).__name__}"
+        ready = False
+
+    from reel_harness.publisher.secret_store import SecretStoreError
+
+    backend = None
+    try:
+        backend = ctx.credential_backend()
+        checks["credential_backend"] = "ok"
+    except SecretStoreError as exc:
+        checks["credential_backend"] = f"error: {exc}"
+        ready = False
+
+    if backend is not None:
+        cred = backend.get_credential("youtube", account)
+        if cred is None:
+            checks["account_credential"] = f"not configured (account={account!r})"
+        elif cred.invalid:
+            checks["account_credential"] = "invalid -- last refresh failed, re-run publisher-auth"
+            ready = False
+        else:
+            checks["account_credential"] = "ok"
+            checks["refresh_token"] = "present" if cred.refresh_token else "missing"
+
+    try:
+        from reel_harness.providers.youtube_publisher import UPLOAD_ENDPOINT  # noqa: F401
+
+        checks["publisher_registry"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        checks["publisher_registry"] = f"error: {type(exc).__name__}"
+        ready = False
+
+    chunk_size = ctx.settings.youtube_upload_chunk_size
+    checks["publication_worker_config"] = (
+        "ok" if chunk_size > 0 and chunk_size % 262144 == 0 else "invalid upload chunk size"
+    )
+    if checks["publication_worker_config"] != "ok":
+        ready = False
+    checks["public_upload_feature_flag"] = str(ctx.settings.allow_public_upload)
+
+    deps = check_ffmpeg_available()
+    checks["ffmpeg"] = "ok" if deps.ffmpeg_available else "not found"
+    checks["ffprobe"] = "ok" if deps.ffprobe_available else "not found"
+    if not deps.all_available:
+        ready = False
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"ready": ready, "checks": checks},
+    )
+
+
 @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_key)])
 def create_job(request: CreateJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
     job, replay = ctx.jobs.create_job(request.channel_id, request.idempotency_key, request.topic)

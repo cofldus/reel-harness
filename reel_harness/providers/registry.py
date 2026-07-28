@@ -467,12 +467,18 @@ def _resolve_fresh_youtube_access_token(
     from datetime import UTC, datetime, timedelta
 
     from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.observability import redact
     from reel_harness.publisher.credentials import OAuthCredential
     from reel_harness.publisher.oauth_youtube import YouTubeOAuthClient
 
     cred = credential_backend.get_credential("youtube", account_reference)
     if cred is None:
         raise ProviderNotConfiguredError(f"no youtube credential saved for account {account_reference!r}")
+    if cred.invalid:
+        raise ProviderAuthError(
+            f"youtube credential for {account_reference!r} is marked invalid after a failed refresh "
+            "-- re-run publisher-auth youtube"
+        )
     if cred.expires_at is None or cred.expires_at > datetime.now(UTC) + timedelta(minutes=2):
         return cred.access_token
     if not cred.refresh_token:
@@ -483,7 +489,17 @@ def _resolve_fresh_youtube_access_token(
         transport=oauth_transport,
     )
     try:
-        tokens = client.refresh(cred.refresh_token)
+        try:
+            tokens = client.refresh(cred.refresh_token)
+        except ProviderAuthError as exc:
+            # The refresh token itself is dead (revoked/expired) -- record
+            # this on the credential (never delete it) so publisher-doctor
+            # and publisher-account-show can surface it without a network
+            # call, then let the caller's own AUTH_REQUIRED handling apply.
+            cred.last_refresh_error = (redact(str(exc)) or "")[:300]
+            cred.invalid = True
+            credential_backend.save_credential(cred)
+            raise
     finally:
         client.close()
     refreshed = OAuthCredential(
@@ -491,6 +507,8 @@ def _resolve_fresh_youtube_access_token(
         expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in), scope=tokens.scope,
         provider="youtube", account_reference=account_reference,
         channel_id=cred.channel_id, channel_title=cred.channel_title,
+        created_at=cred.created_at, last_refreshed_at=datetime.now(UTC),
+        last_refresh_error=None, invalid=False,
     )
     credential_backend.save_credential(refreshed)
     return refreshed.access_token

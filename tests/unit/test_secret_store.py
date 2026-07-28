@@ -82,3 +82,29 @@ def test_corrupted_json_reads_as_missing_not_a_crash(tmp_path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not valid json", encoding="utf-8")
     assert store.get("ns", "bad") is None
+
+
+def test_list_keys_on_a_never_written_namespace_is_empty(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    assert store.list_keys("never-used") == []
+
+
+def test_list_keys_returns_every_key_sorted(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    store.set("ns", "youtube__b", {"x": 1})
+    store.set("ns", "youtube__a", {"x": 2})
+    assert store.list_keys("ns") == ["youtube__a", "youtube__b"]
+
+
+def test_list_keys_does_not_cross_namespaces(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    store.set("oauth_credentials", "youtube__default", {"a": 1})
+    store.set("upload_sessions", "some-pub-id", {"b": 2})
+    assert store.list_keys("oauth_credentials") == ["youtube__default"]
+    assert store.list_keys("upload_sessions") == ["some-pub-id"]
+
+
+def test_list_keys_rejects_invalid_namespace(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    with pytest.raises(SecretStoreError):
+        store.list_keys("../escape")

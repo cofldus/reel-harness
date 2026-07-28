@@ -79,3 +79,47 @@ def test_in_memory_backend_never_touches_disk(tmp_path) -> None:
     assert list(tmp_path.iterdir()) == []
     backend.revoke_credential("youtube", "default")
     assert backend.has_credential("youtube", "default") is False
+
+
+def test_file_backend_round_trips_operational_health_fields(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    backend = FileCredentialBackend(store)
+    created = datetime.now(UTC) - timedelta(days=3)
+    refreshed = datetime.now(UTC) - timedelta(hours=1)
+    backend.save_credential(_credential(
+        created_at=created, last_refreshed_at=refreshed, last_refresh_error=None, invalid=False,
+    ))
+    loaded = backend.get_credential("youtube", "default")
+    assert loaded is not None
+    assert loaded.created_at == created
+    assert loaded.last_refreshed_at == refreshed
+    assert loaded.last_refresh_error is None
+    assert loaded.invalid is False
+
+
+def test_file_backend_persists_invalid_marker_and_error(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    backend = FileCredentialBackend(store)
+    backend.save_credential(_credential(invalid=True, last_refresh_error="invalid_grant"))
+    loaded = backend.get_credential("youtube", "default")
+    assert loaded is not None
+    assert loaded.invalid is True
+    assert loaded.last_refresh_error == "invalid_grant"
+
+
+def test_file_backend_list_accounts_is_scoped_per_provider(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    backend = FileCredentialBackend(store)
+    assert backend.list_accounts("youtube") == []
+    backend.save_credential(_credential(account_reference="acct-a"))
+    backend.save_credential(_credential(account_reference="acct-b"))
+    backend.save_credential(_credential(provider="other-provider", account_reference="acct-c"))
+    assert backend.list_accounts("youtube") == ["acct-a", "acct-b"]
+    assert backend.list_accounts("other-provider") == ["acct-c"]
+
+
+def test_in_memory_backend_list_accounts(tmp_path) -> None:
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(_credential(account_reference="acct-a"))
+    backend.save_credential(_credential(account_reference="acct-b"))
+    assert backend.list_accounts("youtube") == ["acct-a", "acct-b"]

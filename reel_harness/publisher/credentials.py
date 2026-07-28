@@ -12,7 +12,17 @@ _NAMESPACE = "oauth_credentials"
 @dataclass
 class OAuthCredential:
     """Never persisted to the jobs DB, a manifest, or a log line -- only to
-    a CredentialBackend (see docs/PUBLISHING.md)."""
+    a CredentialBackend (see docs/PUBLISHING.md).
+
+    `created_at`/`last_refreshed_at`/`last_refresh_error`/`invalid` exist so
+    `publisher-doctor`/`publisher-account-show` can report a credential's
+    operational health without ever touching the network (see
+    providers.registry._resolve_fresh_youtube_access_token, which is the
+    only writer of the refresh-tracking fields). `invalid=True` means the
+    last refresh attempt failed in a way that a retry cannot fix on its own
+    (e.g. a revoked/expired refresh token) -- re-running `publisher-auth`
+    is required, but the record is kept (not deleted) so an operator can
+    still see what was connected and when it broke."""
 
     access_token: str
     refresh_token: str | None
@@ -22,6 +32,10 @@ class OAuthCredential:
     account_reference: str
     channel_id: str | None = None
     channel_title: str | None = None
+    created_at: datetime | None = None
+    last_refreshed_at: datetime | None = None
+    last_refresh_error: str | None = None
+    invalid: bool = False
 
 
 def _key(provider: str, account_reference: str) -> str:
@@ -33,6 +47,7 @@ class CredentialBackend(Protocol):
     def save_credential(self, credential: OAuthCredential) -> None: ...
     def has_credential(self, provider: str, account_reference: str) -> bool: ...
     def revoke_credential(self, provider: str, account_reference: str) -> None: ...
+    def list_accounts(self, provider: str) -> list[str]: ...
 
 
 class FileCredentialBackend:
@@ -54,6 +69,12 @@ class FileCredentialBackend:
             expires_at=datetime.fromisoformat(data["expires_at"]) if data.get("expires_at") else None,
             scope=data.get("scope", ""), provider=provider, account_reference=account_reference,
             channel_id=data.get("channel_id"), channel_title=data.get("channel_title"),
+            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
+            last_refreshed_at=(
+                datetime.fromisoformat(data["last_refreshed_at"]) if data.get("last_refreshed_at") else None
+            ),
+            last_refresh_error=data.get("last_refresh_error"),
+            invalid=bool(data.get("invalid", False)),
         )
 
     def save_credential(self, credential: OAuthCredential) -> None:
@@ -64,6 +85,12 @@ class FileCredentialBackend:
             "scope": credential.scope,
             "channel_id": credential.channel_id,
             "channel_title": credential.channel_title,
+            "created_at": credential.created_at.isoformat() if credential.created_at else None,
+            "last_refreshed_at": (
+                credential.last_refreshed_at.isoformat() if credential.last_refreshed_at else None
+            ),
+            "last_refresh_error": credential.last_refresh_error,
+            "invalid": credential.invalid,
         })
 
     def has_credential(self, provider: str, account_reference: str) -> bool:
@@ -71,6 +98,12 @@ class FileCredentialBackend:
 
     def revoke_credential(self, provider: str, account_reference: str) -> None:
         self._store.delete(_NAMESPACE, _key(provider, account_reference))
+
+    def list_accounts(self, provider: str) -> list[str]:
+        prefix = f"{provider}__"
+        return sorted(
+            key[len(prefix):] for key in self._store.list_keys(_NAMESPACE) if key.startswith(prefix)
+        )
 
 
 class InMemoryCredentialBackend:
@@ -90,3 +123,9 @@ class InMemoryCredentialBackend:
 
     def revoke_credential(self, provider: str, account_reference: str) -> None:
         self._data.pop(_key(provider, account_reference), None)
+
+    def list_accounts(self, provider: str) -> list[str]:
+        prefix = f"{provider}__"
+        return sorted(
+            key[len(prefix):] for key in self._data if key.startswith(prefix)
+        )

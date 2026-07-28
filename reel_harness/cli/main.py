@@ -670,6 +670,7 @@ def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
         expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in),
         scope=tokens.scope, provider="youtube", account_reference=account,
         channel_id=identity.channel_id, channel_title=identity.title,
+        created_at=datetime.now(UTC), last_refreshed_at=datetime.now(UTC),
     ))
 
     print(json.dumps({
@@ -679,6 +680,254 @@ def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
         "channel_title": identity.title,
         "has_refresh_token": tokens.refresh_token is not None,
     }, indent=2))
+    return 0
+
+
+_DOCTOR_STATUS_RANK = {"PASS": 0, "WARN": 1, "NOT_CONFIGURED": 2, "FAIL": 3}
+_DOCTOR_EXIT_CODE = {"PASS": 0, "WARN": 0, "NOT_CONFIGURED": 2, "FAIL": 1}
+
+
+def cmd_publisher_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Local-first readiness report for YouTube publishing: DB/storage/
+    credential-store/ffmpeg reachability and one account's token state, all
+    without any network call by default. --check-remote additionally
+    attempts a real token refresh and a read-only channel-identity fetch.
+    Never prints a secret or token -- only booleans, timestamps, and
+    redacted error summaries."""
+    import os as os_module
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text as sa_text
+
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.db.schema import SCHEMA_VERSION
+    from reel_harness.observability import redact
+    from reel_harness.publisher.secret_store import SecretStoreError
+
+    if args.provider != "youtube":  # pragma: no cover - argparse already restricts choices
+        print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)
+        return 2
+
+    account = args.account or "default"
+    checks: list[dict] = []
+
+    def add(name: str, status: str, detail: str | None = None) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    try:
+        with ctx.session_factory() as session:
+            session.execute(sa_text("SELECT 1"))
+            version = session.execute(sa_text("SELECT version FROM schema_migrations")).scalar_one()
+        add("database", "PASS")
+        add(
+            "schema_version", "PASS" if version == SCHEMA_VERSION else "FAIL",
+            f"v{version} (expected v{SCHEMA_VERSION})",
+        )
+    except Exception as exc:  # noqa: BLE001 - doctor must report, never raise
+        detail = (redact(str(exc)) or "")[:200]
+        add("database", "FAIL", f"{type(exc).__name__}: {detail}")
+        add("schema_version", "FAIL", "unknown -- database unreachable")
+
+    root = ctx.storage.root_dir
+    if root.is_dir() and os_module.access(root, os_module.W_OK):
+        add("storage", "PASS")
+    else:
+        add("storage", "FAIL", "storage root missing or not writable")
+    try:
+        probe = root / ".publisher_doctor_probe"
+        probe.mkdir(parents=True, exist_ok=True)
+        probe.rmdir()
+        add("final_video_path_access", "PASS", "per-job final/ directories can be created under the storage root")
+    except OSError as exc:
+        add("final_video_path_access", "FAIL", (redact(str(exc)) or "")[:200])
+
+    try:
+        from reel_harness.providers.youtube_publisher import YouTubePublisher  # noqa: F401
+
+        add("publisher_registry", "PASS", "youtube adapter importable")
+    except Exception as exc:  # noqa: BLE001
+        add("publisher_registry", "FAIL", type(exc).__name__)
+
+    chunk_size = ctx.settings.youtube_upload_chunk_size
+    if chunk_size > 0 and chunk_size % 262144 == 0:
+        add("upload_chunk_size", "PASS", str(chunk_size))
+    else:
+        add("upload_chunk_size", "FAIL", f"{chunk_size} is not a positive multiple of 262144")
+
+    if ctx.settings.youtube_client_id and ctx.settings.youtube_client_secret.get_secret_value():
+        add("oauth_client_config", "PASS")
+    else:
+        add(
+            "oauth_client_config", "NOT_CONFIGURED",
+            "REEL_HARNESS_YOUTUBE_CLIENT_ID / REEL_HARNESS_YOUTUBE_CLIENT_SECRET not set",
+        )
+
+    add("public_upload_feature_flag", "PASS", f"allow_public_upload={ctx.settings.allow_public_upload}")
+
+    backend = None
+    try:
+        backend = ctx.credential_backend()
+        add(
+            "credential_backend", "PASS",
+            f"{backend.__class__.__name__} rooted outside the repository (repo-internal paths are rejected "
+            "at construction)",
+        )
+    except SecretStoreError as exc:
+        add("credential_backend", "FAIL", str(exc))
+
+    cred = backend.get_credential("youtube", account) if backend is not None else None
+    if backend is None:
+        pass
+    elif cred is None:
+        add(
+            "account_credential", "NOT_CONFIGURED",
+            f"no saved credential for account {account!r} -- run publisher-auth youtube",
+        )
+    else:
+        add("account_credential", "PASS", f"account={account!r}")
+        add(
+            "refresh_token_present", "PASS" if cred.refresh_token else "WARN",
+            "present" if cred.refresh_token else "missing -- re-auth required once the access token expires",
+        )
+        if cred.invalid:
+            add(
+                "credential_valid", "FAIL",
+                f"marked invalid after a failed refresh: {cred.last_refresh_error or 'unknown reason'}",
+            )
+        elif cred.expires_at is None:
+            add("token_expiry", "WARN", "no expiry recorded")
+        else:
+            now = datetime.now(UTC)
+            if cred.expires_at > now + timedelta(minutes=2):
+                add("token_expiry", "PASS", f"valid until {cred.expires_at.isoformat()}")
+            elif cred.refresh_token:
+                add("token_expiry", "WARN", "access token expired/near-expiry but refreshable")
+            else:
+                add("token_expiry", "FAIL", "access token expired and no refresh token")
+
+    deps = check_ffmpeg_available()
+    add("ffmpeg", "PASS" if deps.ffmpeg_available else "FAIL")
+    add("ffprobe", "PASS" if deps.ffprobe_available else "FAIL")
+
+    add(
+        "publication_worker_config", "PASS",
+        f"lease_timeout={ctx.settings.lease_timeout_seconds}s "
+        f"poll_interval={ctx.settings.worker_poll_interval_seconds}s",
+    )
+
+    client_configured = bool(
+        ctx.settings.youtube_client_id and ctx.settings.youtube_client_secret.get_secret_value()
+    )
+    if not args.check_remote:
+        # Not checking remote by default is expected, not a defect -- PASS,
+        # never a status that could drag "overall" down on its own.
+        add("remote_token_refresh", "PASS", "not requested (pass --check-remote)")
+        add("remote_channel_identity", "PASS", "not requested (pass --check-remote)")
+    elif not client_configured or cred is None:
+        add("remote_token_refresh", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+        add("remote_channel_identity", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+    else:
+        from reel_harness.providers.registry import _resolve_fresh_youtube_access_token
+        from reel_harness.publisher.oauth_youtube import YouTubeOAuthClient
+
+        token: str | None = None
+        try:
+            token = _resolve_fresh_youtube_access_token(ctx.settings, backend, account)
+            add("remote_token_refresh", "PASS")
+        except (ProviderAuthError, TransientProviderError) as exc:
+            add("remote_token_refresh", "FAIL", (redact(str(exc)) or "")[:200])
+
+        if token is None:
+            add("remote_channel_identity", "FAIL", "skipped -- token refresh failed above")
+        else:
+            client = YouTubeOAuthClient(
+                ctx.settings.youtube_client_id, ctx.settings.youtube_client_secret.get_secret_value(),
+            )
+            try:
+                identity = client.fetch_channel_identity(token)
+                add("remote_channel_identity", "PASS", f"channel_id={identity.channel_id}")
+            except (ProviderAuthError, TransientProviderError) as exc:
+                add("remote_channel_identity", "FAIL", (redact(str(exc)) or "")[:200])
+            finally:
+                client.close()
+
+    overall = max((c["status"] for c in checks), key=lambda s: _DOCTOR_STATUS_RANK[s])
+
+    if args.json:
+        print(json.dumps({"provider": "youtube", "account_reference": account, "overall": overall,
+                           "checks": checks}, indent=2))
+    else:
+        print(f"YouTube publisher doctor -- account={account!r} -- overall: {overall}")
+        for c in checks:
+            detail = f" -- {c['detail']}" if c.get("detail") else ""
+            print(f"  [{c['status']:^13}] {c['name']}{detail}")
+
+    return _DOCTOR_EXIT_CODE[overall]
+
+
+def cmd_publisher_account_list(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Lists saved account aliases for a publisher provider -- never a
+    token, only safe identity/status fields."""
+    backend = ctx.credential_backend()
+    aliases = backend.list_accounts(args.provider)
+    accounts = []
+    for alias in aliases:
+        cred = backend.get_credential(args.provider, alias)
+        accounts.append({
+            "account_reference": alias,
+            "channel_id": cred.channel_id if cred else None,
+            "channel_title": cred.channel_title if cred else None,
+            "has_refresh_token": bool(cred.refresh_token) if cred else False,
+            "expires_at": cred.expires_at.isoformat() if cred and cred.expires_at else None,
+            "invalid": cred.invalid if cred else False,
+        })
+    print(json.dumps({"provider": args.provider, "accounts": accounts}, indent=2))
+    return 0
+
+
+def cmd_publisher_account_show(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Shows one saved account's safe metadata. Never prints access_token,
+    refresh_token, client_secret, an authorization code, a PKCE verifier, or
+    the raw stored JSON."""
+    backend = ctx.credential_backend()
+    cred = backend.get_credential(args.provider, args.alias)
+    if cred is None:
+        print(f"no saved credential for account {args.alias!r}", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "provider": cred.provider,
+        "account_reference": cred.account_reference,
+        "channel_id": cred.channel_id,
+        "channel_title": cred.channel_title,
+        "scope": cred.scope,
+        "has_refresh_token": bool(cred.refresh_token),
+        "created_at": cred.created_at.isoformat() if cred.created_at else None,
+        "last_refreshed_at": cred.last_refreshed_at.isoformat() if cred.last_refreshed_at else None,
+        "last_refresh_error": cred.last_refresh_error,
+        "invalid": cred.invalid,
+        "expires_at": cred.expires_at.isoformat() if cred.expires_at else None,
+    }, indent=2))
+    return 0
+
+
+def cmd_publisher_account_remove(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Deletes the LOCAL saved credential only. This never revokes remote
+    authorization at Google -- that is a separate, much larger-blast-radius
+    action (it invalidates every token issued to this OAuth client, for
+    every account) and is deliberately not implemented by this command."""
+    if not args.confirm:
+        print(
+            "refusing to remove without --confirm (this deletes the LOCAL saved credential only -- "
+            "it does NOT revoke remote authorization at Google)",
+            file=sys.stderr,
+        )
+        return 2
+    backend = ctx.credential_backend()
+    if not backend.has_credential(args.provider, args.alias):
+        print(f"no saved credential for account {args.alias!r}", file=sys.stderr)
+        return 2
+    backend.revoke_credential(args.provider, args.alias)
+    print(json.dumps({"provider": args.provider, "account_reference": args.alias, "removed": True}, indent=2))
     return 0
 
 
@@ -1051,6 +1300,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=300.0, help="Seconds to wait for the OAuth callback",
     )
     publisher_auth.set_defaults(func=cmd_publisher_auth)
+
+    publisher_doctor = sub.add_parser(
+        "publisher-doctor", help="Local-first readiness report for a publisher (no network by default)",
+    )
+    publisher_doctor.add_argument("provider", choices=["youtube"])
+    publisher_doctor.add_argument("--account", default=None, help="Account alias (default: 'default')")
+    publisher_doctor.add_argument(
+        "--check-remote", action="store_true",
+        help="Additionally attempt a real token refresh and read-only channel-identity fetch",
+    )
+    publisher_doctor.add_argument("--json", action="store_true")
+    publisher_doctor.set_defaults(func=cmd_publisher_doctor)
+
+    account_list = sub.add_parser("publisher-account-list", help="List saved publisher account aliases")
+    account_list.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_list.set_defaults(func=cmd_publisher_account_list)
+
+    account_show = sub.add_parser("publisher-account-show", help="Show one saved account's safe metadata")
+    account_show.add_argument("alias")
+    account_show.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_show.set_defaults(func=cmd_publisher_account_show)
+
+    account_remove = sub.add_parser(
+        "publisher-account-remove", help="Delete a LOCAL saved credential (does not revoke remote authorization)",
+    )
+    account_remove.add_argument("alias")
+    account_remove.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_remove.add_argument("--confirm", action="store_true")
+    account_remove.set_defaults(func=cmd_publisher_account_remove)
 
     return parser
 
