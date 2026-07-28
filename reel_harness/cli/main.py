@@ -232,6 +232,59 @@ def cmd_publisher_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_publication_status(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Read-only: never contacts the provider, just reports the current DB
+    row. Use publication-refresh to actually re-poll."""
+    from reel_harness.core.publish_service import PublicationNotFoundError
+
+    try:
+        publication = ctx.publications.get_publication(args.publication_id)
+    except PublicationNotFoundError:
+        print(f"publication not found: {args.publication_id}", file=sys.stderr)
+        return 1
+    _print_publication(publication)
+    return 0
+
+
+def cmd_publication_refresh(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Re-polls a single PROCESSING publication's status out of turn, without
+    waiting for a publisher-run daemon's next cycle. Briefly leases just this
+    publication (refuses if a worker already holds it or it isn't
+    PROCESSING) so a concurrent daemon cycle can never race this command."""
+    from reel_harness.db.models import Job, Publication
+    from reel_harness.worker.publish_lease import lease_specific_publication, release_publication_lease
+    from reel_harness.worker.publish_runner import run_publication
+
+    with ctx.session_factory() as session:
+        publication = session.get(Publication, args.publication_id)
+        if publication is None:
+            print(f"publication not found: {args.publication_id}", file=sys.stderr)
+            return 1
+        if not lease_specific_publication(session, args.publication_id, worker_id="cli-refresh"):
+            print(
+                f"publication {args.publication_id} is not currently PROCESSING and unlocked "
+                f"(status={publication.status}) -- nothing to refresh",
+                file=sys.stderr,
+            )
+            return 1
+        lease_token = publication.lease_token
+        assert lease_token is not None
+        job = session.get(Job, publication.job_id)
+        channel_niche = ctx.channel_niche_for_job(job)
+        bundle = ctx.bundle_for_publication(publication)
+        try:
+            run_publication(
+                session, publication, ctx.storage, bundle, channel_niche=channel_niche, lease_token=lease_token,
+            )
+        finally:
+            release_publication_lease(session, publication, lease_token=lease_token)
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    _print_publication(publication)
+    return 0
+
+
 def _smoke_llm(ctx: AppContext) -> int:
     from reel_harness.config import normalize_provider_name
     from reel_harness.core.errors import (
@@ -705,6 +758,18 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_run.add_argument("--stop-on-error", action="store_true",
                                help="Exit (code 1) after the first publication that ends FAILED")
     publisher_run.set_defaults(func=cmd_publisher_run)
+
+    publication_status = sub.add_parser(
+        "publication-status", help="Read-only: show a publication's current DB state",
+    )
+    publication_status.add_argument("publication_id")
+    publication_status.set_defaults(func=cmd_publication_status)
+
+    publication_refresh = sub.add_parser(
+        "publication-refresh", help="Re-poll one PROCESSING publication's status out of turn",
+    )
+    publication_refresh.add_argument("publication_id")
+    publication_refresh.set_defaults(func=cmd_publication_refresh)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",

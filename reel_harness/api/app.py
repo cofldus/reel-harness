@@ -272,3 +272,39 @@ def cancel_publication(publication_id: str, ctx: AppContext = Depends(get_contex
     except PublicationInvalidActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_publication_response(pub)
+
+
+@app.post("/v1/publications/{publication_id}/refresh", dependencies=[Depends(require_api_key)])
+def refresh_publication(publication_id: str, ctx: AppContext = Depends(get_context)) -> PublicationResponse:
+    """Re-polls a single PROCESSING publication's status out of turn (see
+    cli.main.cmd_publication_refresh). Briefly leases just this publication
+    so a concurrent publisher-run daemon cycle can never race this request;
+    if it isn't PROCESSING and unlocked, refuses with 409 rather than
+    silently doing nothing."""
+    from reel_harness.db.models import Job, Publication
+    from reel_harness.worker.publish_lease import lease_specific_publication, release_publication_lease
+    from reel_harness.worker.publish_runner import run_publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        if not lease_specific_publication(session, publication_id, worker_id="api-refresh"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"publication is not currently PROCESSING and unlocked (status={pub.status})",
+            )
+        lease_token = pub.lease_token
+        job = session.get(Job, pub.job_id)
+        channel_niche = ctx.channel_niche_for_job(job)
+        bundle = ctx.bundle_for_publication(pub)
+        try:
+            run_publication(
+                session, pub, ctx.storage, bundle, channel_niche=channel_niche, lease_token=lease_token,
+            )
+        finally:
+            release_publication_lease(session, pub, lease_token=lease_token)
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    return _to_publication_response(pub)

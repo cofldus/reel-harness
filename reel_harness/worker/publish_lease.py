@@ -56,6 +56,28 @@ def lease_next_publication(session, worker_id: str, now: datetime | None = None)
     return session.get(Publication, candidate_id)
 
 
+def lease_specific_publication(session, publication_id: str, worker_id: str, now: datetime | None = None) -> bool:
+    """Like lease_next_publication, but targets one specific publication
+    (used by `publication-refresh` and its API/CLI equivalents to poke a
+    single publication out of turn) instead of picking the oldest ready one.
+    Only succeeds if that publication is currently in PROCESSING and
+    unlocked -- refresh is for re-polling an in-flight upload's processing
+    status, not for jumping the queue on other stages. Returns whether the
+    lease was acquired; on True, the row's lease_token has been rotated,
+    exactly like lease_next_publication."""
+    now = now or datetime.now(UTC)
+    result = session.execute(
+        update(Publication)
+        .where(
+            Publication.id == publication_id, Publication.locked_by.is_(None),
+            Publication.status == PublicationStatus.PROCESSING.value,
+        )
+        .values(locked_by=worker_id, heartbeat_at=now, lease_token=new_uuid()),
+    )
+    session.commit()
+    return result.rowcount == 1
+
+
 def heartbeat_publication_lease(
     session, publication_id: str, lease_token: str, now: datetime | None = None,
 ) -> bool:
