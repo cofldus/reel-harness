@@ -7,11 +7,23 @@ from reel_harness.config import Settings, normalize_provider_name
 from reel_harness.core.errors import ProviderNotConfiguredError
 from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSION
 from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
-from reel_harness.providers.base import ChannelContext, LLMProvider, Publisher, StockMediaProvider, TTSProvider
+from reel_harness.providers.base import (
+    ChannelContext,
+    LLMProvider,
+    ProcessingStatusResult,
+    PublicationMetadata,
+    Publisher,
+    StockMediaProvider,
+    TTSProvider,
+    UploadChunkResult,
+    UploadSessionHandle,
+)
 from reel_harness.providers.fake_llm import PROMPT_VERSION as FAKE_PROMPT_VERSION
 from reel_harness.providers.fake_llm import FakeLLMProvider
+from reel_harness.providers.fake_publisher import FakePublisher
 from reel_harness.providers.fake_stock_media import FakeStockMediaProvider
 from reel_harness.providers.fake_tts import FakeTTSProvider
+from reel_harness.publisher.credentials import CredentialBackend
 
 
 class _UnconfiguredLLMProvider:
@@ -361,7 +373,6 @@ STOCK_MEDIA_PROVIDERS: dict[str, Callable[[Settings | None], StockMediaProvider]
     "fake": lambda settings: FakeStockMediaProvider(),
     "pexels": _build_pexels_stock_media,
 }
-PUBLISHERS: dict[str, Callable[[], Publisher]] = {}
 
 
 def resolve_llm_provider(name: str, settings: Settings | None = None) -> LLMProvider:
@@ -385,8 +396,134 @@ def resolve_stock_media_provider(name: str, settings: Settings | None = None) ->
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
 
 
-def resolve_publisher(name: str) -> Publisher:
+class _UnconfiguredPublisher:
+    """Publisher counterpart of _UnconfiguredLLMProvider: any use fails with
+    an explicit PROVIDER_NOT_CONFIGURED -- never a silent fallback to a
+    different account or provider."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def validate_configuration(self) -> None:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def create_upload_session(
+        self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,
+    ) -> UploadSessionHandle:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def upload_chunk(
+        self, session: UploadSessionHandle, chunk: bytes, start_byte: int, total_bytes: int,
+    ) -> UploadChunkResult:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def query_upload_offset(self, session: UploadSessionHandle, total_bytes: int) -> int | None:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def get_processing_status(self, provider_video_id: str) -> ProcessingStatusResult:
+        raise ProviderNotConfiguredError(self._reason)
+
+
+def publisher_snapshot(settings: Settings | None, provider: str, account_reference: str) -> dict:
+    """Publisher configuration captured onto a Publication at creation:
+    provider id, adapter version, safe account reference, default category/
+    madeForKids policy, chunk size -- NEVER an OAuth token or client secret.
+    Mirrors llm_provider_snapshot/tts_provider_snapshot/
+    asset_provider_snapshot's role for jobs."""
+    name = normalize_provider_name(provider)
+    if name == "fake":
+        return {
+            "publisher_provider": "fake",
+            "publisher_adapter_version": "fake-publisher-v1",
+            "publisher_account_reference": account_reference,
+        }
+    if name != "youtube":
+        raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
+    from reel_harness.providers.youtube_publisher import ADAPTER_VERSION
+
+    assert settings is not None
+    return {
+        "publisher_provider": "youtube",
+        "publisher_adapter_version": ADAPTER_VERSION,
+        "publisher_account_reference": account_reference,
+        "youtube_category_id": settings.youtube_category_id,
+        "youtube_made_for_kids": settings.youtube_made_for_kids,
+        "youtube_chunk_size": settings.youtube_upload_chunk_size,
+    }
+
+
+def _resolve_fresh_youtube_access_token(
+    settings: Settings, credential_backend, account_reference: str, oauth_transport: object = None,
+) -> str:
+    """Called by the adapter fresh before every request (see
+    YouTubePublisher's access_token_provider) -- refreshes proactively
+    (2-minute safety margin) rather than waiting for a 401, since a
+    resumable upload session can span many requests over a long file.
+    `oauth_transport` is exposed only for contract tests (httpx.MockTransport);
+    production callers never pass it, so the real Google token endpoint is
+    used."""
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_youtube import YouTubeOAuthClient
+
+    cred = credential_backend.get_credential("youtube", account_reference)
+    if cred is None:
+        raise ProviderNotConfiguredError(f"no youtube credential saved for account {account_reference!r}")
+    if cred.expires_at is None or cred.expires_at > datetime.now(UTC) + timedelta(minutes=2):
+        return cred.access_token
+    if not cred.refresh_token:
+        raise ProviderAuthError(f"youtube credential for {account_reference!r} expired and has no refresh token")
+
+    client = YouTubeOAuthClient(
+        settings.youtube_client_id, settings.youtube_client_secret.get_secret_value(),
+        transport=oauth_transport,
+    )
     try:
-        return PUBLISHERS[name]()
-    except KeyError as exc:
-        raise NotImplementedError(f"Publisher '{name}' is not registered yet") from exc
+        tokens = client.refresh(cred.refresh_token)
+    finally:
+        client.close()
+    refreshed = OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token or cred.refresh_token,
+        expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in), scope=tokens.scope,
+        provider="youtube", account_reference=account_reference,
+        channel_id=cred.channel_id, channel_title=cred.channel_title,
+    )
+    credential_backend.save_credential(refreshed)
+    return refreshed.access_token
+
+
+def resolve_publisher(
+    name: str, settings: Settings | None = None,
+    credential_backend: CredentialBackend | None = None, account_reference: str = "default",
+) -> Publisher:
+    """Unlike resolve_llm_provider/resolve_tts_provider/
+    resolve_stock_media_provider, publisher resolution is inherently per-
+    ACCOUNT, not just per-provider-name -- a publication always targets one
+    specific OAuth-connected channel."""
+    normalized = normalize_provider_name(name)
+    if normalized == "fake":
+        return FakePublisher()
+    if normalized != "youtube":
+        return _UnconfiguredPublisher(f"publisher {name!r} is not registered")
+    if settings is None or not settings.youtube_client_id or not settings.youtube_client_secret.get_secret_value():
+        return _UnconfiguredPublisher(
+            "youtube publishing requires REEL_HARNESS_YOUTUBE_CLIENT_ID / "
+            "REEL_HARNESS_YOUTUBE_CLIENT_SECRET"
+        )
+    if credential_backend is None or not credential_backend.has_credential("youtube", account_reference):
+        return _UnconfiguredPublisher(
+            f"no youtube credential saved for account {account_reference!r} -- run publisher-auth youtube"
+        )
+    from reel_harness.providers.youtube_publisher import YouTubePublisher
+
+    return YouTubePublisher(
+        access_token_provider=lambda: _resolve_fresh_youtube_access_token(
+            settings, credential_backend, account_reference,
+        ),
+        chunk_size=settings.youtube_upload_chunk_size,
+        connect_timeout=10.0, read_timeout=60.0, max_retries=3, retry_backoff_seconds=2.0,
+    )
