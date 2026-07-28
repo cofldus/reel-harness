@@ -24,6 +24,7 @@ class AppContext:
         register_secret(self.settings.llm_api_key.get_secret_value())
         register_secret(self.settings.tts_api_key.get_secret_value())
         register_secret(self.settings.asset_api_key.get_secret_value())
+        register_secret(self.settings.youtube_client_secret.get_secret_value())
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
@@ -35,6 +36,16 @@ class AppContext:
             provider_snapshot=provider_snapshot(self.settings),
         )
         self.publications = PublicationService(self.session_factory, self.storage)
+
+    def credential_backend(self):
+        """Lazily constructed: the secret directory is validated (rejects a
+        repo-internal path) and created only when something actually needs
+        OAuth credentials, not on every AppContext startup."""
+        from reel_harness.publisher.credentials import FileCredentialBackend
+        from reel_harness.publisher.secret_store import FileSecretStore
+
+        store = FileSecretStore(self.settings.credential_dir)
+        return FileCredentialBackend(store)
 
     def providers_for_job(self, job) -> ProviderBundle:
         """Providers for one leased job, honoring the provider snapshot the job

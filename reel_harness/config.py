@@ -153,6 +153,33 @@ class Settings(BaseSettings):
     allow_public_upload: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_ALLOW_PUBLIC_UPLOAD", "ALLOW_PUBLIC_UPLOAD"))
 
+    # YouTube OAuth (installed-app/loopback flow -- see docs/PUBLISHING.md
+    # and publisher.oauth_youtube). The client id/secret come from a Google
+    # Cloud Console OAuth client of type "Desktop app"; unlike the LLM/TTS/
+    # asset provider keys, these authorize the *application*, not a
+    # specific account -- per-account access/refresh tokens live in the
+    # credential backend below, never in Settings or the jobs DB.
+    youtube_client_id: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_ID"))
+    youtube_client_secret: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_CLIENT_SECRET", "YOUTUBE_CLIENT_SECRET"))
+    # Where OAuth credentials and upload-session references are stored --
+    # must never resolve inside the repository (enforced by
+    # publisher.secret_store.resolve_secret_dir). Defaults to
+    # ~/.reel-harness/credentials.
+    credential_dir: Path | None = Field(
+        None, validation_alias=_llm_alias("REEL_HARNESS_CREDENTIAL_DIR", "CREDENTIAL_DIR"))
+    youtube_upload_chunk_size: int = Field(
+        8 * 262144,  # 2 MiB; must stay a multiple of 262144 (256 KiB) per the resumable upload protocol
+        validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_CHUNK_SIZE", "YOUTUBE_UPLOAD_CHUNK_SIZE"),
+    )
+    youtube_category_id: str = Field(
+        "22",  # "People & Blogs" -- a reasonable default; always overridable per channel/job
+        validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_CATEGORY_ID", "YOUTUBE_CATEGORY_ID"),
+    )
+    youtube_made_for_kids: bool = Field(
+        False, validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_MADE_FOR_KIDS", "YOUTUBE_MADE_FOR_KIDS"))
+
 
 def _validate_llm_settings(settings: Settings) -> None:
     name = normalize_provider_name(settings.llm_provider)
@@ -253,6 +280,32 @@ def _validate_asset_settings(settings: Settings) -> None:
         )
 
 
+def _validate_youtube_settings(settings: Settings) -> None:
+    if settings.youtube_upload_chunk_size <= 0 or settings.youtube_upload_chunk_size % 262144 != 0:
+        raise ProviderConfigurationError(
+            "youtube upload chunk size must be a positive multiple of 262144 bytes (256 KiB) -- "
+            "see docs/PUBLISHING.md's resumable upload protocol notes"
+        )
+
+
+def validate_youtube_credentials_configured(settings: Settings) -> None:
+    """Called only when YouTube publishing is actually attempted (publisher-
+    auth youtube, publish-job --provider youtube, provider-smoke publisher
+    youtube) -- unlike the LLM/TTS/asset providers there is no separate
+    'youtube_provider=fake' toggle, since publishing is always opt-in per
+    command rather than a pipeline-wide default."""
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_YOUTUBE_CLIENT_ID", settings.youtube_client_id),
+            ("REEL_HARNESS_YOUTUBE_CLIENT_SECRET", settings.youtube_client_secret.get_secret_value()),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            "youtube publishing requires an OAuth client: missing " + ", ".join(missing)
+        )
+
+
 def validate_provider_settings(settings: Settings) -> None:
     """Startup gate: selecting a real provider with incomplete or invalid
     configuration fails immediately with a clear message (no network is
@@ -260,6 +313,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_llm_settings(settings)
     _validate_tts_settings(settings)
     _validate_asset_settings(settings)
+    _validate_youtube_settings(settings)
 
 
 def load_settings() -> Settings:

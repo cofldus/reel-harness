@@ -397,6 +397,88 @@ def _smoke_asset(ctx: AppContext) -> int:
     return 0
 
 
+def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Opt-in OAuth connect flow for a publisher account. Never runs without
+    a configured OAuth client (REEL_HARNESS_YOUTUBE_CLIENT_ID/_SECRET); never
+    prints an access token, refresh token, client secret, authorization
+    code, or PKCE verifier -- only the resulting account/channel identity."""
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.config import ProviderConfigurationError, validate_youtube_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.observability import redact
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_youtube import (
+        LoopbackCallbackServer,
+        OAuthCallbackError,
+        YouTubeOAuthClient,
+        build_authorization_url,
+        generate_pkce,
+        generate_state,
+    )
+
+    if args.provider != "youtube":  # pragma: no cover - argparse already restricts choices
+        print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)
+        return 2
+    try:
+        validate_youtube_credentials_configured(ctx.settings)
+    except ProviderConfigurationError as exc:
+        print(f"provider configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    account = args.account or "default"
+    pkce = generate_pkce()
+    state = generate_state()
+    server = LoopbackCallbackServer(expected_state=state, timeout_seconds=args.timeout)
+    auth_url = build_authorization_url(ctx.settings.youtube_client_id, server.redirect_uri, state, pkce)
+
+    print("Open this URL in a browser to authorize Reel Harness:", file=sys.stderr)
+    print(auth_url, file=sys.stderr)
+    try:
+        import webbrowser
+
+        webbrowser.open(auth_url)
+    except Exception:  # noqa: BLE001 - best-effort only; the printed URL above is the real fallback
+        pass
+
+    try:
+        code = server.wait_for_code()
+    except OAuthCallbackError as exc:
+        print(f"oauth callback failed: {exc}", file=sys.stderr)
+        return 3
+
+    client = YouTubeOAuthClient(
+        ctx.settings.youtube_client_id, ctx.settings.youtube_client_secret.get_secret_value(),
+    )
+    try:
+        tokens = client.exchange_code(code, pkce.verifier, server.redirect_uri)
+        identity = client.fetch_channel_identity(tokens.access_token)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+    finally:
+        client.close()
+
+    ctx.credential_backend().save_credential(OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token,
+        expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in),
+        scope=tokens.scope, provider="youtube", account_reference=account,
+        channel_id=identity.channel_id, channel_title=identity.title,
+    ))
+
+    print(json.dumps({
+        "provider": "youtube",
+        "account_reference": account,
+        "channel_id": identity.channel_id,
+        "channel_title": identity.title,
+        "has_refresh_token": tokens.refresh_token is not None,
+    }, indent=2))
+    return 0
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
@@ -521,6 +603,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_smoke.add_argument("target", choices=["llm", "tts", "asset"])
     provider_smoke.set_defaults(func=cmd_provider_smoke)
+
+    publisher_auth = sub.add_parser(
+        "publisher-auth", help="Connect a publisher account via OAuth (opt-in, requires a browser)",
+    )
+    publisher_auth.add_argument("provider", choices=["youtube"])
+    publisher_auth.add_argument("--account", default=None, help="Account alias (default: 'default')")
+    publisher_auth.add_argument(
+        "--timeout", type=float, default=300.0, help="Seconds to wait for the OAuth callback",
+    )
+    publisher_auth.set_defaults(func=cmd_publisher_auth)
 
     return parser
 
