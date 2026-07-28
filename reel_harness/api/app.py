@@ -377,3 +377,28 @@ def refresh_publication(publication_id: str, ctx: AppContext = Depends(get_conte
             if callable(close):
                 close()
     return _to_publication_response(pub)
+
+
+@app.post("/v1/publications/{publication_id}/reconcile", dependencies=[Depends(require_api_key)])
+def reconcile_publication_endpoint(publication_id: str, ctx: AppContext = Depends(get_context)) -> dict:
+    """Confirms a publication's local state against the provider (recovering
+    a provider_video_id the DB never committed, distinguishing an expired
+    upload session from an incomplete one, etc.) via a read-only call --
+    never starts a new upload. See core.publish_reconciliation for the full
+    outcome list. Response contains only the outcome, safe reasons, and a
+    provider_video_id -- no secret, token, or local path."""
+    from reel_harness.core.publish_reconciliation import reconcile_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        bundle = ctx.bundle_for_publication(pub)
+        try:
+            result = reconcile_publication(session, pub, bundle)
+        finally:
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    return result.to_dict()

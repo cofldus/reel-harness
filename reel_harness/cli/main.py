@@ -385,6 +385,55 @@ def cmd_publication_refresh(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def _reconcile_one(ctx: AppContext, publication_id: str) -> dict:
+    from reel_harness.core.publish_reconciliation import reconcile_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        publication = session.get(Publication, publication_id)
+        if publication is None:
+            return {"publication_id": publication_id, "error": "not found"}
+        bundle = ctx.bundle_for_publication(publication)
+        try:
+            result = reconcile_publication(session, publication, bundle)
+        finally:
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+        return result.to_dict()
+
+
+def cmd_publication_reconcile(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Determines whether a publication's local state actually matches
+    reality at the provider (recovering a provider_video_id the DB never
+    committed, distinguishing a genuinely expired upload session from an
+    incomplete one, etc.) -- never starts a new upload itself. See
+    core.publish_reconciliation for the full outcome list; anything
+    uncertain reports manual_review_required or ambiguous_remote_state
+    rather than guessing."""
+    from reel_harness.core.state_machine import PublicationStatus
+    from reel_harness.db.models import Publication
+
+    if args.all:
+        with ctx.session_factory() as session:
+            from sqlalchemy import select
+
+            terminal = {PublicationStatus.PUBLISHED.value, PublicationStatus.CANCELLED.value}
+            ids = list(session.execute(
+                select(Publication.id).where(Publication.status.not_in(terminal)),
+            ).scalars())
+        results = [_reconcile_one(ctx, pub_id) for pub_id in ids]
+        print(json.dumps(results, indent=2))
+        return 0 if all("error" not in r for r in results) else 1
+
+    if not args.publication_id:
+        print("usage: publication-reconcile <publication_id> | --all", file=sys.stderr)
+        return 2
+    result = _reconcile_one(ctx, args.publication_id)
+    print(json.dumps(result, indent=2))
+    return 1 if "error" in result else 0
+
+
 def _smoke_llm(ctx: AppContext) -> int:
     from reel_harness.config import normalize_provider_name
     from reel_harness.core.errors import (
@@ -1271,6 +1320,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publication_refresh.add_argument("publication_id")
     publication_refresh.set_defaults(func=cmd_publication_refresh)
+
+    publication_reconcile = sub.add_parser(
+        "publication-reconcile",
+        help="Confirm a publication's local state against the provider and repair it if safely confirmable",
+    )
+    publication_reconcile.add_argument("publication_id", nargs="?", default=None)
+    publication_reconcile.add_argument(
+        "--all", action="store_true", help="Reconcile every non-terminal publication instead of one",
+    )
+    publication_reconcile.set_defaults(func=cmd_publication_reconcile)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",

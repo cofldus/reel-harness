@@ -226,6 +226,12 @@ class Publication(Base):
     # Deterministic upload metadata actually sent (title/description/tags/
     # category/privacy/madeForKids) -- see providers.base.PublicationMetadata.
     metadata_snapshot: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Deterministic hash of (provider, account, job, checksum, metadata_snapshot)
+    # -- see pipeline.publish_metadata.metadata_fingerprint. Lets
+    # core.publish_reconciliation confirm a recovered/retried upload still
+    # matches the intended one, without ever embedding an internal id in the
+    # user-visible title/description.
+    metadata_fingerprint: Mapped[str | None] = mapped_column(default=None)
 
     upload_session_reference: Mapped[str | None] = mapped_column(default=None)
     bytes_uploaded: Mapped[int] = mapped_column(default=0)
@@ -258,7 +264,8 @@ class PublicationAuditEvent(Base):
     publication_created, auth_refreshed, upload_session_created,
     chunk_uploaded, upload_resumed, upload_completed, processing_started,
     processing_completed, publication_failed, publication_cancelled,
-    privacy_selected -- see worker.publish_runner). `detail` carries only
+    privacy_selected, publication_reconciled -- see worker.publish_runner
+    and core.publish_reconciliation). `detail` carries only
     safe structured fields (byte ranges, safe session-reference prefixes,
     status codes) -- never a full URL, request/response body, or secret;
     callers are responsible for redacting before constructing it, the same

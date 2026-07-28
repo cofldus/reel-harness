@@ -21,6 +21,7 @@ from reel_harness.manifest.writer import write_manifest
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_publisher import FakePublisher
+from reel_harness.publisher.journal import PublishJournal
 from reel_harness.publisher.secret_store import FileSecretStore
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.storage.local import LocalFilesystemStorage
@@ -131,8 +132,9 @@ def test_expired_lease_during_upload_is_taken_over_and_late_worker_fenced_out(tm
 
     secret_store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     session_store = UploadSessionStore(secret_store)
+    journal = PublishJournal(secret_store.root_dir / "publish_journal")
     gated = _GatedPublisher()
-    bundle_a = PublishBundle(publisher=gated, session_store=session_store)
+    bundle_a = PublishBundle(publisher=gated, session_store=session_store, journal=journal)
 
     with session_factory() as session:
         leased = lease_next_publication(session, worker_id="worker-a")
@@ -159,7 +161,9 @@ def test_expired_lease_during_upload_is_taken_over_and_late_worker_fenced_out(tm
             token_b = leased_b.lease_token
             assert token_b is not None and token_b != token_a
 
-            bundle_b = PublishBundle(publisher=FakePublisher(), session_store=UploadSessionStore(secret_store))
+            bundle_b = PublishBundle(
+                publisher=FakePublisher(), session_store=UploadSessionStore(secret_store), journal=journal,
+            )
             run_publication(session, leased_b, storage, bundle_b, lease_token=token_b)
             status_after_b = leased_b.status
             video_id_b = leased_b.provider_video_id

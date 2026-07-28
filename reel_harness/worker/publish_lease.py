@@ -78,6 +78,25 @@ def lease_specific_publication(session, publication_id: str, worker_id: str, now
     return result.rowcount == 1
 
 
+def lease_publication_for_reconcile(
+    session, publication_id: str, worker_id: str, now: datetime | None = None,
+) -> bool:
+    """Like lease_specific_publication, but for `publication-reconcile`:
+    succeeds for ANY unlocked status (reconciliation's whole purpose is
+    examining publications that may be stuck in an unusual state after a
+    crash, not just PROCESSING). Refuses only if the row is currently
+    locked by an active worker -- reconciliation must never race a worker
+    that is still genuinely making progress on the same publication."""
+    now = now or datetime.now(UTC)
+    result = session.execute(
+        update(Publication)
+        .where(Publication.id == publication_id, Publication.locked_by.is_(None))
+        .values(locked_by=worker_id, heartbeat_at=now, lease_token=new_uuid()),
+    )
+    session.commit()
+    return result.rowcount == 1
+
+
 def heartbeat_publication_lease(
     session, publication_id: str, lease_token: str, now: datetime | None = None,
 ) -> bool:

@@ -31,6 +31,7 @@ from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.runner import run
 from reel_harness.providers.registry import publisher_snapshot
 from reel_harness.providers.youtube_publisher import UPLOAD_ENDPOINT, VIDEOS_ENDPOINT, YouTubePublisher
+from reel_harness.publisher.journal import PublishJournal
 from reel_harness.publisher.secret_store import FileSecretStore
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_runner import PublishBundle, run_publication
@@ -227,7 +228,8 @@ def test_youtube_publisher_contract_e2e(job_service, channel, session_factory, s
     )
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     session_store = UploadSessionStore(store)
-    bundle = PublishBundle(publisher=publisher, session_store=session_store)
+    journal = PublishJournal(store.root_dir / "publish_journal")
+    bundle = PublishBundle(publisher=publisher, session_store=session_store, journal=journal)
 
     # First run: chunk 1 uploads fine; the (simulated) transient failure hits
     # the second chunk, so this call ends in RETRY_WAIT with the first
@@ -293,3 +295,18 @@ def test_youtube_publisher_contract_e2e(job_service, channel, session_factory, s
 
     assert server.last_metadata_body is not None
     assert server.last_metadata_body["status"]["privacyStatus"] == "private"
+
+    # The durable journal (see publisher.journal) recorded the completion
+    # fact independently of the DB, with the real provider_video_id -- this
+    # is what a crash-recovery reconcile would read if the DB commit itself
+    # had never happened.
+    journal_events = journal.read_events(pub.id)
+    completed_events = [e for e in journal_events if e["event"] == "upload_completed"]
+    assert len(completed_events) == 1
+    with session_factory() as session:
+        db_pub = session.get(Publication, pub.id)
+        assert completed_events[0]["provider_video_id"] == db_pub.provider_video_id
+        assert db_pub.metadata_fingerprint is not None
+    journal_text = json.dumps(journal_events).lower()
+    for forbidden in ("access_token", "refresh_token", "authorization", "bearer"):
+        assert forbidden not in journal_text

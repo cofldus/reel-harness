@@ -15,6 +15,7 @@ from reel_harness.manifest.writer import write_manifest
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_publisher import FakePublisher
+from reel_harness.publisher.journal import PublishJournal
 from reel_harness.publisher.secret_store import FileSecretStore
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_daemon import PublisherDaemon, PublisherDaemonConfig
@@ -93,7 +94,10 @@ def _daemon(session_factory, storage, tmp_path, **config_overrides) -> Publisher
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
 
     def bundle_for_publication(_pub):
-        return PublishBundle(publisher=FakePublisher(), session_store=UploadSessionStore(store))
+        return PublishBundle(
+            publisher=FakePublisher(), session_store=UploadSessionStore(store),
+            journal=PublishJournal(store.root_dir / "publish_journal"),
+        )
 
     def channel_niche_for_job(_job):
         return "cooking"
@@ -157,6 +161,7 @@ def test_stop_on_error_exits_fatal_after_first_failed_publication(
     def bundle_for_publication(_pub):
         return PublishBundle(
             publisher=FakePublisher(mode="fail_processing"), session_store=UploadSessionStore(store),
+            journal=PublishJournal(store.root_dir / "publish_journal"),
         )
 
     config = PublisherDaemonConfig(

@@ -53,6 +53,16 @@ class AppContext:
 
         return FileCredentialBackend(self._get_secret_store())
 
+    def publish_journal(self):
+        """Durable, append-only, fsync'd crash-recovery journal -- rooted
+        alongside OAuth credentials/upload-session references (same
+        repository-external directory, a distinct subdirectory) so it gets
+        the same repo-internal-path rejection for free. See
+        publisher.journal.PublishJournal and core.publish_reconciliation."""
+        from reel_harness.publisher.journal import PublishJournal
+
+        return PublishJournal(self._get_secret_store().root_dir / "publish_journal")
+
     def bundle_for_publication(self, publication):
         """The publisher + session store for one leased publication, honoring
         the publisher snapshot the Publication was created with -- mirrors
@@ -71,7 +81,10 @@ class AppContext:
             provider_name, settings=self.settings,
             credential_backend=self.credential_backend(), account_reference=account_reference,
         )
-        return PublishBundle(publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()))
+        return PublishBundle(
+            publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()),
+            journal=self.publish_journal(),
+        )
 
     def channel_niche_for_job(self, job) -> str | None:
         if job is None:

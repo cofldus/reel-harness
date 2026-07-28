@@ -18,8 +18,9 @@ from reel_harness.core.state_machine import (
 )
 from reel_harness.db.models import Job, Publication, PublicationAuditEvent
 from reel_harness.observability import redact
-from reel_harness.pipeline.publish_metadata import build_publication_metadata
+from reel_harness.pipeline.publish_metadata import build_publication_metadata, metadata_fingerprint
 from reel_harness.providers.base import PublicationMetadata, Publisher, UploadSessionHandle
+from reel_harness.publisher.journal import PublishJournal, safe_session_reference_hash
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_lease import PUBLICATION_RETRY_POLICY, assert_publication_lease
 
@@ -42,6 +43,7 @@ class _SessionNotResumable(Exception):
 class PublishBundle:
     publisher: Publisher
     session_store: UploadSessionStore
+    journal: PublishJournal
 
 
 def _persisted_error_text(text: object, limit: int) -> str:
@@ -156,11 +158,23 @@ def _create_session_stage(
     )
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
+    fingerprint = metadata_fingerprint(
+        publication.provider, publication.account_reference, publication.job_id,
+        publication.final_video_checksum, metadata,
+    )
+    bundle.journal.append(
+        publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+        account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+        event="upload_session_created", timestamp=_now(),
+        safe_session_hash=safe_session_reference_hash(handle.session_reference),
+        detail={"total_bytes": total_bytes, "metadata_fingerprint": fingerprint},
+    )
 
     if not assert_publication_lease(session, publication.id, lease_token):
         raise PublicationLeaseLostSignal
     publication.total_bytes = total_bytes
     publication.metadata_snapshot = _metadata_to_dict(metadata)
+    publication.metadata_fingerprint = fingerprint
     apply_publication_transition(
         publication, PublicationStatus.UPLOAD_SESSION_CREATED, upload_session_reference=publication.id,
     )
@@ -215,6 +229,13 @@ def _start_new_session(
     metadata = _metadata_from_snapshot(publication)
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
+    bundle.journal.append(
+        publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+        account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+        event="upload_session_created", timestamp=_now(),
+        safe_session_hash=safe_session_reference_hash(handle.session_reference),
+        detail={"total_bytes": total_bytes, "resumed": True},
+    )
     publication.bytes_uploaded = 0
     _audit(session, publication.id, "upload_session_created", {"total_bytes": total_bytes, "resumed": True})
     return handle
@@ -266,6 +287,19 @@ def _upload_stage(
             })
 
             if result.completed:
+                # Durable journal write FIRST, before any DB mutation: this
+                # is the exact instant a real crash (process killed right
+                # here) could otherwise lose the fact that the provider
+                # already has the finished video, causing a naive resume to
+                # re-upload it as a duplicate. A journal write that returns
+                # successfully is fsync'd -- see publisher.journal.
+                bundle.journal.append(
+                    publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+                    account_reference=publication.account_reference,
+                    final_video_checksum=publication.final_video_checksum,
+                    event="upload_completed", timestamp=_now(),
+                    provider_video_id=result.provider_video_id, provider_request_id=result.request_id,
+                )
                 publication.provider_video_id = result.provider_video_id
                 publication.publication_url = result.publication_url
                 apply_publication_transition(publication, PublicationStatus.UPLOAD_COMPLETED)
@@ -286,6 +320,12 @@ def _processing_stage(session, publication: Publication, bundle: PublishBundle, 
         raise PublicationLeaseLostSignal
 
     if status.processing_status == "succeeded":
+        bundle.journal.append(
+            publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+            account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+            event="processing_completed", timestamp=_now(),
+            provider_video_id=publication.provider_video_id, detail={"outcome": "succeeded"},
+        )
         publication.publication_url = status.publication_url or publication.publication_url
         publication.processing_completed_at = _now()
         apply_publication_transition(publication, PublicationStatus.PUBLISHED, published_at=_now())
