@@ -434,6 +434,29 @@ def cmd_publication_reconcile(args: argparse.Namespace, ctx: AppContext) -> int:
     return 1 if "error" in result else 0
 
 
+def cmd_publication_retry(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Manually retries a stuck publication (FAILED / AUTH_REQUIRED /
+    QUOTA_BLOCKED / RETRY_WAIT). Never uploads anything itself -- it
+    repositions the publication for the next publisher-run/-run-once cycle
+    to actually resume it. See core.publish_retry for the full policy
+    (eligibility and metadata-fingerprint are always re-verified first)."""
+    from reel_harness.core.publish_retry import PublicationRetryError, retry_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        publication = session.get(Publication, args.publication_id)
+        if publication is None:
+            print(f"publication not found: {args.publication_id}", file=sys.stderr)
+            return 1
+        try:
+            result = retry_publication(session, publication, ctx.storage, from_stage=args.from_stage)
+        except PublicationRetryError as exc:
+            print(json.dumps({"retried": False, "reasons": exc.reasons}, indent=2))
+            return 1
+    print(json.dumps({"retried": True, **result.to_dict()}, indent=2))
+    return 0
+
+
 def _smoke_llm(ctx: AppContext) -> int:
     from reel_harness.config import normalize_provider_name
     from reel_harness.core.errors import (
@@ -1330,6 +1353,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="Reconcile every non-terminal publication instead of one",
     )
     publication_reconcile.set_defaults(func=cmd_publication_reconcile)
+
+    publication_retry = sub.add_parser(
+        "publication-retry",
+        help="Manually retry a stuck publication (FAILED/AUTH_REQUIRED/QUOTA_BLOCKED/RETRY_WAIT)",
+    )
+    publication_retry.add_argument("publication_id")
+    publication_retry.add_argument(
+        "--from-stage", choices=["SESSION", "UPLOAD", "PROCESSING"], default=None,
+        help="Resume point; default picks the least-wasteful safe point automatically",
+    )
+    publication_retry.set_defaults(func=cmd_publication_retry)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",

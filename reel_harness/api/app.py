@@ -402,3 +402,30 @@ def reconcile_publication_endpoint(publication_id: str, ctx: AppContext = Depend
             if callable(close):
                 close()
     return result.to_dict()
+
+
+class RetryPublicationRequest(BaseModel):
+    from_stage: str | None = None
+
+
+@app.post("/v1/publications/{publication_id}/retry", dependencies=[Depends(require_api_key)])
+def retry_publication_endpoint(
+    publication_id: str, request: RetryPublicationRequest | None = None, ctx: AppContext = Depends(get_context),
+) -> dict:
+    """Manually retries a stuck publication (see core.publish_retry for the
+    full policy -- eligibility and metadata-fingerprint are always re-
+    verified first). Never uploads anything itself; a 409 with structured
+    reasons means the retry was refused, not that anything failed."""
+    from reel_harness.core.publish_retry import PublicationRetryError, retry_publication
+    from reel_harness.db.models import Publication
+
+    from_stage = request.from_stage if request is not None else None
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        try:
+            result = retry_publication(session, pub, ctx.storage, from_stage=from_stage)
+        except PublicationRetryError as exc:
+            raise HTTPException(status_code=409, detail={"reasons": exc.reasons}) from exc
+    return {"retried": True, **result.to_dict()}

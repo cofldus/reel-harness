@@ -222,6 +222,11 @@ ALLOWED_PUBLICATION_TRANSITIONS: dict[PublicationStatus, set[PublicationStatus]]
     PublicationStatus.RETRY_WAIT: {
         PublicationStatus.ELIGIBILITY_CHECKING, PublicationStatus.READY_TO_UPLOAD,
         PublicationStatus.UPLOAD_SESSION_CREATED, PublicationStatus.UPLOADING,
+        # PROCESSING: a publication-retry --from-stage PROCESSING resume --
+        # the upload already completed (a provider_video_id is known) and
+        # only the processing-status poll needs to happen again, e.g. after
+        # a quota/auth error specifically during that poll (Phase 3B).
+        PublicationStatus.PROCESSING,
         PublicationStatus.FAILED, PublicationStatus.CANCELLED,
     },
     PublicationStatus.AUTH_REQUIRED: {

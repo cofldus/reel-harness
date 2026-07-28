@@ -264,8 +264,9 @@ class PublicationAuditEvent(Base):
     publication_created, auth_refreshed, upload_session_created,
     chunk_uploaded, upload_resumed, upload_completed, processing_started,
     processing_completed, publication_failed, publication_cancelled,
-    privacy_selected, publication_reconciled -- see worker.publish_runner
-    and core.publish_reconciliation). `detail` carries only
+    privacy_selected, publication_reconciled, publication_retried -- see
+    worker.publish_runner, core.publish_reconciliation, and
+    core.publish_retry). `detail` carries only
     safe structured fields (byte ranges, safe session-reference prefixes,
     status codes) -- never a full URL, request/response body, or secret;
     callers are responsible for redacting before constructing it, the same
