@@ -60,3 +60,24 @@ def test_create_job_with_valid_api_key_returns_job_id(tmp_path) -> None:
         assert get_response.status_code == 200
     finally:
         app.dependency_overrides.clear()
+
+
+def test_get_job_assets_requires_api_key_and_exposes_no_local_path(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k-assets", topic="t")
+
+        unauthed = client.get(f"/v1/jobs/{job.id}/assets")
+        assert unauthed.status_code == 401
+
+        response = client.get(f"/v1/jobs/{job.id}/assets", headers={"Authorization": "Bearer test-key"})
+        assert response.status_code == 200
+        assert response.json() == []  # no ASSET stage has run yet
+
+        missing = client.get("/v1/jobs/does-not-exist/assets", headers={"Authorization": "Bearer test-key"})
+        assert missing.status_code == 404
+    finally:
+        app.dependency_overrides.clear()

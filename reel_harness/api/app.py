@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from reel_harness.bootstrap import AppContext
 from reel_harness.config import ProviderConfigurationError, validate_provider_settings
-from reel_harness.core.service import InvalidActionError, JobNotFoundError
+from reel_harness.core.service import InvalidActionError, JobNotFoundError, asset_safe_metadata
 from reel_harness.db.schema import SCHEMA_VERSION
 from reel_harness.media.deps import check_ffmpeg_available
 
@@ -133,6 +133,19 @@ def get_job(job_id: str, ctx: AppContext = Depends(get_context)) -> JobResponse:
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
     return _to_response(job)
+
+
+@app.get("/v1/jobs/{job_id}/assets", dependencies=[Depends(require_api_key)])
+def get_job_assets(job_id: str, ctx: AppContext = Depends(get_context)) -> list[dict]:
+    """Safe per-scene asset metadata for the job's current attempt (provider,
+    creator, license, dimensions, checksum prefix). Never a local filesystem
+    path or a signed/temporary download URL -- see
+    core.service.asset_safe_metadata."""
+    try:
+        assets = ctx.jobs.get_current_assets(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    return [asset_safe_metadata(a) for a in assets]
 
 
 @app.post("/v1/jobs/{job_id}/cancel", dependencies=[Depends(require_api_key)])

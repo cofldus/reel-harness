@@ -6,11 +6,37 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from reel_harness.core.state_machine import RESUMABLE_STAGES, JobStatus, Stage, apply_transition
-from reel_harness.db.models import ApprovalDecision, Channel, Job
+from reel_harness.db.models import ApprovalDecision, Asset, Channel, Job
 from reel_harness.manifest.schema import ApprovalInfo, Manifest
 from reel_harness.manifest.writer import write_manifest
 from reel_harness.observability import redact
 from reel_harness.storage.base import StorageBackend
+
+
+def asset_safe_metadata(asset: Asset) -> dict:
+    """The subset of an Asset row safe to hand to a client: provider/creator/
+    license/dimension/checksum-prefix info, never the local filesystem path
+    (Asset.local_path) or anything resembling a signed/temporary download URL
+    -- stock-media providers never persist those to begin with (see
+    providers.base.LocalAssetResult), but this stays the one place that
+    decides what's externally safe so the CLI and API can't drift."""
+    return {
+        "scene_index": asset.scene_index,
+        "provider": asset.source_provider,
+        "provider_asset_id": asset.provider_asset_id,
+        "creator": asset.author,
+        "creator_url": asset.creator_url,
+        "source_page_url": asset.source_page_url,
+        "license_type": asset.license_type,
+        "commercial_use_allowed": bool(asset.commercial_use_allowed),
+        "modification_allowed": bool(asset.modification_allowed),
+        "attribution_text": asset.attribution_text,
+        "width": asset.width,
+        "height": asset.height,
+        "duration_sec": asset.duration_sec,
+        "checksum_sha256_prefix": (asset.checksum_sha256 or "")[:12],
+        "attempt_number": asset.attempt_number,
+    }
 
 
 class JobNotFoundError(Exception):
@@ -129,6 +155,22 @@ class JobService:
                 raise JobNotFoundError(job_id)
             session.expunge(job)
             return job
+
+    def get_current_assets(self, job_id: str) -> list[Asset]:
+        """The job's current-attempt assets only (is_current=True), one per
+        scene, ordered by scene index -- never a prior rejected/retried
+        attempt. Callers (CLI job-show --json, the API) are expected to strip
+        local_path before exposing this externally: it's a local filesystem
+        path, not something safe to hand to a client."""
+        with self._session_factory() as session:
+            self._require_job(session, job_id)
+            rows = list(session.execute(
+                select(Asset).where(Asset.job_id == job_id, Asset.is_current.is_(True))
+                .order_by(Asset.scene_index),
+            ).scalars().all())
+            for row in rows:
+                session.expunge(row)
+            return rows
 
     def list_jobs(self, status: str | None = None) -> list[Job]:
         with self._session_factory() as session:

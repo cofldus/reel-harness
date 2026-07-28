@@ -19,10 +19,22 @@ class _FakeJob:
     }
 
 
-def _asset(index: int, license_type: str | None = "FAKE_TEST_LICENSE") -> AssetFetchResult:
+def _asset(
+    index: int, license_type: str | None = "FAKE_TEST_LICENSE",
+    commercial_use_allowed: bool = False, modification_allowed: bool = False,
+    attribution_text: str | None = None,
+) -> AssetFetchResult:
     return AssetFetchResult(
         scene_index=index, local_path=Path(f"scene_{index}.png"), checksum_sha256=f"deadbeef{index}",
         mime_type="image/png", source_url=f"fake://asset/{index}", author="Fake Author", license_type=license_type,
+        commercial_use_allowed=commercial_use_allowed, modification_allowed=modification_allowed,
+        attribution_text=attribution_text,
+    )
+
+
+def _passing_validation() -> ValidationResult:
+    return ValidationResult(
+        width=1080, height=1920, duration_sec=12.3, video_codec="h264", has_audio_stream=True, audio_codec="aac",
     )
 
 
@@ -79,7 +91,50 @@ def test_publish_not_eligible_with_no_assets() -> None:
     assert is_publish_eligible(manifest) is False
 
 
-def test_publish_eligible_when_approved_with_real_license() -> None:
-    manifest = build_manifest(_FakeJob(), [_asset(0, license_type="CC-BY-4.0")], "fake", "fake-voice-1")
+def _eligible_asset(index: int = 0) -> AssetFetchResult:
+    return _asset(
+        index, license_type="CC-BY-4.0", commercial_use_allowed=True, modification_allowed=True,
+        attribution_text="Photo by Someone",
+    )
+
+
+def test_publish_eligible_when_approved_with_real_license_and_full_metadata() -> None:
+    manifest = build_manifest(
+        _FakeJob(), [_eligible_asset()], "fake", "fake-voice-1", validation=_passing_validation(),
+    )
     manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
     assert is_publish_eligible(manifest) is True
+
+
+def test_publish_not_eligible_without_commercial_use_allowed() -> None:
+    manifest = build_manifest(
+        _FakeJob(), [_asset(0, license_type="CC-BY-4.0", modification_allowed=True, attribution_text="A")],
+        "fake", "fake-voice-1", validation=_passing_validation(),
+    )
+    manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
+    assert is_publish_eligible(manifest) is False
+
+
+def test_publish_not_eligible_without_modification_allowed() -> None:
+    manifest = build_manifest(
+        _FakeJob(), [_asset(0, license_type="CC-BY-4.0", commercial_use_allowed=True, attribution_text="A")],
+        "fake", "fake-voice-1", validation=_passing_validation(),
+    )
+    manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
+    assert is_publish_eligible(manifest) is False
+
+
+def test_publish_not_eligible_without_attribution_text() -> None:
+    manifest = build_manifest(
+        _FakeJob(),
+        [_asset(0, license_type="CC-BY-4.0", commercial_use_allowed=True, modification_allowed=True)],
+        "fake", "fake-voice-1", validation=_passing_validation(),
+    )
+    manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
+    assert is_publish_eligible(manifest) is False
+
+
+def test_publish_not_eligible_without_passing_technical_validation() -> None:
+    manifest = build_manifest(_FakeJob(), [_eligible_asset()], "fake", "fake-voice-1")  # no validation passed
+    manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
+    assert is_publish_eligible(manifest) is False

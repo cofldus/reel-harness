@@ -7,7 +7,7 @@ import sys
 import uuid
 
 from reel_harness.bootstrap import AppContext
-from reel_harness.core.service import InvalidActionError, JobNotFoundError
+from reel_harness.core.service import InvalidActionError, JobNotFoundError, asset_safe_metadata
 from reel_harness.db.models import Channel
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.worker.daemon import DaemonConfig, WorkerDaemon, default_worker_id
@@ -82,6 +82,7 @@ def cmd_job_show(args: argparse.Namespace, ctx: AppContext) -> int:
     if args.json:
         # Machine-readable contract: stdout carries exactly one valid JSON
         # document, nothing else. Helper paths become fields, not extra lines.
+        assets = [asset_safe_metadata(a) for a in ctx.jobs.get_current_assets(job.id)]
         payload = {
             "job_id": job.id,
             "status": job.status,
@@ -92,6 +93,7 @@ def cmd_job_show(args: argparse.Namespace, ctx: AppContext) -> int:
             "reason_code": job.reason_code,
             "preview_path": None,
             "manifest_path": None,
+            "assets": assets,
         }
         if job.status == "REVIEW_REQUIRED":
             payload["preview_path"] = str(ctx.storage.job_dir(job.id) / "final" / "final.mp4")

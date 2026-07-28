@@ -11,12 +11,31 @@ from reel_harness.db.models import Base
 # existing dev databases keep working without data loss. Only nullable column
 # additions are allowed through this path -- anything destructive or shaped
 # differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # (table, column, sqlite type) added after the table first shipped.
 _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("jobs", "lease_token", "VARCHAR"),  # v2: lease fencing token
     ("jobs", "provider_config", "JSON"),  # v3: per-job provider snapshot
+    # v4: append-only asset provenance history (see db.models.Asset). Existing
+    # rows default to (attempt_number=1, is_current=1) so they read as a
+    # single current attempt with no history gap; the metadata columns default
+    # to NULL for rows written before this snapshot existed.
+    ("assets", "attempt_number", "INTEGER NOT NULL DEFAULT 1"),
+    ("assets", "is_current", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("assets", "provider_asset_id", "VARCHAR"),
+    ("assets", "query_text", "VARCHAR"),
+    ("assets", "selection_score", "FLOAT"),
+    ("assets", "source_page_url", "VARCHAR"),
+    ("assets", "creator_url", "VARCHAR"),
+    ("assets", "commercial_use_allowed", "BOOLEAN"),
+    ("assets", "modification_allowed", "BOOLEAN"),
+    ("assets", "attribution_text", "VARCHAR"),
+    ("assets", "width", "INTEGER"),
+    ("assets", "height", "INTEGER"),
+    ("assets", "duration_sec", "FLOAT"),
+    ("assets", "fps", "FLOAT"),
+    ("assets", "request_id", "VARCHAR"),
 ]
 
 
