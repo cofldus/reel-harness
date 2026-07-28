@@ -255,6 +255,16 @@ class Publication(Base):
     published_at: Mapped[datetime | None] = mapped_column(default=None)
     processing_completed_at: Mapped[datetime | None] = mapped_column(default=None)
 
+    # Processing poller bookkeeping (Phase 3B, schema v7) -- see
+    # worker.publish_lease.lease_next_processing_publication and
+    # worker.publish_runner._processing_stage. processing_started_at anchors
+    # the max-processing-duration local timeout; next_poll_at is when the
+    # poller may next check this publication (backoff between polls, not a
+    # retry-on-error mechanism -- errors use the ordinary RETRY_WAIT path).
+    processing_started_at: Mapped[datetime | None] = mapped_column(default=None)
+    next_poll_at: Mapped[datetime | None] = mapped_column(default=None)
+    processing_poll_count: Mapped[int] = mapped_column(default=0)
+
     job: Mapped[Job] = relationship()
     audit_events: Mapped[list[PublicationAuditEvent]] = relationship(back_populates="publication")
 

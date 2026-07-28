@@ -180,6 +180,23 @@ class Settings(BaseSettings):
     youtube_made_for_kids: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_MADE_FOR_KIDS", "YOUTUBE_MADE_FOR_KIDS"))
 
+    # Processing poller (Phase 3B, worker.publish_runner._processing_stage /
+    # worker.publish_lease.lease_next_processing_publication). Pinned onto
+    # each publication's publisher_config at session-creation time (like
+    # youtube_chunk_size already is) rather than read live from Settings, so
+    # a publication's polling behavior never silently changes mid-flight if
+    # the operator edits config while it's in progress.
+    publisher_processing_poll_interval_seconds: float = Field(
+        30.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_PUBLISHER_PROCESSING_POLL_INTERVAL", "PUBLISHER_PROCESSING_POLL_INTERVAL_SECONDS",
+        ),
+    )
+    publisher_processing_max_duration_seconds: float = Field(
+        3600.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_PUBLISHER_PROCESSING_MAX_DURATION", "PUBLISHER_PROCESSING_MAX_DURATION_SECONDS",
+        ),
+    )
+
 
 def _validate_llm_settings(settings: Settings) -> None:
     name = normalize_provider_name(settings.llm_provider)
@@ -286,6 +303,10 @@ def _validate_youtube_settings(settings: Settings) -> None:
             "youtube upload chunk size must be a positive multiple of 262144 bytes (256 KiB) -- "
             "see docs/PUBLISHING.md's resumable upload protocol notes"
         )
+    if settings.publisher_processing_poll_interval_seconds <= 0:
+        raise ProviderConfigurationError("publisher processing poll interval must be positive")
+    if settings.publisher_processing_max_duration_seconds <= 0:
+        raise ProviderConfigurationError("publisher processing max duration must be positive")
 
 
 def validate_youtube_credentials_configured(settings: Settings) -> None:

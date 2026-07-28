@@ -433,11 +433,15 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
     Mirrors llm_provider_snapshot/tts_provider_snapshot/
     asset_provider_snapshot's role for jobs."""
     name = normalize_provider_name(provider)
+    poll_interval = settings.publisher_processing_poll_interval_seconds if settings else 30.0
+    max_duration = settings.publisher_processing_max_duration_seconds if settings else 3600.0
     if name == "fake":
         return {
             "publisher_provider": "fake",
             "publisher_adapter_version": "fake-publisher-v1",
             "publisher_account_reference": account_reference,
+            "processing_poll_interval_seconds": poll_interval,
+            "processing_max_duration_seconds": max_duration,
         }
     if name != "youtube":
         raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
@@ -451,6 +455,8 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
         "youtube_category_id": settings.youtube_category_id,
         "youtube_made_for_kids": settings.youtube_made_for_kids,
         "youtube_chunk_size": settings.youtube_upload_chunk_size,
+        "processing_poll_interval_seconds": poll_interval,
+        "processing_max_duration_seconds": max_duration,
     }
 
 

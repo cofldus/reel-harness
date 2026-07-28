@@ -217,6 +217,13 @@ ALLOWED_PUBLICATION_TRANSITIONS: dict[PublicationStatus, set[PublicationStatus]]
     },
     PublicationStatus.PROCESSING: {
         PublicationStatus.PUBLISHED, PublicationStatus.FAILED, PublicationStatus.CANCELLED,
+        # A transient/auth/quota error while POLLING processing status is
+        # not the same fact as the video's own processing having failed --
+        # without these, any hiccup calling get_processing_status (a
+        # dropped connection, an expired token, a rate limit) landed
+        # straight in FAILED on the first occurrence, with no soft retry at
+        # all (Phase 3B fix; mirrors UPLOADING's error handling).
+        PublicationStatus.AUTH_REQUIRED, PublicationStatus.QUOTA_BLOCKED, PublicationStatus.RETRY_WAIT,
     },
     PublicationStatus.PUBLISHED: set(),
     PublicationStatus.RETRY_WAIT: {

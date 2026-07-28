@@ -17,6 +17,16 @@ from reel_harness.worker.lease import lease_next_job, recover_stale_jobs, releas
 from reel_harness.worker.runner import run_job
 
 
+def _parse_iso_datetime(value: str):
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid ISO 8601 datetime: {value!r}") from exc
+    return parsed
+
+
 def _print_job(job) -> None:
     print(json.dumps({
         "job_id": job.id,
@@ -182,20 +192,31 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
-def _print_publication(publication) -> None:
-    print(json.dumps({
+def _publication_fields(publication) -> dict:
+    """Safe fields only -- never a token, the upload session reference/URL,
+    a local credential path, an Authorization header, or a raw provider
+    response body. Shared by _print_publication and publication-list."""
+    return {
         "publication_id": publication.id,
         "job_id": publication.job_id,
         "provider": publication.provider,
+        "account_reference": publication.account_reference,
         "status": publication.status,
         "privacy_status": publication.privacy_status,
         "provider_video_id": publication.provider_video_id,
         "publication_url": publication.publication_url,
         "bytes_uploaded": publication.bytes_uploaded,
         "total_bytes": publication.total_bytes,
+        "processing_poll_count": publication.processing_poll_count,
         "failure_code": publication.failure_code,
         "failure_summary": publication.failure_summary,
-    }, indent=2))
+        "created_at": publication.created_at.isoformat() if publication.created_at else None,
+        "updated_at": publication.updated_at.isoformat() if publication.updated_at else None,
+    }
+
+
+def _print_publication(publication) -> None:
+    print(json.dumps(_publication_fields(publication), indent=2))
 
 
 def cmd_publish_job(args: argparse.Namespace, ctx: AppContext) -> int:
@@ -298,19 +319,31 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
     return 0 if ready else 1
 
 
+def _resolve_publisher_lanes(args: argparse.Namespace) -> tuple[bool, bool]:
+    """--process-upload/--process-status split the two roles a publisher
+    worker plays; omitting both means "do both" (the historical default
+    behavior), not "do neither"."""
+    if not args.process_upload and not args.process_status:
+        return True, True
+    return args.process_upload, args.process_status
+
+
 def cmd_publisher_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     from reel_harness.db.models import Job
     from reel_harness.worker.publish_lease import (
-        lease_next_publication,
+        lease_next_via_lanes,
         recover_stale_publications,
         release_publication_lease,
     )
     from reel_harness.worker.publish_runner import run_publication
 
+    process_upload, process_status = _resolve_publisher_lanes(args)
     lease_timeout = args.lease_timeout or ctx.settings.lease_timeout_seconds
     with ctx.session_factory() as session:
         recover_stale_publications(session, lease_timeout_seconds=lease_timeout)
-        publication = lease_next_publication(session, worker_id=args.worker_id)
+        publication = lease_next_via_lanes(
+            session, worker_id=args.worker_id, process_upload=process_upload, process_status=process_status,
+        )
         if publication is None:
             print("no publication ready to lease")
             return 0
@@ -343,6 +376,28 @@ def cmd_publication_status(args: argparse.Namespace, ctx: AppContext) -> int:
         print(f"publication not found: {args.publication_id}", file=sys.stderr)
         return 1
     _print_publication(publication)
+    return 0
+
+
+_FAILED_LIKE_STATUSES = ["FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED"]
+
+
+def cmd_publication_list(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Read-only operator listing across publications, with filters. Never
+    contacts the provider. Safe fields only -- see _publication_fields."""
+    statuses = None
+    status = args.status
+    if status is None:
+        if args.failed_only:
+            statuses = _FAILED_LIKE_STATUSES
+        elif args.processing_only:
+            status = "PROCESSING"
+
+    rows = ctx.publications.list_publications(
+        job_id=args.job_id, status=status, provider=args.provider, account_reference=args.account,
+        statuses=statuses, created_after=args.created_after, created_before=args.created_before,
+    )
+    print(json.dumps([_publication_fields(row) for row in rows], indent=2))
     return 0
 
 
@@ -1194,6 +1249,7 @@ def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
     )
 
     settings = ctx.settings
+    process_upload, process_status = _resolve_publisher_lanes(args)
     config = PublisherDaemonConfig(
         worker_id=args.worker_id or default_publisher_worker_id(),
         poll_interval_seconds=(
@@ -1203,6 +1259,7 @@ def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
         max_publications=args.max_publications if args.max_publications is not None else None,
         idle_exit_after_seconds=args.idle_exit_after,
         stop_on_error=args.stop_on_error,
+        process_upload=process_upload, process_status=process_status,
     )
     daemon = PublisherDaemon(
         ctx.session_factory, ctx.storage, ctx.bundle_for_publication, ctx.channel_niche_for_job, config,
@@ -1317,6 +1374,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds before a locked publication with no heartbeat is considered stale "
              "(default: settings.lease_timeout_seconds)",
     )
+    publisher_run_once.add_argument(
+        "--process-upload", action="store_true", help="Only lease upload-lane publications (omit both for both)",
+    )
+    publisher_run_once.add_argument(
+        "--process-status", action="store_true",
+        help="Only lease processing-poll-lane publications (omit both for both)",
+    )
     publisher_run_once.set_defaults(func=cmd_publisher_run_once)
 
     publisher_run = sub.add_parser("publisher-run", help="Continuous polling publisher worker daemon")
@@ -1330,6 +1394,13 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Exit normally after this many idle seconds")
     publisher_run.add_argument("--stop-on-error", action="store_true",
                                help="Exit (code 1) after the first publication that ends FAILED")
+    publisher_run.add_argument(
+        "--process-upload", action="store_true", help="Only lease upload-lane publications (omit both for both)",
+    )
+    publisher_run.add_argument(
+        "--process-status", action="store_true",
+        help="Only lease processing-poll-lane publications (omit both for both)",
+    )
     publisher_run.set_defaults(func=cmd_publisher_run)
 
     publication_status = sub.add_parser(
@@ -1337,6 +1408,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publication_status.add_argument("publication_id")
     publication_status.set_defaults(func=cmd_publication_status)
+
+    publication_list = sub.add_parser("publication-list", help="Read-only, filtered listing of publications")
+    publication_list.add_argument("--provider", default=None)
+    publication_list.add_argument("--account", default=None)
+    publication_list.add_argument("--status", default=None)
+    publication_list.add_argument("--job-id", dest="job_id", default=None)
+    publication_list.add_argument(
+        "--created-after", dest="created_after", type=_parse_iso_datetime, default=None,
+    )
+    publication_list.add_argument(
+        "--created-before", dest="created_before", type=_parse_iso_datetime, default=None,
+    )
+    publication_list.add_argument("--failed-only", action="store_true")
+    publication_list.add_argument("--processing-only", action="store_true")
+    publication_list.set_defaults(func=cmd_publication_list)
 
     publication_refresh = sub.add_parser(
         "publication-refresh", help="Re-poll one PROCESSING publication's status out of turn",

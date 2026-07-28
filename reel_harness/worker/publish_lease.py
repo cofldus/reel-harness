@@ -17,34 +17,19 @@ from reel_harness.db.models import Publication, new_uuid
 # reasoning for the render pipeline.
 PUBLICATION_RETRY_POLICY: tuple[int, list[int]] = (5, [30, 60, 120, 300, 600])
 
-# Statuses a publisher worker may lease: idle-and-ready plus any status left
-# behind by a crashed worker that stale recovery has since unlocked.
+# Statuses the UPLOAD lane may lease: idle-and-ready plus any status left
+# behind by a crashed worker that stale recovery has since unlocked. Never
+# PROCESSING -- that lane is lease_next_processing_publication's alone (see
+# --process-upload/--process-status in worker.publish_daemon), so the two
+# lanes can never contend for the same row.
 _LEASABLE_STATUSES = frozenset({
     PublicationStatus.READY_TO_UPLOAD, PublicationStatus.UPLOAD_SESSION_CREATED, PublicationStatus.UPLOADING,
 })
 
 
-def lease_next_publication(session, worker_id: str, now: datetime | None = None) -> Publication | None:
-    """Atomically claims one leasable Publication (see _LEASABLE_STATUSES) or
-    one RETRY_WAIT publication whose backoff has elapsed. Mirrors
-    worker.lease.lease_next_job's fencing discipline exactly: every
-    successful claim mints a fresh lease_token that later writes are guarded
-    on."""
-    now = now or datetime.now(UTC)
-    leasable_values = [s.value for s in _LEASABLE_STATUSES]
-    candidate_id = session.execute(
-        select(Publication.id)
-        .where(
-            Publication.status.in_(leasable_values)
-            | ((Publication.status == PublicationStatus.RETRY_WAIT.value) & (Publication.next_retry_at <= now)),
-        )
-        .where(Publication.locked_by.is_(None))
-        .order_by(Publication.created_at)
-        .limit(1),
-    ).scalar_one_or_none()
+def _claim(session, candidate_id: str | None, worker_id: str, now: datetime) -> Publication | None:
     if candidate_id is None:
         return None
-
     result = session.execute(
         update(Publication)
         .where(Publication.id == candidate_id, Publication.locked_by.is_(None))
@@ -54,6 +39,86 @@ def lease_next_publication(session, worker_id: str, now: datetime | None = None)
     if result.rowcount == 0:
         return None
     return session.get(Publication, candidate_id)
+
+
+def lease_next_publication(session, worker_id: str, now: datetime | None = None) -> Publication | None:
+    """Atomically claims one leasable Publication (see _LEASABLE_STATUSES) or
+    one RETRY_WAIT publication whose backoff has elapsed AND whose resume
+    target is NOT PROCESSING (that belongs to
+    lease_next_processing_publication). Mirrors worker.lease.lease_next_job's
+    fencing discipline exactly: every successful claim mints a fresh
+    lease_token that later writes are guarded on."""
+    now = now or datetime.now(UTC)
+    leasable_values = [s.value for s in _LEASABLE_STATUSES]
+    candidate_id = session.execute(
+        select(Publication.id)
+        .where(
+            Publication.status.in_(leasable_values)
+            | (
+                (Publication.status == PublicationStatus.RETRY_WAIT.value)
+                & (Publication.next_retry_at <= now)
+                & (Publication.retry_target_status != PublicationStatus.PROCESSING.value)
+            ),
+        )
+        .where(Publication.locked_by.is_(None))
+        .order_by(Publication.created_at)
+        .limit(1),
+    ).scalar_one_or_none()
+    return _claim(session, candidate_id, worker_id, now)
+
+
+def lease_next_processing_publication(session, worker_id: str, now: datetime | None = None) -> Publication | None:
+    """The PROCESSING-lane counterpart of lease_next_publication: claims one
+    unlocked PROCESSING publication whose next_poll_at has elapsed (or was
+    never set -- immediately due, e.g. right after upload completion), or a
+    RETRY_WAIT publication whose resume target IS PROCESSING. Never touches
+    an upload-lane status, so --process-upload and --process-status workers
+    (or a single daemon doing both, alternating fairly) never contend for
+    the same row."""
+    now = now or datetime.now(UTC)
+    candidate_id = session.execute(
+        select(Publication.id)
+        .where(
+            (
+                (Publication.status == PublicationStatus.PROCESSING.value)
+                & (Publication.next_poll_at.is_(None) | (Publication.next_poll_at <= now))
+            )
+            | (
+                (Publication.status == PublicationStatus.RETRY_WAIT.value)
+                & (Publication.next_retry_at <= now)
+                & (Publication.retry_target_status == PublicationStatus.PROCESSING.value)
+            ),
+        )
+        .where(Publication.locked_by.is_(None))
+        .order_by(Publication.created_at)
+        .limit(1),
+    ).scalar_one_or_none()
+    return _claim(session, candidate_id, worker_id, now)
+
+
+def lease_next_via_lanes(
+    session, worker_id: str, *, process_upload: bool = True, process_status: bool = True,
+    prefer_status: bool = False, now: datetime | None = None,
+) -> Publication | None:
+    """Shared lane-selection logic for `publisher-run`/`publisher-run-once`
+    and worker.publish_daemon.PublisherDaemon: tries whichever lane(s) are
+    enabled, trying the status lane first when `prefer_status` is set (used
+    to alternate fairly across cycles so a deep backlog in one lane can
+    never starve the other). At least one of process_upload/process_status
+    must be True."""
+    now = now or datetime.now(UTC)
+    lanes = []
+    if process_upload:
+        lanes.append(lambda: lease_next_publication(session, worker_id=worker_id, now=now))
+    if process_status:
+        lanes.append(lambda: lease_next_processing_publication(session, worker_id=worker_id, now=now))
+    if len(lanes) == 2 and prefer_status:
+        lanes.reverse()
+    for lane in lanes:
+        publication = lane()
+        if publication is not None:
+            return publication
+    return None
 
 
 def lease_specific_publication(session, publication_id: str, worker_id: str, now: datetime | None = None) -> bool:

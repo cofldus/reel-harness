@@ -110,6 +110,8 @@ def _run_publication_impl(
             else {}
         )
         apply_publication_transition(publication, target, **extra_fields)
+        if target == PublicationStatus.PROCESSING and publication.processing_started_at is None:
+            publication.processing_started_at = _now()
         session.commit()
 
     job = session.get(Job, publication.job_id)
@@ -136,6 +138,7 @@ def _run_publication_impl(
         if not assert_publication_lease(session, publication.id, lease_token):
             raise PublicationLeaseLostSignal
         apply_publication_transition(publication, PublicationStatus.PROCESSING)
+        publication.processing_started_at = _now()
         _audit(session, publication.id, "processing_started")
         session.commit()
 
@@ -312,12 +315,37 @@ def _upload_stage(
             session.commit()  # persist progress after every chunk -- a crash resumes near where it left off
 
 
+def _processing_poll_config(publication: Publication) -> tuple[float, float]:
+    config = publication.publisher_config or {}
+    interval = config.get("processing_poll_interval_seconds", 30.0)
+    max_duration = config.get("processing_max_duration_seconds", 3600.0)
+    return float(interval), float(max_duration)
+
+
 def _processing_stage(session, publication: Publication, bundle: PublishBundle, lease_token: str | None) -> None:
     assert publication.provider_video_id is not None  # guaranteed by UPLOAD_COMPLETED's precondition
+    poll_interval, max_duration = _processing_poll_config(publication)
+
+    if publication.processing_started_at is not None:
+        elapsed = (_now() - publication.processing_started_at).total_seconds()
+        if elapsed > max_duration:
+            # A local timeout, never a provider-reported failure -- no
+            # request is made. The video may still finish processing on
+            # YouTube's side; publication-reconcile can confirm that later.
+            apply_publication_transition(
+                publication, PublicationStatus.FAILED,
+                failure_code="PROCESSING_TIMEOUT",
+                failure_summary=f"processing exceeded the local max duration ({max_duration:.0f}s)",
+            )
+            _audit(session, publication.id, "publication_failed", {"reason": "PROCESSING_TIMEOUT"})
+            session.commit()
+            return
+
     status = bundle.publisher.get_processing_status(publication.provider_video_id)
 
     if not assert_publication_lease(session, publication.id, lease_token):
         raise PublicationLeaseLostSignal
+    publication.processing_poll_count += 1
 
     if status.processing_status == "succeeded":
         bundle.journal.append(
@@ -328,16 +356,21 @@ def _processing_stage(session, publication: Publication, bundle: PublishBundle, 
         )
         publication.publication_url = status.publication_url or publication.publication_url
         publication.processing_completed_at = _now()
+        publication.next_poll_at = None
         apply_publication_transition(publication, PublicationStatus.PUBLISHED, published_at=_now())
         _audit(session, publication.id, "processing_completed", {"outcome": "succeeded"})
     elif status.processing_status in ("failed", "terminated"):
+        publication.next_poll_at = None
         apply_publication_transition(
             publication, PublicationStatus.FAILED,
             failure_code="PROCESSING_FAILED",
             failure_summary=_persisted_error_text(status.failure_reason or status.processing_status, 500),
         )
         _audit(session, publication.id, "publication_failed", {"reason": status.failure_reason})
-    # else "processing": leave as-is; a later publication-refresh re-polls.
+    else:
+        # Still processing -- don't poll again until the interval elapses,
+        # so a busy processing poller doesn't hammer the provider.
+        publication.next_poll_at = _now() + timedelta(seconds=poll_interval)
     session.commit()
 
 

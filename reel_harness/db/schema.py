@@ -11,7 +11,7 @@ from reel_harness.db.models import Base
 # existing dev databases keep working without data loss. Only nullable column
 # additions are allowed through this path -- anything destructive or shaped
 # differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # (table, column, sqlite type) added after the table first shipped.
 _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
@@ -45,6 +45,11 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # metadata actually sent, so a recovered/retried publication can be
     # confirmed to still match the originally intended upload.
     ("publications", "metadata_fingerprint", "VARCHAR"),
+    # v7: Phase 3B processing poller -- see worker.publish_lease and
+    # worker.publish_runner._processing_stage.
+    ("publications", "processing_started_at", "DATETIME"),
+    ("publications", "next_poll_at", "DATETIME"),
+    ("publications", "processing_poll_count", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
