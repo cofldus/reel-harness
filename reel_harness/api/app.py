@@ -9,6 +9,11 @@ from sqlalchemy import text
 
 from reel_harness.bootstrap import AppContext
 from reel_harness.config import ProviderConfigurationError, validate_provider_settings
+from reel_harness.core.publish_service import (
+    PublicationInvalidActionError,
+    PublicationNotEligibleError,
+    PublicationNotFoundError,
+)
 from reel_harness.core.service import InvalidActionError, JobNotFoundError, asset_safe_metadata
 from reel_harness.db.schema import SCHEMA_VERSION
 from reel_harness.media.deps import check_ffmpeg_available
@@ -168,3 +173,102 @@ def approve_job(job_id: str, ctx: AppContext = Depends(get_context)) -> JobRespo
     except InvalidActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_response(job)
+
+
+class CreatePublicationRequest(BaseModel):
+    provider: str
+    account_reference: str
+    privacy_status: str = "private"
+    confirm_public_upload: bool = False
+    dry_run: bool = False
+
+
+class PublicationResponse(BaseModel):
+    publication_id: str | None = None
+    job_id: str
+    provider: str
+    status: str
+    privacy_status: str
+    provider_video_id: str | None = None
+    publication_url: str | None = None
+    bytes_uploaded: int = 0
+    total_bytes: int | None = None
+    failure_code: str | None = None
+    failure_summary: str | None = None
+    dry_run: bool = False
+    eligible: bool | None = None
+    eligibility_reasons: list[str] = []
+
+
+def _to_publication_response(pub, dry_run: bool = False, eligibility=None) -> PublicationResponse:
+    return PublicationResponse(
+        publication_id=pub.id if pub is not None else None,
+        job_id=pub.job_id if pub is not None else "",
+        provider=pub.provider if pub is not None else "",
+        status=pub.status if pub is not None else "",
+        privacy_status=pub.privacy_status if pub is not None else "private",
+        provider_video_id=pub.provider_video_id if pub is not None else None,
+        publication_url=pub.publication_url if pub is not None else None,
+        bytes_uploaded=pub.bytes_uploaded if pub is not None else 0,
+        total_bytes=pub.total_bytes if pub is not None else None,
+        failure_code=pub.failure_code if pub is not None else None,
+        failure_summary=pub.failure_summary if pub is not None else None,
+        dry_run=dry_run,
+        eligible=eligibility.eligible if eligibility is not None else None,
+        eligibility_reasons=eligibility.reasons if eligibility is not None else [],
+    )
+
+
+@app.post(
+    "/v1/jobs/{job_id}/publications", status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_api_key)],
+)
+def create_publication(
+    job_id: str, request: CreatePublicationRequest, ctx: AppContext = Depends(get_context),
+) -> PublicationResponse:
+    """Never blocks on the upload itself -- this only creates the Publication
+    row (or, for dry_run, only re-checks eligibility) and returns
+    immediately; a publisher worker performs the actual upload
+    asynchronously (see worker.publish_runner). Never exposes a provider
+    secret, an upload session URL, or a local filesystem path."""
+    if request.dry_run:
+        try:
+            eligibility = ctx.publications.check_eligibility(job_id)
+        except PublicationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+        return _to_publication_response(None, dry_run=True, eligibility=eligibility)
+    try:
+        pub, eligibility = ctx.publications.create_publication(
+            job_id, provider=request.provider, account_reference=request.account_reference,
+            privacy_status=request.privacy_status, confirm_public_upload=request.confirm_public_upload,
+            public_upload_enabled=ctx.settings.allow_public_upload,
+        )
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except PublicationNotEligibleError as exc:
+        raise HTTPException(
+            status_code=409, detail={"eligible": False, "reasons": exc.reasons},
+        ) from exc
+    except PublicationInvalidActionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _to_publication_response(pub, eligibility=eligibility)
+
+
+@app.get("/v1/publications/{publication_id}", dependencies=[Depends(require_api_key)])
+def get_publication(publication_id: str, ctx: AppContext = Depends(get_context)) -> PublicationResponse:
+    try:
+        pub = ctx.publications.get_publication(publication_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}") from exc
+    return _to_publication_response(pub)
+
+
+@app.post("/v1/publications/{publication_id}/cancel", dependencies=[Depends(require_api_key)])
+def cancel_publication(publication_id: str, ctx: AppContext = Depends(get_context)) -> PublicationResponse:
+    try:
+        pub = ctx.publications.cancel_publication(publication_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}") from exc
+    except PublicationInvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _to_publication_response(pub)

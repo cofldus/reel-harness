@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from reel_harness.config import Settings, load_settings, validate_provider_settings
+from reel_harness.core.publish_service import PublicationService
 from reel_harness.core.service import JobService
 from reel_harness.db.schema import create_engine_from_url, init_db, make_session_factory
 from reel_harness.observability import configure_logging, register_secret
@@ -33,6 +34,7 @@ class AppContext:
             self.session_factory, storage=self.storage,
             provider_snapshot=provider_snapshot(self.settings),
         )
+        self.publications = PublicationService(self.session_factory, self.storage)
 
     def providers_for_job(self, job) -> ProviderBundle:
         """Providers for one leased job, honoring the provider snapshot the job

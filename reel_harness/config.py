@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     asset_safe_search: bool = Field(
         True, validation_alias=_llm_alias("REEL_HARNESS_ASSET_SAFE_SEARCH", "ASSET_SAFE_SEARCH"))
 
+    # Publisher (Phase 3A) global safety switch: `public` privacy uploads are
+    # refused (core.publish_service.PublicationService.create_publication)
+    # unless this AND the caller's own explicit --confirm-public-upload are
+    # both true. `private` is always available with no extra confirmation.
+    allow_public_upload: bool = Field(
+        False, validation_alias=_llm_alias("REEL_HARNESS_ALLOW_PUBLIC_UPLOAD", "ALLOW_PUBLIC_UPLOAD"))
+
 
 def _validate_llm_settings(settings: Settings) -> None:
     name = normalize_provider_name(settings.llm_provider)
