@@ -10,6 +10,28 @@ class SecretStoreError(Exception):
     pass
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """True for a symlink OR a Windows junction/mount-point reparse point.
+    Both redirect a path to somewhere else, but `Path.is_symlink()` alone
+    does NOT detect a junction -- and unlike a symlink, a junction can be
+    created on Windows without Developer Mode or administrator privileges,
+    so checking only for symlinks leaves a real bypass on exactly the
+    platform this project runs on most. `st_file_attributes`/
+    `st_reparse_tag` are Windows-only `os.stat_result` fields (absent on
+    POSIX, where symlinks are the only redirection mechanism this needs to
+    catch)."""
+    if path.is_symlink():
+        return True
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def resolve_secret_dir(configured: Path | None, repo_root: Path) -> Path:
     """Resolves the secret directory, refusing any path inside the
     repository -- the whole point of keeping OAuth credentials and upload
@@ -47,6 +69,10 @@ class FileSecretStore:
     def __init__(self, root_dir: Path | None = None, repo_root: Path | None = None) -> None:
         self._root = resolve_secret_dir(root_dir, repo_root or Path.cwd())
         self._root.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_point(self._root):
+            raise SecretStoreError(
+                f"refusing to use {self._root} as the secret root -- it is a symlink or junction/reparse point"
+            )
         self._chmod_private(self._root)
 
     @property
@@ -65,10 +91,12 @@ class FileSecretStore:
             raise SecretStoreError(f"invalid secret key: {key!r}")
         ns_dir = self._root / namespace
         ns_dir.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_point(ns_dir):
+            raise SecretStoreError(f"refusing to use {ns_dir} -- it is a symlink or junction/reparse point")
         self._chmod_private(ns_dir)
         path = ns_dir / f"{key}.json"
-        if path.is_symlink():
-            raise SecretStoreError(f"refusing to follow a symlink at {path}")
+        if _is_reparse_point(path):
+            raise SecretStoreError(f"refusing to follow a symlink or junction/reparse point at {path}")
         return path
 
     def get(self, namespace: str, key: str) -> dict | None:
@@ -104,9 +132,9 @@ class FileSecretStore:
         if not namespace or any(c in namespace for c in ("/", "\\", "..")):
             raise SecretStoreError(f"invalid secret namespace: {namespace!r}")
         ns_dir = self._root / namespace
-        if not ns_dir.is_dir():
+        if not ns_dir.is_dir() or _is_reparse_point(ns_dir):
             return []
         return sorted(
             p.stem for p in ns_dir.glob("*.json")
-            if p.is_file() and not p.is_symlink()
+            if p.is_file() and not _is_reparse_point(p)
         )

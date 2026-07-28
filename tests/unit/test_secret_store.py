@@ -2,6 +2,8 @@
 enforcement, symlink rejection, and get/set/delete roundtrip. No network."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from reel_harness.publisher.secret_store import FileSecretStore, SecretStoreError, resolve_secret_dir
@@ -61,6 +63,13 @@ def test_path_traversal_in_key_is_rejected(tmp_path) -> None:
 
 
 def test_symlinked_secret_file_is_refused(tmp_path) -> None:
+    """Skips only if this specific environment genuinely cannot create a
+    symlink (unprivileged Windows without Developer Mode/admin -- the
+    common case on this project's Windows dev machines). On Linux CI
+    (unprivileged GitHub Actions runners can create symlinks freely) this
+    assertion actually runs and is the real verification of the
+    symlink-rejection security property -- see .github/workflows/ci.yml's
+    ubuntu-latest matrix legs and docs/STATUS.md."""
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     real_target = tmp_path / "outside-target.json"
     real_target.write_text('{"leaked": true}', encoding="utf-8")
@@ -73,6 +82,40 @@ def test_symlinked_secret_file_is_refused(tmp_path) -> None:
         pytest.skip("symlink creation not permitted in this environment")
 
     with pytest.raises(SecretStoreError, match="symlink"):
+        store.get("ns", "linked")
+
+
+def test_ntfs_junction_directory_is_refused(tmp_path) -> None:
+    """Windows NTFS junctions are a distinct reparse-point mechanism from
+    symlinks and -- unlike symlinks -- can be created WITHOUT Developer
+    Mode or administrator privileges, making them a realistic bypass of a
+    symlink-only check on exactly the platform this project runs on most.
+    `Path.is_symlink()` alone does NOT detect a junction (verified while
+    building this test); this asserts the store's own reparse-point check
+    (see publisher.secret_store._is_reparse_point) actually catches it.
+    Skips on non-Windows, where junctions don't exist."""
+    if os.name != "nt":
+        pytest.skip("NTFS junctions are Windows-specific")
+
+    import subprocess
+
+    outside = tmp_path / "outside-namespace"
+    outside.mkdir()
+    (outside / "linked.json").write_text('{"leaked": true}', encoding="utf-8")
+
+    secrets_root = tmp_path / "secrets"
+    secrets_root.mkdir()
+    ns_dir = secrets_root / "ns"
+
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(ns_dir), str(outside)],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"could not create an NTFS junction in this environment: {result.stderr}")
+
+    store = FileSecretStore(secrets_root, repo_root=tmp_path / "repo")
+    with pytest.raises(SecretStoreError, match="junction|reparse"):
         store.get("ns", "linked")
 
 
