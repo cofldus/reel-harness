@@ -9,6 +9,8 @@ dependencies = [
     "sqlalchemy>=2.0",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    # HTTP client for the real (OpenAI-compatible) LLM/TTS provider adapters.
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -17,7 +19,6 @@ reel-harness = "reel_harness.cli.main:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
     "ruff>=0.6",
     "mypy>=1.10",
 ]
