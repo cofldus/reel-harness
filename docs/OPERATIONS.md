@@ -1,10 +1,25 @@
-# Reel Harness — Operations (Phase 3A)
+# Reel Harness — Operations (Phase 3B)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
-LLM/TTS/asset provider configuration, YouTube publishing, smoke checks, and
-troubleshooting. Design rationale lives in `docs/ARCHITECTURE.md`; publisher-
-specific API research lives in `docs/PUBLISHING.md`; current completion state
-in `docs/STATUS.md`.
+LLM/TTS/asset provider configuration, YouTube publishing (including
+production-reliability features -- diagnostics, crash recovery, retry), smoke
+checks, and troubleshooting. Design rationale lives in `docs/ARCHITECTURE.md`;
+publisher-specific API research lives in `docs/PUBLISHING.md`; current
+completion state in `docs/STATUS.md`.
+
+## CI and packaging
+
+`.github/workflows/ci.yml` runs on every push/PR: a Windows + Ubuntu ×
+Python 3.11/3.12 matrix (lockfile check, import check, mypy, ruff, the full
+pytest suite, a secret/token grep, a tracked-artifact check), a dedicated
+Ubuntu `production-smoke` job (real ffmpeg, 1080x1920), and a
+`package-smoke` job that builds the wheel/sdist and installs the wheel into
+a brand-new venv to confirm the CLI entry point, imports, and a real
+fake-provider job all work from the **installed package**, not the source
+tree. No real provider credentials are configured anywhere in CI; the fake-
+provider E2E and the httpx.MockTransport-based YouTube contract E2E cover
+what runs there, and live provider smoke checks are never invoked. Build
+locally with `uv build`.
 
 ## Worker daemon
 
@@ -254,6 +269,8 @@ REEL_HARNESS_CREDENTIAL_DIR=...             # a directory OUTSIDE this repositor
 REEL_HARNESS_YOUTUBE_UPLOAD_CHUNK_SIZE=2097152   # must be a positive multiple of 262144 (256 KiB)
 REEL_HARNESS_YOUTUBE_CATEGORY_ID=22         # default: 22 ("People & Blogs")
 REEL_HARNESS_YOUTUBE_MADE_FOR_KIDS=false    # sent explicitly on every upload, never omitted
+REEL_HARNESS_PUBLISHER_PROCESSING_POLL_INTERVAL=30      # seconds between processing-status polls
+REEL_HARNESS_PUBLISHER_PROCESSING_MAX_DURATION=3600     # local timeout; never a provider-reported failure
 ```
 
 `REEL_HARNESS_CREDENTIAL_DIR` must resolve outside the repository — a
@@ -277,6 +294,44 @@ channel's id/title and whether a refresh token was issued — never the token
 itself. `--account` lets more than one channel be connected
 (`default` if omitted); every publish/smoke/refresh command below accepts
 the same flag.
+
+### 2.5. Check readiness in one command
+
+```
+uv run reel-harness publisher-doctor youtube [--account ALIAS] [--check-remote] [--json]
+```
+
+A single local-first report covering DB/schema access, storage, the
+publisher registry, upload chunk size, whether an OAuth client is
+configured, the credential backend (repo-internal paths are rejected the
+same way `REEL_HARNESS_CREDENTIAL_DIR` is), the named account's saved
+credential (present? refresh token present? expired? marked invalid after
+a failed refresh?), ffmpeg/ffprobe, and the publication worker config. Each
+check reports `PASS`/`WARN`/`FAIL`/`NOT_CONFIGURED`; the overall verdict is
+the worst of them. **No network by default.** `--check-remote` additionally
+attempts a real token refresh and a read-only channel-identity fetch; both
+print `NOT RUN — credentials not configured` and make no request if the
+OAuth client or account credential isn't set up. Exit codes mirror
+`provider-smoke`: 0 (`PASS`/`WARN`), 1 (`FAIL`), 2 (`NOT_CONFIGURED`). Never
+prints a secret or token.
+
+### 2.6. Manage connected accounts
+
+```
+uv run reel-harness publisher-account-list [--provider youtube]
+uv run reel-harness publisher-account-show <alias> [--provider youtube]
+uv run reel-harness publisher-account-remove <alias> --confirm [--provider youtube]
+```
+
+`-list`/`-show` report only safe metadata (channel id/title, whether a
+refresh token is present, `created_at`/`last_refreshed_at`, whether the
+credential is marked `invalid` and why) — never a token.
+`-account-remove --confirm` deletes only the **local** saved credential;
+it does **not** revoke authorization at Google (that would invalidate
+every token issued to this OAuth client, for every account — a much larger
+action than removing one local alias, and is not implemented by this
+command). To fully disconnect, also revoke access at
+https://myaccount.google.com/permissions.
 
 ### 3. Check readiness without uploading anything
 
@@ -310,26 +365,48 @@ publication instead of creating a duplicate upload target. `--privacy` is
 
 ```
 uv run reel-harness publisher-run-once [--worker-id ID] [--lease-timeout SEC]
+    [--process-upload] [--process-status]
 uv run reel-harness publisher-run [--worker-id ID] [--poll-interval SEC]
     [--lease-timeout SEC] [--max-publications N] [--idle-exit-after SEC] [--stop-on-error]
+    [--process-upload] [--process-status]
 ```
 
 A **separate** daemon from `worker-run` (render pipeline) — run both if you
 want jobs to render and publish automatically. Same lease-fencing discipline
 as the render worker, on its own `locked_by`/`heartbeat_at`/`lease_token`
 columns (`Publication`, not `Job`), so the two workers never contend over
-the same lease. Drives a leased publication through session creation →
-chunked resumable upload (resuming from the provider's own confirmed offset
-after any interruption, never guessing) → one processing-status poll. A
-transient upstream error backs off to `RETRY_WAIT`; an auth failure lands in
-`AUTH_REQUIRED` and a quota error in `QUOTA_BLOCKED` (both need a manual fix
-before they'll retry — retrying immediately cannot resolve either).
+the same lease.
 
-### 6. Track processing to completion
+**Two lanes, one daemon by default.** `--process-upload` handles session
+creation through chunked resumable upload (resuming from the provider's own
+confirmed offset after any interruption, never guessing).
+`--process-status` handles the processing-status poller (see below).
+Omitting both flags means both (the historical, still-default behavior);
+passing exactly one restricts this process to that lane, so uploads and
+processing polls can run on separate daemon processes if you want to scale
+or restart them independently. When one process runs both lanes, it
+alternates which lane it tries first each poll cycle so a deep backlog in
+one can never starve the other. A transient upstream error backs off to
+`RETRY_WAIT`; an auth failure lands in `AUTH_REQUIRED` and a quota error in
+`QUOTA_BLOCKED` (all three are reachable from PROCESSING too, not just
+UPLOADING — a hiccup polling processing status gets the same soft-retry
+treatment as one uploading a chunk).
+
+### 6. Processing completion is polled automatically
 
 Uploading a video is not the same as it being published — YouTube processes
-it afterward. `publisher-run`'s single poll per lease only checks once, so
-poll again explicitly:
+it afterward. The processing lane (`--process-status`, on by default) polls
+each `PROCESSING` publication on its own pace: `next_poll_at` spaces
+consecutive polls out (default 30s, `REEL_HARNESS_PUBLISHER_PROCESSING_POLL_INTERVAL`)
+so it never hammers the provider, and a local max-duration timeout (default
+3600s, `REEL_HARNESS_PUBLISHER_PROCESSING_MAX_DURATION`) fails the
+publication with `PROCESSING_TIMEOUT` **without ever calling the provider**
+once exceeded — the video may still finish on YouTube's side;
+`publication-reconcile` (below) can confirm that later. Both are pinned onto
+each publication at creation, like the chunk size, so they never change
+mid-flight from an operator editing config.
+
+To poke one publication out of turn instead of waiting for the poller:
 
 ```
 uv run reel-harness publication-status <publication_id>      # read-only, no external request
@@ -342,6 +419,67 @@ reports `processingStatus=succeeded`, or to `FAILED` on `failed`/
 `terminated`. The equivalent API endpoints are `POST /v1/jobs/{job_id}/publications`,
 `GET /v1/publications/{id}`, `POST /v1/publications/{id}/refresh`, and
 `POST /v1/publications/{id}/cancel`.
+
+### 6.5. List and filter publications
+
+```
+uv run reel-harness publication-list [--provider X] [--account X] [--status X]
+    [--job-id X] [--created-after ISO] [--created-before ISO]
+    [--failed-only] [--processing-only]
+```
+
+Read-only, never contacts the provider. `--failed-only` matches
+`FAILED`/`AUTH_REQUIRED`/`QUOTA_BLOCKED` together (`--status` overrides it
+if both are given). Safe fields only (id, job id, provider, account,
+status, privacy, provider video id, publication URL, byte counts,
+failure code/summary, timestamps) — never a token, the upload session
+reference, a local credential path, or a raw provider response.
+
+### 6.6. Recover a publication after a crash
+
+A real upload can succeed at the provider in the same instant a worker
+process dies, before the DB transaction recording that fact ever commits.
+A durable, fsync'd journal (`publisher.journal`, written the instant a
+chunk-upload response reports completion — before any DB write) is what
+makes recovery possible without ever risking a duplicate upload:
+
+```
+uv run reel-harness publication-reconcile <publication_id>
+uv run reel-harness publication-reconcile --all   # every non-terminal publication
+```
+
+Read-only except for the one case it can positively confirm and repair.
+Possible outcomes: `already_consistent`, `recovered_remote_video` (the
+journal had a provider_video_id, confirmed via a real read-only
+processing-status call, and the DB row is repaired), `upload_incomplete`,
+`upload_session_expired`, `remote_video_missing` (a *previously confirmed*
+video id no longer resolves), `credentials_unavailable`,
+`manual_review_required`, or `ambiguous_remote_state` (the provider reports
+the upload as complete but nothing local can explain it — this is the one
+case reconciliation deliberately refuses to guess; a human should check the
+channel's own uploads before retrying). It never starts a new upload
+itself. API equivalent: `POST /v1/publications/{id}/reconcile`.
+
+### 6.7. Manually retry a stuck publication
+
+```
+uv run reel-harness publication-retry <publication_id> [--from-stage SESSION|UPLOAD|PROCESSING]
+```
+
+Valid only from `FAILED`/`AUTH_REQUIRED`/`QUOTA_BLOCKED`/`RETRY_WAIT` — an
+active-looking status (still `UPLOADING`/`PROCESSING`/etc.) is refused with
+a pointer to `publication-reconcile` first, never blindly retried.
+Re-verifies job eligibility and (once a metadata fingerprint is on record)
+that it still matches before allowing the retry; either mismatch refuses
+and suggests creating a new publication instead. Without `--from-stage`,
+resumes at the least-wasteful safe point automatically (processing-only if
+a video id is already known, upload-resume if a session was created, else
+from scratch). `AUTH_REQUIRED`/`QUOTA_BLOCKED` retry immediately on the
+operator's say-so — retrying cannot itself verify the credential or quota
+is actually fixed, so if it isn't, the very next attempt just lands back in
+the same status rather than ever risking a duplicate upload. API
+equivalent: `POST /v1/publications/{id}/retry` (409 with structured
+`reasons` on refusal).
 
 ### 7. Public-upload safeguard
 
@@ -381,19 +519,21 @@ purely local bookkeeping — it never deletes anything already on YouTube).
 next chunk boundary (an in-flight chunk write is never yanked mid-request).
 `PUBLISHED`/`CANCELLED` are terminal and refuse.
 
-### Remote video delete — not implemented in Phase 3A
+### Remote video delete — still not implemented in Phase 3B
 
 There is no `publication-delete`/`--delete-remote` command. Cancelling a
 publication at any status never deletes an already-uploaded or already-
 published YouTube video; removing a real video is left to YouTube Studio
-directly. This is a deliberate Phase 3A scope boundary, not an oversight —
-see `docs/PUBLISHING.md`.
+directly. This remains a deliberate scope boundary, not an oversight — see
+`docs/PUBLISHING.md`.
 
-### Out of scope for Phase 3A
+### Out of scope for Phase 3B
 
 TikTok/Instagram publishers, automatic public publishing, scheduled-publish
-automation, automatic remote delete, and an OAuth account-management UI —
-none of these exist yet.
+automation, automatic remote delete, thumbnail/subtitle upload, analytics
+collection, auto-commenting, an OAuth account-management UI, a web
+dashboard, PostgreSQL, a cloud secret manager, and a cloud queue — none of
+these exist yet.
 
 ## Cancelling a job
 
@@ -417,15 +557,18 @@ refused once a job is `CANCELLED`.
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
 
-## Not yet supported (Phase 3A scope ends here)
+## Not yet supported (Phase 3B scope ends here)
 
-YouTube publishing exists (see "Publishing (YouTube)" above); TikTok and
-Instagram publishers do not. Also not yet supported: automatic public
-publishing (public always requires the explicit double-confirmation +
-feature flag above), scheduled-publish automation, automatic remote video
-delete, an OAuth account-management UI, PostgreSQL, cloud storage/CDN, web
-UI, face-recognition smart crop, BGM mixing, subtitle burn-in, multi-language
-dubbing.
+YouTube publishing exists (see "Publishing (YouTube)" above), including
+production-reliability features: `publisher-doctor`, account management,
+durable crash-recovery reconciliation, manual retry, and a processing
+poller. TikTok and Instagram publishers do not. Also not yet supported:
+automatic public publishing (public always requires the explicit
+double-confirmation + feature flag above), scheduled-publish automation,
+automatic remote video delete, thumbnail/subtitle upload, analytics
+collection, an OAuth account-management UI, PostgreSQL, cloud storage/CDN,
+web UI, face-recognition smart crop, BGM mixing, subtitle burn-in,
+multi-language dubbing.
 
 ## Troubleshooting
 
@@ -445,7 +588,11 @@ dubbing.
 | `publish-job --dry-run` reports `eligible: false` | job/manifest/asset state doesn't pass `core.publish_eligibility` | check `eligibility_reasons` in the JSON output — each is a specific code (e.g. `APPROVAL_MISSING`, `FASTSTART_MISSING`, `ASSET_LICENSE_NOT_PUBLISHABLE`) |
 | `publish-job` / `provider-smoke publisher youtube` print `NOT RUN — credentials not configured` | OAuth client and/or a saved credential missing | set `REEL_HARNESS_YOUTUBE_CLIENT_ID`/`_CLIENT_SECRET`, then `publisher-auth youtube` |
 | `SecretStoreError: credential directory ... is inside the repository` | `REEL_HARNESS_CREDENTIAL_DIR` resolves under the repo checkout | point it outside the repository — credentials must never be `git add`-able |
-| publication stuck `AUTH_REQUIRED` | saved refresh token invalid/revoked | re-run `publisher-auth youtube --account ALIAS`, then let the worker retry |
-| publication stuck `QUOTA_BLOCKED` | provider quota exhausted | wait for the provider's quota reset, then let the worker retry |
-| publication stuck `PROCESSING` | uploaded but YouTube hasn't finished processing yet | `publication-refresh <id>` to re-poll; this never auto-advances on its own schedule |
+| `SecretStoreError: ... is a symlink or junction/reparse point` | something (accidentally or otherwise) replaced a namespace directory or credential file with a symlink/NTFS junction | investigate before removing it; this is a security check working as intended, not a bug |
+| publication stuck `AUTH_REQUIRED` | saved refresh token invalid/revoked (`publisher-doctor`/`publisher-account-show` will show `invalid: true`) | re-run `publisher-auth youtube --account ALIAS`, then `publication-retry <id>` |
+| publication stuck `QUOTA_BLOCKED` | provider quota exhausted | wait for the provider's quota reset, then `publication-retry <id>` |
+| publication stuck `PROCESSING` | the processing poller (`--process-status`, on by default) is pacing polls via `next_poll_at` | usually resolves on its own; `publication-refresh <id>` re-polls immediately if you don't want to wait |
+| publication `FAILED` with `PROCESSING_TIMEOUT` | processing exceeded the local max-duration timeout (`REEL_HARNESS_PUBLISHER_PROCESSING_MAX_DURATION`) without the provider ever reporting done | this is a LOCAL timeout, not a provider failure — the video may still finish on YouTube's side; check `publication-reconcile <id>` before assuming it's actually gone |
+| `publication-retry` refuses with "still active" | the publication is in an ACTIVE-looking status (`UPLOADING`/`PROCESSING`/etc.) | run `publication-reconcile <id>` first to confirm its real state, then retry if appropriate |
+| `publication-reconcile` reports `ambiguous_remote_state` | the provider says the upload session is complete but nothing local (durable journal, DB) can confirm which video that produced | check the channel's own recent uploads (YouTube Studio) manually before deciding whether to retry — reconciliation deliberately never guesses here |
 | `publish-job --privacy public` refused | missing one of the four required public-upload conditions | add `--confirm-public-upload`, ensure the job is approved, and set `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` |

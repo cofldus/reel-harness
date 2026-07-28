@@ -1,10 +1,119 @@
 # Status
 
-Last updated: 2026-07-28 (Phase 3A publisher-foundation-and-youtube-upload
-session, on branch `phase3/youtube-publisher`). Phase 2A through Phase 2D
-are merged into `main`.
+Last updated: 2026-07-28 (Phase 3B youtube-production-reliability session,
+on branch `phase3/youtube-production`). Phase 2A through Phase 3A are
+merged into `main`.
 
-## Phase 3A — publisher foundation and YouTube upload (this branch)
+## Phase 3B — YouTube production reliability (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
+`docs/PUBLISHING.md` for the design rationale and official-doc
+re-verification this is built from):
+
+- **`publisher-doctor youtube [--check-remote] [--json]`**: a single
+  local-first readiness report (DB/schema, storage, credential-store
+  reachability, per-account token/refresh/invalid state, ffmpeg/ffprobe,
+  worker config) with `PASS`/`WARN`/`FAIL`/`NOT_CONFIGURED` per check and
+  overall. `--check-remote` additionally attempts a real token refresh and
+  read-only channel-identity fetch; without credentials both print
+  `NOT RUN — credentials not configured`.
+- **Account operations**: `publisher-account-list/-show/-remove` (safe
+  metadata only; `-remove` deletes only the local credential, never a
+  remote Google revoke). `OAuthCredential` gains `created_at`/
+  `last_refreshed_at`/`last_refresh_error`/`invalid`, populated by the
+  token-refresh path -- a dead refresh token is now visible locally
+  without a network call instead of silently failing on the next upload.
+- **Durable crash-recovery reconciliation**: `publisher.journal.PublishJournal`
+  (append-only, `fsync`'d, integrity-checksummed) records the moment a
+  chunk-upload response reports completion -- *before* any DB mutation --
+  closing the real risk of a provider-side success whose DB commit is lost
+  to a crash. `core.publish_reconciliation.reconcile_publication` confirms
+  any journal-recovered video id via a real read-only call before ever
+  repairing the DB, and reports one of 8 outcomes; anything it cannot
+  positively confirm becomes `manual_review_required`/
+  `ambiguous_remote_state` rather than a guess. `publication-reconcile
+  <id>|--all` (CLI) and `POST /v1/publications/{id}/reconcile` (API) expose
+  it. A deterministic `metadata_fingerprint` (schema v6) confirms a
+  recovered/retried publication still matches the originally intended
+  upload without ever embedding an internal id in the visible title/
+  description.
+- **Manual retry**: `core.publish_retry.retry_publication` repositions a
+  stuck publication (`FAILED`/`AUTH_REQUIRED`/`QUOTA_BLOCKED`/`RETRY_WAIT`)
+  for the next worker cycle at the least-wasteful safe resume point,
+  re-verifying eligibility and the metadata fingerprint first; an
+  ACTIVE-looking status is refused with a pointer to reconcile first.
+  `publication-retry <id> [--from-stage ...]` (CLI) and
+  `POST /v1/publications/{id}/retry` (API, 409 + reasons on refusal).
+- **Processing poller**: `Publication.next_poll_at`/`processing_started_at`/
+  `processing_poll_count` (schema v7) let `_processing_stage` pace polls
+  and enforce a local max-duration timeout (`PROCESSING_TIMEOUT`, never a
+  provider-reported failure) instead of polling forever or hammering the
+  provider. Before this, `PROCESSING` publications only ever advanced via
+  a manual `publication-refresh` call -- there was no automatic poller.
+- **Upload/processing lease-lane separation**: `lease_next_processing_publication`
+  is `PROCESSING`'s own lease, entirely separate from the upload lane, so
+  `publisher-run`/`-run-once --process-upload`/`--process-status` (default:
+  both, alternating fairly each cycle) can never contend for the same row.
+- **Two real state-graph fixes**, both found while building the above:
+  `RETRY_WAIT` could not resolve to `PROCESSING` (a processing-only retry
+  would have failed validation), and `PROCESSING` could not transition to
+  `AUTH_REQUIRED`/`QUOTA_BLOCKED`/`RETRY_WAIT` at all -- any polling error,
+  even a dropped connection, previously went straight to `FAILED` with no
+  soft retry, unlike every other stage.
+- **`publication-list`**: read-only, filtered (`--provider`/`--account`/
+  `--status`/`--job-id`/`--created-after`/`--created-before`/
+  `--failed-only`/`--processing-only`), safe fields only.
+- **Crash-recovery contract E2E** (`tests/e2e/test_youtube_crash_recovery_e2e.py`):
+  four scenarios against the REAL `YouTubePublisher` adapter and a real
+  ffmpeg-built `final.mp4` -- provider-success-then-lost-DB-commit
+  (recovered, no duplicate), session expiry mid-upload (fresh session,
+  exactly one video), a lost completion response (correctly reported
+  `ambiguous_remote_state`, never guessed), and a processing-worker crash
+  (stale-lease recovery + a fresh worker reaching `PUBLISHED`). A fifth,
+  token-refresh-failure scenario is covered at the OAuth-contract level in
+  `tests/unit/test_publisher_registry.py`.
+- **A real security fix found while reviewing test-skip honesty**: NTFS
+  junctions (unlike symlinks) need no Developer Mode or admin privileges on
+  Windows and were not caught by `FileSecretStore`'s existing symlink-only
+  check (`Path.is_symlink()` does not detect a junction -- confirmed
+  empirically). Fixed by also checking `FILE_ATTRIBUTE_REPARSE_POINT` at
+  the namespace/file/root level; a new test creates a real junction (no
+  elevation needed) and passes for real on this Windows machine, unlike the
+  symlink test (which only verifies for real on Linux CI).
+- **CI** (`.github/workflows/ci.yml`): Windows + Ubuntu × Python 3.11/3.12
+  matrix (lockfile check, import check, mypy, ruff, full pytest, secret
+  grep, tracked-artifact check), a dedicated `production-smoke` job (real
+  ffmpeg), and a `package-smoke` job (build wheel/sdist, install into a
+  clean venv, run from the installed package). No real credentials are
+  configured anywhere in CI.
+- **Packaging verified manually this session** (hatchling already the
+  configured backend): `uv build` produces a wheel + sdist; installing the
+  wheel into a brand-new venv and running from there (confirmed via
+  `site-packages` in `__file__`, not the source tree) resolved all runtime
+  dependencies, imported every key module including the YouTube adapter,
+  initialized the schema (v7), and completed a full real fake-provider job
+  through `RENDER`/`VALIDATE` with real ffmpeg to `REVIEW_REQUIRED`.
+- **Live smoke**: `NOT RUN — credentials not configured` (no
+  `REEL_HARNESS_YOUTUBE_CLIENT_ID`/`_CLIENT_SECRET` set on this machine).
+  `publisher-doctor youtube --check-remote` and
+  `provider-smoke publisher youtube [--upload-private-test --confirm-test-upload]`
+  are the documented paths to run them once credentials exist.
+
+Explicitly out of scope this phase (see `docs/OPERATIONS.md`): TikTok/
+Instagram publishers, automatic public publishing, scheduled-publish
+automation, automatic remote video delete, thumbnail/subtitle upload,
+analytics collection, an OAuth account-management UI, web dashboard,
+PostgreSQL, cloud secret manager, cloud queue.
+
+Suite after Phase 3B: **532 passed, 0 failed, 1 skipped** (439 → 533
+collected, 94 new tests). The one skip is the same pre-existing,
+unrelated one from Phase 3A (`test_secret_store.py`'s symlink-rejection
+test, skipped only because this Windows machine doesn't permit symlink
+creation without elevated privileges -- its NTFS-junction counterpart,
+added this phase, passes for real here instead). mypy clean (65 source
+files). ruff clean (`reel_harness` + `tests`).
+
+## Phase 3A — publisher foundation and YouTube upload (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
 `docs/PUBLISHING.md` for the official API research this is built from):
