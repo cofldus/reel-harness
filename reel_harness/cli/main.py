@@ -751,10 +751,23 @@ def _smoke_asset(ctx: AppContext) -> int:
 
 
 def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
-    """Opt-in OAuth connect flow for a publisher account. Never runs without
-    a configured OAuth client (REEL_HARNESS_YOUTUBE_CLIENT_ID/_SECRET); never
-    prints an access token, refresh token, client secret, authorization
-    code, or PKCE verifier -- only the resulting account/channel identity."""
+    """Opt-in OAuth connect flow for a publisher account. Dispatches to the
+    provider-specific flow below; never prints an access token, refresh
+    token, client secret, authorization code, or PKCE verifier -- only the
+    resulting account identity."""
+    if args.provider == "youtube":
+        return _cmd_publisher_auth_youtube(args, ctx)
+    if args.provider == "tiktok":
+        return _cmd_publisher_auth_tiktok(args, ctx)
+    print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)  # pragma: no cover
+    return 2
+
+
+def _cmd_publisher_auth_youtube(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Never runs without a configured OAuth client
+    (REEL_HARNESS_YOUTUBE_CLIENT_ID/_SECRET); never prints an access token,
+    refresh token, client secret, authorization code, or PKCE verifier --
+    only the resulting account/channel identity."""
     from datetime import UTC, datetime, timedelta
 
     from reel_harness.config import ProviderConfigurationError, validate_youtube_credentials_configured
@@ -770,9 +783,6 @@ def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
         generate_state,
     )
 
-    if args.provider != "youtube":  # pragma: no cover - argparse already restricts choices
-        print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)
-        return 2
     try:
         validate_youtube_credentials_configured(ctx.settings)
     except ProviderConfigurationError as exc:
@@ -828,6 +838,135 @@ def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
         "account_reference": account,
         "channel_id": identity.channel_id,
         "channel_title": identity.title,
+        "has_refresh_token": tokens.refresh_token is not None,
+    }, indent=2))
+    return 0
+
+
+def _cmd_publisher_auth_tiktok(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Never runs without a configured OAuth client and a registered
+    redirect_uri (REEL_HARNESS_TIKTOK_CLIENT_KEY/_SECRET/_REDIRECT_URI);
+    never prints an access token, refresh token, client secret,
+    authorization code, or PKCE verifier -- only the resulting account
+    identity (open_id).
+
+    TikTok's docs require an HTTPS redirect_uri with no documented
+    Google-style "any loopback port" exception, so two flows are
+    supported depending on what the operator registered:
+
+    - `tiktok_redirect_uri` is `http://127.0.0.1:PORT`/`http://localhost:PORT`
+      (the operator's own choice, at their own risk): the callback is
+      captured automatically, same mechanism as YouTube's loopback flow,
+      but bound to that exact registered port (not an OS-assigned one --
+      TikTok redirects to exactly what was registered).
+    - Anything else (the documented case, an https:// URL the operator
+      controls): the CLI cannot safely stand up a listener there, so the
+      operator pastes back the full URL their browser was redirected to
+      after authorizing; `state` is validated against it exactly like the
+      automated flow, and the code is discarded after exactly one use."""
+    from datetime import UTC, datetime, timedelta
+    from urllib.parse import parse_qs, urlsplit
+
+    from reel_harness.config import ProviderConfigurationError, validate_tiktok_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.observability import redact
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_common import LoopbackCallbackServer, OAuthCallbackError
+    from reel_harness.publisher.oauth_tiktok import (
+        TikTokOAuthClient,
+        build_authorization_url,
+        generate_pkce,
+        generate_state,
+    )
+
+    try:
+        validate_tiktok_credentials_configured(ctx.settings)
+    except ProviderConfigurationError as exc:
+        print(f"provider configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    account = args.account or "default"
+    pkce = generate_pkce()
+    state = generate_state()
+    redirect_uri = ctx.settings.tiktok_redirect_uri
+    auth_url = build_authorization_url(
+        ctx.settings.tiktok_client_key, redirect_uri, state, pkce, ctx.settings.tiktok_auth_url,
+    )
+
+    parsed_redirect = urlsplit(redirect_uri)
+    use_loopback = parsed_redirect.scheme == "http" and parsed_redirect.hostname in ("127.0.0.1", "localhost")
+
+    print("Open this URL in a browser to authorize Reel Harness:", file=sys.stderr)
+    print(auth_url, file=sys.stderr)
+    try:
+        import webbrowser
+
+        webbrowser.open(auth_url)
+    except Exception:  # noqa: BLE001 - best-effort only; the printed URL above is the real fallback
+        pass
+
+    if use_loopback:
+        server = LoopbackCallbackServer(
+            expected_state=state, timeout_seconds=args.timeout, port=parsed_redirect.port or 80,
+        )
+        try:
+            code = server.wait_for_code()
+        except OAuthCallbackError as exc:
+            print(f"oauth callback failed: {exc}", file=sys.stderr)
+            return 3
+    else:
+        print(
+            "After authorizing, paste the full URL your browser was redirected to below "
+            "(never just the bare code -- the full URL lets this command verify `state`):",
+            file=sys.stderr,
+        )
+        pasted = input("Redirect URL: ").strip()
+        pasted_params = parse_qs(urlsplit(pasted).query)
+        if pasted_params.get("error"):
+            print(f"oauth callback failed: {pasted_params['error'][0]}", file=sys.stderr)
+            return 3
+        if pasted_params.get("state", [None])[0] != state:
+            print("oauth callback failed: state_mismatch", file=sys.stderr)
+            return 3
+        code_values = pasted_params.get("code")
+        if not code_values:
+            print("oauth callback failed: missing_code", file=sys.stderr)
+            return 3
+        code = code_values[0]
+
+    client = TikTokOAuthClient(
+        ctx.settings.tiktok_client_key, ctx.settings.tiktok_client_secret.get_secret_value(),
+        ctx.settings.tiktok_token_url,
+        connect_timeout=ctx.settings.tiktok_connect_timeout_seconds,
+        read_timeout=ctx.settings.tiktok_read_timeout_seconds,
+    )
+    try:
+        tokens = client.exchange_code(code, pkce.verifier, redirect_uri)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+    finally:
+        client.close()
+
+    now = datetime.now(UTC)
+    ctx.credential_backend().save_credential(OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token,
+        expires_at=now + timedelta(seconds=tokens.expires_in),
+        refresh_expires_at=(
+            now + timedelta(seconds=tokens.refresh_expires_in) if tokens.refresh_expires_in is not None else None
+        ),
+        scope=tokens.scope, provider="tiktok", account_reference=account,
+        channel_id=tokens.open_id or None, channel_title=None,
+        created_at=now, last_refreshed_at=now,
+    ))
+
+    print(json.dumps({
+        "provider": "tiktok",
+        "account_reference": account,
+        "open_id": tokens.open_id or None,
         "has_refresh_token": tokens.refresh_token is not None,
     }, indent=2))
     return 0
@@ -1506,7 +1645,7 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_auth = sub.add_parser(
         "publisher-auth", help="Connect a publisher account via OAuth (opt-in, requires a browser)",
     )
-    publisher_auth.add_argument("provider", choices=["youtube"])
+    publisher_auth.add_argument("provider", choices=["youtube", "tiktok"])
     publisher_auth.add_argument("--account", default=None, help="Account alias (default: 'default')")
     publisher_auth.add_argument(
         "--timeout", type=float, default=300.0, help="Seconds to wait for the OAuth callback",

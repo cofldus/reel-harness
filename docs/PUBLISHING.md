@@ -321,3 +321,165 @@ redirecting a credential namespace directory elsewhere. Fixed by also
 checking Windows' `FILE_ATTRIBUTE_REPARSE_POINT`
 (`publisher.secret_store._is_reparse_point`) at the namespace, file, and
 secret-root level.
+
+# Reel Harness — Publishing (Phase 3C: TikTok)
+
+## Official documentation consulted (checked 2026-07-29)
+
+All fetched directly from `developers.tiktok.com` (TikTok for Developers)
+on 2026-07-29. Blog posts, unofficial SDKs, and third-party integration
+guides were explicitly NOT used as a basis for anything implemented —
+several turned up in search results and were discarded in favor of the
+primary docs below. If TikTok's API changes after this date, re-check
+these pages before modifying `providers/tiktok_publisher.py`.
+
+- "Guide to Using the Content Posting API" (get-started overview)
+- "TikTok Content Posting API Overview" (Direct Post reference —
+  `/v2/post/publish/video/init/`)
+- "Content Posting API Video Upload Contract" (chunked `PUT` upload)
+- "Query Creator Info API Contract" (`/v2/post/publish/creator_info/query/`)
+- "Content Posting API Overview and Status Management" (`/v2/post/publish/status/fetch/`)
+- "TikTok Login Kit" (OAuth 2.0 authorization/token/revoke endpoints)
+- "Scopes Overview" (scope semantics)
+
+### Direct Post vs. Upload (media transfer)
+
+Two distinct modes exist. **Direct Post** (`/v2/post/publish/video/init/`)
+posts immediately to the creator's account. **Upload/media transfer**
+(`source=PULL_FROM_URL`) requires TikTok to pull the video from a URL on
+the caller's own verified domain — this project has no such hosting, so
+per the Phase 3C plan, `PULL_FROM_URL` is explicitly **not implemented**;
+only `source=FILE_UPLOAD` (direct byte upload from this process) is used.
+
+### The unaudited-app restriction (the single biggest constraint)
+
+> "All content posted by unaudited clients will be restricted to private
+> viewing mode."
+
+Confirmed directly from the Content Posting API overview. Until an app
+completes TikTok's audit (`developers.tiktok.com/application/content-posting-api`),
+**every post is forced to private/self-only visibility regardless of the
+`privacy_level` requested** — this is enforced by TikTok itself, not
+something this codebase can or should work around. The adapter and
+`publisher-doctor`/`provider-smoke` report this state explicitly
+(`APP_REVIEW_REQUIRED`) rather than silently succeeding at a narrower
+visibility than requested; see the capability model below.
+
+### OAuth 2.0
+
+- Authorization endpoint: `https://www.tiktok.com/v2/auth/authorize/`
+  (`client_key`, `response_type=code`, `scope`, `redirect_uri`, `state`;
+  redirect URIs must be HTTPS with no query string or fragment).
+- Token endpoint: `https://open.tiktokapis.com/v2/oauth/token/`
+  (`client_key`, `client_secret`, `code`, `grant_type=authorization_code`,
+  `redirect_uri`, `code_verifier`).
+- Revoke endpoint: `https://open.tiktokapis.com/v2/oauth/revoke/`.
+- **PKCE is required for desktop/mobile app types** (this project's
+  loopback-callback CLI flow is exactly that type) — `code_verifier` is
+  sent at token-exchange time, mirroring the YouTube adapter's existing
+  PKCE implementation almost exactly.
+- Access token: valid 24 hours. Refresh token: valid 365 days. A refresh
+  call may return a **different** refresh token, which must replace the
+  stored one — this is a real behavioral difference from the YouTube
+  adapter (which normally keeps the same refresh token) and is handled
+  explicitly in `_resolve_fresh_tiktok_access_token`.
+
+### Scopes
+
+- `video.publish` — required for Direct Post (public-capable, subject to
+  the unaudited-app restriction above).
+- `video.upload` — upload-only; per third-party corroboration (not the
+  primary source, recorded as such) lands drafts in the creator's inbox
+  rather than posting directly — **not used**, since this project's whole
+  point is direct, tracked publication.
+- `user.info.basic` — added by default with Login Kit; not required
+  separately for posting, not requested by this adapter (no profile data
+  beyond `creator_info` is needed).
+
+Only `video.publish` is requested.
+
+### `creator_info` query — `POST /v2/post/publish/creator_info/query/`
+
+Must be re-queried fresh before every publish attempt (an old snapshot is
+never trusted — see `docs/OPERATIONS.md`). Response:
+`creator_avatar_url` (2-hour TTL, never persisted), `creator_username`,
+`creator_nickname`, `privacy_level_options` (list — the actual allowed
+set for this specific creator, not a fixed global list),
+`comment_disabled`, `duet_disabled`, `stitch_disabled`,
+`max_video_post_duration_sec`. Rate limit: 20 requests/minute per access
+token.
+
+### Direct Post init — `POST /v2/post/publish/video/init/`
+
+`post_info`: `privacy_level` (must be one of the creator's own
+`privacy_level_options` — `PUBLIC_TO_EVERYONE` | `MUTUAL_FOLLOW_FRIENDS` |
+`FOLLOWER_OF_CREATOR` | `SELF_ONLY`), `title` (max 2200 UTF-16 code
+units), `disable_duet`, `disable_stitch`, `disable_comment`,
+`video_cover_timestamp_ms`, `brand_content_toggle` (paid partnership),
+`brand_organic_toggle` (creator's own business), `is_aigc`
+(AI-generated-content disclosure).
+`source_info`: `source="FILE_UPLOAD"`, `video_size`, `chunk_size`,
+`total_chunk_count`. Response: `publish_id` (max 64 chars),
+`upload_url` (max 256 chars, **valid 1 hour** — the upload must complete
+within that window). Rate limit: 6 requests/minute per access token.
+
+### Chunked upload — `PUT {upload_url}`
+
+Headers: `Content-Type` (`video/mp4` | `video/quicktime` | `video/webm`),
+`Content-Length` (this chunk's byte size), `Content-Range`
+(`bytes {FIRST}-{LAST}/{TOTAL}`). **The official docs do not specify a
+minimum or maximum chunk size** — this is **not independently confirmed**
+against a primary per-size-limit table in this session (mirroring the
+YouTube quota-cost caveat's existing precedent) and third-party sources
+suggesting a ~5–64 MB range were deliberately not used as a basis for
+anything. `REEL_HARNESS_TIKTOK_UPLOAD_CHUNK_SIZE` is therefore fully
+operator-configurable rather than hardcoded to an unconfirmed number,
+defaulting to 10 MiB (a conservative, commonly-cited value that this
+session could not verify against TikTok's own docs).
+
+### Post status — `POST /v2/post/publish/status/fetch/`
+
+Request: `publish_id`. Response `status` — exactly five documented
+values: `PROCESSING_UPLOAD` (FILE_UPLOAD only), `PROCESSING_DOWNLOAD`
+(PULL_FROM_URL only, unused here), `SEND_TO_USER_INBOX`,
+`PUBLISH_COMPLETE`, `FAILED`. `fail_reason` (on `FAILED`):
+`file_format_check_failed`, `duration_check_failed`,
+`frame_rate_check_failed`, `picture_size_check_failed`, `internal`,
+`video_pull_failed`, `photo_pull_failed`, `publish_cancelled`,
+`auth_removed`, `spam_risk_too_many_posts`,
+`spam_risk_user_banned_from_posting`, `spam_risk_text`, `spam_risk`.
+`publicly_available_post_id` (only populated once TikTok's moderation
+approves a **public** post — "moderation usually finishes within one
+minute... may take a few hours" per the docs; never assume `PUBLISH_COMPLETE`
+means a public post ID already exists). `uploaded_bytes`. Rate limit: 30
+requests/minute per access token.
+
+### What the official docs do NOT specify (recorded, not guessed at)
+
+Maximum video file size, minimum/maximum chunk size, supported video
+codec details beyond the three `Content-Type` values, and any daily
+post-count cap distinct from the per-minute rate limits above. None of
+these are hardcoded anywhere in `providers/tiktok_publisher.py`; the
+adapter classifies failures from the live error response instead of
+assuming a limit.
+
+## Design decisions this research drove
+
+- **Only `FILE_UPLOAD` is implemented** — `PULL_FROM_URL` requires
+  hosting this project has no equivalent of, and is explicitly out of
+  scope for Phase 3C (see `docs/OPERATIONS.md`).
+- **The unaudited-app restriction is surfaced, never hidden.** An
+  operator who hasn't completed TikTok's audit will see
+  `APP_REVIEW_REQUIRED` from `publisher-doctor`/`provider-smoke`/
+  `publish-job --dry-run`, not a confusing privacy mismatch after the
+  fact.
+- **`creator_info` is fetched fresh before every publish**, never reused
+  from an earlier snapshot — a creator can change their own privacy/
+  interaction settings at any time, and TikTok's own guidance is to use
+  "the latest creator information."
+- **The most restrictive default privacy** (`SELF_ONLY`) is used unless
+  an operator explicitly requests otherwise and it's within what the
+  creator's own `privacy_level_options` actually allows.
+- **`upload_url` is never persisted verbatim** (same pattern as YouTube's
+  resumable session URI) — only an opaque local reference, via the same
+  `publisher.session_store`.

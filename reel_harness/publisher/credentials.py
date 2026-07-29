@@ -30,8 +30,18 @@ class OAuthCredential:
     scope: str
     provider: str
     account_reference: str
+    # Generic "account identifier"/"display name" slot -- named after
+    # YouTube's channel concept (the first provider to use this schema) but
+    # reused as-is for every other provider's own account identity (e.g.
+    # TikTok's open_id/creator display name) rather than adding
+    # provider-specific duplicate fields. See docs/PUBLISHING.md.
     channel_id: str | None = None
     channel_title: str | None = None
+    # Some providers' refresh tokens themselves expire (TikTok: 365 days)
+    # unlike Google's, which this schema originally modeled and which don't
+    # carry a documented expiry -- None means "provider doesn't expire (or
+    # doesn't report) refresh token lifetime".
+    refresh_expires_at: datetime | None = None
     created_at: datetime | None = None
     last_refreshed_at: datetime | None = None
     last_refresh_error: str | None = None
@@ -69,6 +79,9 @@ class FileCredentialBackend:
             expires_at=datetime.fromisoformat(data["expires_at"]) if data.get("expires_at") else None,
             scope=data.get("scope", ""), provider=provider, account_reference=account_reference,
             channel_id=data.get("channel_id"), channel_title=data.get("channel_title"),
+            refresh_expires_at=(
+                datetime.fromisoformat(data["refresh_expires_at"]) if data.get("refresh_expires_at") else None
+            ),
             created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None,
             last_refreshed_at=(
                 datetime.fromisoformat(data["last_refreshed_at"]) if data.get("last_refreshed_at") else None
@@ -85,6 +98,9 @@ class FileCredentialBackend:
             "scope": credential.scope,
             "channel_id": credential.channel_id,
             "channel_title": credential.channel_title,
+            "refresh_expires_at": (
+                credential.refresh_expires_at.isoformat() if credential.refresh_expires_at else None
+            ),
             "created_at": credential.created_at.isoformat() if credential.created_at else None,
             "last_refreshed_at": (
                 credential.last_refreshed_at.isoformat() if credential.last_refreshed_at else None

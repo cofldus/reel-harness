@@ -248,3 +248,19 @@ def test_loopback_server_redirect_uri_is_loopback_only() -> None:
     assert server.redirect_uri.startswith("http://127.0.0.1:")
     threading.Thread(target=lambda: _raw_get(server.port, "/?state=s&code=x")).start()
     server.wait_for_code()
+
+
+def test_loopback_server_can_bind_an_exact_pre_registered_port() -> None:
+    """A provider (TikTok) that requires an exact pre-registered redirect_uri
+    -- unlike Google's "any 127.0.0.1:PORT is accepted" installed-app flow
+    -- needs the listener bound to that specific port, not an OS-assigned
+    ephemeral one."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()
+
+    server = LoopbackCallbackServer(expected_state="s", timeout_seconds=5, port=free_port)
+    assert server.port == free_port
+    threading.Thread(target=lambda: _raw_get(server.port, "/?state=s&code=fixed-port-code")).start()
+    assert server.wait_for_code() == "fixed-port-code"
