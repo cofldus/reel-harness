@@ -240,6 +240,75 @@ def cmd_incident_bundle(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_live_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Single-command read-only sweep (default) across YouTube/TikTok/
+    Instagram live account state, optionally followed by a real,
+    per-platform-confirmed upload test. A provider with no saved
+    credential is reported NOT_CONFIGURED and the sweep continues to the
+    next platform -- never aborts the whole run. Every result (read-only
+    and upload-test) is appended to the append-only live-verification
+    log, distinct from Publication."""
+    from reel_harness.ops.live_verify import LiveVerificationLog, LiveVerificationRecord, run_read_only_live_verify
+
+    requested = [p for p, enabled in (
+        ("youtube", args.youtube), ("tiktok", args.tiktok), ("instagram", args.instagram),
+    ) if enabled] or ["youtube", "tiktok", "instagram"]
+    account = args.account or "default"
+    log = LiveVerificationLog(ctx.publish_journal().root_dir.parent / "live_verification")
+
+    records = run_read_only_live_verify(ctx, providers=tuple(requested), account=account)
+    for record in records:
+        log.append(record)
+
+    if args.upload_tests:
+        confirm_map = {
+            "youtube": args.confirm_youtube_private, "tiktok": args.confirm_tiktok_restricted,
+            "instagram": args.confirm_instagram_public,
+        }
+        upload_fn_map = {
+            "youtube": lambda: _smoke_publisher_youtube(
+                ctx, account, upload_private_test=True, confirm_test_upload=True,
+            ),
+            "tiktok": lambda: _smoke_publisher_tiktok(
+                ctx, account, upload_private_test=True, confirm_test_upload=True, confirm_platform_options=True,
+            ),
+            "instagram": lambda: _smoke_publisher_instagram(
+                ctx, account, upload_public_test=True, confirm_test_upload=True,
+                confirm_public_upload=True, confirm_platform_options=True,
+            ),
+        }
+        from datetime import UTC, datetime
+
+        from reel_harness._version import __version__
+        from reel_harness.ops.fingerprint import fingerprint_hash
+
+        for provider in requested:
+            if not confirm_map[provider]:
+                continue  # never runs an upload test without this platform's explicit confirmation flag
+            started_at = datetime.now(UTC).isoformat()
+            exit_code = upload_fn_map[provider]()
+            outcome = "PASS" if exit_code == 0 else "FAIL"
+            record = LiveVerificationRecord(
+                provider=provider, account_alias=account, verification_type="upload_test",
+                started_at=started_at, completed_at=datetime.now(UTC).isoformat(), outcome=outcome,
+                application_version=__version__,
+                config_fingerprint_hash=fingerprint_hash(ctx.config_fingerprint()),
+                detail=f"exit_code={exit_code}",
+            )
+            records.append(record)
+            log.append(record)
+
+    payload = {"providers": requested, "account": account, "records": [r.to_dict() for r in records]}
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        for record in records:
+            print(
+                f"[{record.outcome:^20}] {record.provider} ({record.verification_type}) -- {record.detail}",
+            )
+    return 0 if all(r.outcome in ("PASS", "NOT_CONFIGURED") for r in records) else 1
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2796,6 +2865,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--dest-path", required=True, help="Output archive path (outside the repository)",
     )
     incident_bundle_p.set_defaults(func=cmd_incident_bundle)
+
+    live_verify_p = sub.add_parser(
+        "live-verify",
+        help="Read-only live account sweep across YouTube/TikTok/Instagram (default), or upload tests",
+    )
+    live_verify_p.add_argument("--youtube", action="store_true")
+    live_verify_p.add_argument("--tiktok", action="store_true")
+    live_verify_p.add_argument("--instagram", action="store_true")
+    live_verify_p.add_argument("--account", default=None, help="Default: 'default'")
+    live_verify_p.add_argument(
+        "--read-only", action="store_true",
+        help="No-op -- read-only is always the default; --upload-tests is the only opt-out",
+    )
+    live_verify_p.add_argument(
+        "--upload-tests", action="store_true",
+        help="Opt-in: allow a real per-platform upload test IF that platform's confirm flag is also given",
+    )
+    live_verify_p.add_argument(
+        "--confirm-youtube-private", action="store_true",
+        help="Required (with --upload-tests) to run YouTube's private test upload",
+    )
+    live_verify_p.add_argument(
+        "--confirm-tiktok-restricted", action="store_true",
+        help="Required (with --upload-tests) to run TikTok's SELF_ONLY test upload",
+    )
+    live_verify_p.add_argument(
+        "--confirm-instagram-public", action="store_true",
+        help="Required (with --upload-tests) to run Instagram's public test Reel -- the strongest confirmation",
+    )
+    live_verify_p.add_argument("--json", action="store_true")
+    live_verify_p.set_defaults(func=cmd_live_verify)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
