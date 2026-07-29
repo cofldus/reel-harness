@@ -10,6 +10,7 @@ from reel_harness.core.errors import (
     PublisherAppReviewRequiredError,
     PublisherCreatorNotEligibleError,
     PublisherPrivacyNotAllowedError,
+    PublisherPublishingLimitReachedError,
     TransientProviderError,
     UploadSessionExpiredError,
 )
@@ -39,7 +40,19 @@ from reel_harness.worker.publish_runner import _DEFAULT_CHUNK_SIZE
 # always raises it -- see providers.tiktok_publisher). app_review_required
 # is the one genuinely new outcome TikTok needed: proactively surfacing an
 # unaudited-app block on a stuck, not-yet-uploaded publication, which no
-# other provider's reconciliation needed before.
+# other provider's reconciliation needed before. Instagram reuses this
+# same vocabulary too: "container created"/"container processing"/
+# "container ready" -> already_consistent (the granular container
+# status_code is already in `reasons`); "remote media found"/"remote
+# media missing" -> recovered_remote_video/remote_video_missing;
+# "media_url_expired"/"container_expired" -> upload_session_expired
+# (InstagramPublisher.query_upload_offset always raises it too, for the
+# same "no documented resumability" reason TikTok's does).
+# publishing_limit_reached is the one genuinely new outcome Instagram
+# needed: proactively surfacing an exhausted 24-hour publishing quota on
+# a stuck, not-yet-uploaded publication -- distinct from
+# manual_review_required because the correct next action is simply
+# "wait for the daily reset," not an operator investigation.
 RECONCILE_OUTCOMES = frozenset({
     "already_consistent",
     "recovered_remote_video",
@@ -50,6 +63,7 @@ RECONCILE_OUTCOMES = frozenset({
     "manual_review_required",
     "ambiguous_remote_state",
     "app_review_required",
+    "publishing_limit_reached",
 })
 
 _TERMINAL = frozenset({PublicationStatus.PUBLISHED, PublicationStatus.CANCELLED})
@@ -176,6 +190,10 @@ def _reconcile_unlocked_no_known_video(session, publication: Publication, bundle
             app_review_result = _check_tiktok_app_review_block(publication, bundle)
             if app_review_result is not None:
                 return app_review_result
+        if publication.provider == "instagram":
+            limit_result = _check_instagram_eligibility_block(publication, bundle)
+            if limit_result is not None:
+                return limit_result
         return _result("upload_incomplete", pub_id,
                        ["no resumable session reference on record locally -- safe to start a fresh session"])
 
@@ -286,4 +304,41 @@ def _check_tiktok_app_review_block(publication: Publication, bundle) -> Reconcil
         return _result("manual_review_required", pub_id,
                        [f"this publication's configured options are no longer valid for the account: "
                         f"{(redact(str(exc)) or '')[:300]}"])
+    return None
+
+
+def _check_instagram_eligibility_block(publication: Publication, bundle) -> ReconciliationResult | None:
+    """Mirrors _check_tiktok_app_review_block's rationale: a stuck
+    Instagram publication that never even created a container is often
+    stuck for an actionable reason -- the account's 24-hour publishing
+    quota is exhausted, or the account is no longer a Reels-eligible
+    professional account -- rather than 'just hasn't been retried yet'.
+    Read-only (get_creator_info never mutates anything). Returns None
+    (defer to the generic upload_incomplete outcome) when nothing here
+    explains the stall."""
+    from reel_harness.providers.instagram_publisher import (
+        InstagramReelsOptions,
+    )
+    from reel_harness.providers.instagram_publisher import (
+        validate_publish_options as validate_instagram_publish_options,
+    )
+
+    pub_id = publication.id
+    try:
+        account_info = bundle.publisher.get_creator_info()
+    except (ProviderAuthError, ProviderNotConfiguredError) as exc:
+        return _result("credentials_unavailable", pub_id,
+                       [f"cannot check account info before reconciling: {(redact(str(exc)) or '')[:200]}"])
+    except TransientProviderError:
+        return None  # a transient account-info hiccup should never block reconciliation itself
+
+    if account_info is None:
+        return None
+    try:
+        validate_instagram_publish_options(account_info, InstagramReelsOptions())
+    except PublisherPublishingLimitReachedError as exc:
+        return _result("publishing_limit_reached", pub_id, [(redact(str(exc)) or "")[:300]])
+    except (MetadataInvalidError, PublisherCreatorNotEligibleError) as exc:
+        return _result("manual_review_required", pub_id,
+                       [f"this account is not currently eligible to publish: {(redact(str(exc)) or '')[:300]}"])
     return None
