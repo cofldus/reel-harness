@@ -1,10 +1,61 @@
 # Status
 
-Last updated: 2026-07-29 (Phase 4A release-candidate session, on branch
-`phase4/release-candidate`). Phase 2A through Phase 3D are merged into
-`main`.
+Last updated: 2026-07-29 (Phase 4B live-verification session; `v0.1.0`
+tagged on `main`). Phase 2A through Phase 4A are merged into `main`.
 
-## Phase 4A — Production release candidate (this branch)
+## Phase 4B — Live platform verification and v0.1.0 release
+
+Goal was NOT new features -- verify Phase 4A's release candidate against
+real platforms where possible, fix any real defects found, and cut the
+final `0.1.0` release. See `CHANGELOG.md`'s `[0.1.0]`/`[0.1.0rc2]`
+entries for the user-facing summary.
+
+- **Credential check**: `~/.reel-harness/credentials/oauth_credentials/`
+  is empty on this machine; `publisher-doctor --check-remote` and
+  `provider-smoke publisher <platform>` for YouTube/TikTok/Instagram all
+  report `NOT_CONFIGURED` / "credentials not configured". No live
+  platform upload was possible or attempted.
+- **Operational soak test**: 5 concurrent fake jobs through a real
+  `reel-harness serve` subprocess (2 render workers, 1 publisher worker,
+  60s run, graceful shutdown via `CTRL_BREAK_EVENT`/`SIGINT`, then a
+  simulated restart against the same DB file) surfaced two real defects,
+  both fixed and covered by regression tests:
+  1. `storage-verify` flagged healthy jobs still in `CREATED`/`QUEUED`/
+     `TOPIC_GENERATING`/`SCRIPT_GENERATING`/`POLICY_CHECKING` as
+     `missing_directory` -- those stages legitimately have not written a
+     file to disk yet (only `ASSET_FETCHING` onward does). Fixed in
+     `reel_harness/ops/storage_tools.py`.
+  2. A subprocess-stdout-decoding mismatch (parent decoding a
+     UTF-8-forced child's output with the platform default locale
+     encoding, cp949 on this machine) could raise `UnicodeDecodeError`
+     under high non-ASCII log volume. Fixed in
+     `tests/e2e/test_supervisor_subprocess_e2e.py`'s `subprocess.Popen`
+     call (`encoding="utf-8", errors="replace"`).
+- **RC2 process**: because real product code changed after `v0.1.0rc1`
+  was tagged, `v0.1.0rc1`'s own verification could not be reused as-is.
+  Version bumped to `0.1.0rc2`, full `release-check` re-run (PASS,
+  930 passed/1 skipped, mypy/ruff clean), package rebuilt and clean-
+  installed into a fresh venv (verified `--version`, `preflight
+  --profile fake`, `channel-create`), release manifest regenerated,
+  live-verify re-run (still `NOT_CONFIGURED` all three platforms as
+  expected), tagged `v0.1.0rc2` and pushed. `v0.1.0rc1` was never moved,
+  deleted, or force-updated.
+- **Merge to `main`**: `phase4/release-candidate` (carrying both Phase 4A
+  and the rc2 fixes) merged into `main` with `--no-ff`. Both `v0.1.0rc1`
+  and `v0.1.0rc2` are reachable ancestors of the merge commit; neither
+  tag moved. Full gate re-run clean on `main` post-merge.
+- **Final `0.1.0` release — Path B (local-first, limitations documented)**:
+  since no live platform credentials exist on this machine, YouTube/
+  TikTok/Instagram live publishing remains unverified for this release.
+  This is recorded explicitly (not silently) in `README.md`,
+  `CHANGELOG.md`'s `[0.1.0]` entry, and the release manifest's
+  `live_verification` field -- the phrase "production live publishing
+  verified" is not used anywhere in this release's documentation.
+  Publisher features are described as preview/credential-required.
+  Version bumped to final `0.1.0`, full verification re-run, tagged
+  `v0.1.0` and pushed once green on `main`.
+
+## Phase 4A — Production release candidate (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
 `CHANGELOG.md` for the user-facing summary). This phase does not add a new

@@ -26,4 +26,8 @@ uv run reel-harness serve
 
 즉, DB를 따로 구축하지 않아도 로컬 테스트는 바로 돌아가지만, 별도의 배포 설정 없이는 다른 사람이 접속하는 실제 운영 서비스로 굴러가지는 않습니다. 실제 운영 환경으로 배포하기 전에는 `reel-harness preflight --profile production`으로 API 키·자격 증명·저장소 설정을 먼저 점검하세요.
 
+## 실제 플랫폼 게시 검증 상태
+
+YouTube·TikTok·Instagram 업로드 기능은 각 플랫폼의 공개 API 사양에 맞춰 구현되어 있고 계약(contract) E2E 테스트로 커버되지만, 이 릴리스를 빌드·테스트한 환경에는 세 플랫폼 모두 실제 자격 증명이 구성되어 있지 않습니다. 즉 **실제 계정으로의 게시가 아직 검증되지 않은 preview 기능**입니다. `reel-harness live-verify`로 직접 상태를 확인할 수 있고, 실제 자격 증명을 구성한 뒤 `--upload-tests`로 재검증할 수 있습니다. 자세한 내용은 `CHANGELOG.md`와 릴리스 매니페스트의 `live_verification` 필드를 참고하세요.
+
 자세한 운영 방법은 `docs/OPERATIONS.md`, 아키텍처는 `docs/ARCHITECTURE.md`, 현재 구현 상태는 `docs/STATUS.md`를 참고하세요.
