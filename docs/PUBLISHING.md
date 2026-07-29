@@ -821,3 +821,13 @@ comment/duet/stitch confirmation requirement).
 - **A single-shot upload failure starts a brand-new container** rather
   than guessing at resumability, the same conservative choice TikTok's
   adapter already makes for its own unconfirmed offset-query gap.
+- **Video duration/file-size are validated locally before any upload
+  attempt** (`providers.instagram_media.validate_video_for_reels`) --
+  reusing facts the render pipeline already confirmed (`ValidationInfo.
+  duration_sec`) and the final file's own byte size, never a fresh
+  ffprobe call. Unlike TikTok (whose equivalent limits were never
+  confirmed against primary docs, so this project never hardcoded them),
+  Instagram's 3s-15min duration window and 300 MB file-size cap ARE
+  documented, so violating either fails fast and locally
+  (`VIDEO_TOO_LONG`/`VIDEO_TOO_LARGE`) instead of only being discovered
+  from a live API rejection.

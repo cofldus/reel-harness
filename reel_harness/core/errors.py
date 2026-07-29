@@ -197,6 +197,46 @@ class ProcessingFailedError(PipelineError):
     retryable = False
 
 
+class VideoNotSupportedError(PipelineError):
+    """The video's own properties (codec, aspect ratio, container) fall
+    outside what the provider documents as supported, confirmed locally
+    (via ffprobe) before ever attempting an upload -- see
+    providers.instagram_media for the first adapter to check this
+    up front against real documented limits."""
+
+    code = "VIDEO_NOT_SUPPORTED"
+    retryable = False
+
+
+class VideoTooLargeError(PipelineError):
+    """The video file exceeds the provider's documented maximum file
+    size. Checked locally before any upload is attempted -- re-uploading
+    the same file can never fix this."""
+
+    code = "VIDEO_TOO_LARGE"
+    retryable = False
+
+
+class VideoTooLongError(PipelineError):
+    """The video's duration falls outside the provider's documented
+    min/max duration window. Checked locally before any upload is
+    attempted."""
+
+    code = "VIDEO_TOO_LONG"
+    retryable = False
+
+
+class PublisherPublishingLimitReachedError(PipelineError):
+    """The account's own publishing-rate limit (e.g. Instagram's 100
+    API-published posts per rolling 24-hour period) is exhausted. Not
+    retried within the same process -- the limit resets on a
+    provider-defined schedule, mirroring PublisherQuotaExceededError's
+    treatment of YouTube's daily quota."""
+
+    code = "PUBLISHING_LIMIT_REACHED"
+    retryable = False
+
+
 class MetadataInvalidError(PipelineError):
     """Title/description/tags/category failed provider-side or local
     validation. Never auto-retried without fixing the metadata."""
