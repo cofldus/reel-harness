@@ -294,13 +294,21 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
             and ctx.settings.tiktok_redirect_uri,
         )
         credential_configured = client_ok and ctx.credential_backend().has_credential("tiktok", args.account)
+    elif args.provider == "instagram":
+        client_ok = bool(
+            ctx.settings.instagram_app_id and ctx.settings.instagram_app_secret.get_secret_value()
+            and ctx.settings.instagram_redirect_uri,
+        )
+        credential_configured = client_ok and ctx.credential_backend().has_credential("instagram", args.account)
 
     # YouTube-shaped preview ("fake" stands in for YouTube's shape
-    # throughout this project's tests); TikTok gets its own preview below,
-    # since its metadata model (post text + platform_options) doesn't
-    # match YouTube's title/description/tags/category shape.
+    # throughout this project's tests); TikTok/Instagram get their own
+    # previews below, since their metadata models (post text/caption +
+    # platform_options) don't match YouTube's title/description/tags/
+    # category shape.
     metadata_preview = None
     tiktok_preview = None
+    instagram_preview = None
     upload_chunk_size_bytes = ctx.settings.youtube_upload_chunk_size
     if args.provider in ("youtube", "fake") and eligibility.manifest is not None:
         metadata = build_publication_metadata(
@@ -317,6 +325,9 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
     elif args.provider == "tiktok" and eligibility.manifest is not None:
         tiktok_preview = _tiktok_dry_run_preview(ctx, eligibility.manifest, privacy_status, credential_configured)
         upload_chunk_size_bytes = ctx.settings.tiktok_upload_chunk_size
+    elif args.provider == "instagram" and eligibility.manifest is not None:
+        instagram_preview = _instagram_dry_run_preview(ctx, eligibility.manifest, credential_configured)
+        upload_chunk_size_bytes = instagram_preview.get("video_file_size_bytes") or 0
 
     video_file_size_bytes = None
     final_path = ctx.storage.job_dir(args.job_id) / "final" / "final.mp4"
@@ -330,6 +341,7 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
     )
     platform_options_confirmed = (not caps.requires_user_confirmation) or args.confirm_platform_options
     post_text_valid = tiktok_preview is None or tiktok_preview.get("post_text_error") is None
+    caption_valid = instagram_preview is None or instagram_preview.get("caption_error") is None
 
     payload = {
         "job_id": args.job_id, "provider": args.provider, "account_reference": args.account,
@@ -343,13 +355,14 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
         "credential_configured": credential_configured,
         "metadata_preview": metadata_preview,
         "tiktok_preview": tiktok_preview,
+        "instagram_preview": instagram_preview,
         "video_file_size_bytes": video_file_size_bytes,
         "upload_chunk_size_bytes": upload_chunk_size_bytes,
     }
     print(json.dumps(payload, indent=2))
     ready = (
         eligibility.eligible and privacy_valid and credential_configured
-        and public_upload_allowed and platform_options_confirmed and post_text_valid
+        and public_upload_allowed and platform_options_confirmed and post_text_valid and caption_valid
     )
     return 0 if ready else 1
 
@@ -395,6 +408,61 @@ def _tiktok_dry_run_preview(ctx: AppContext, manifest, privacy_status: str, cred
         ),
         "app_review_status": (
             "unknown -- not checked (see creator_info note above)" if credential_configured
+            else "unknown -- no credential configured"
+        ),
+    }
+
+
+def _instagram_dry_run_preview(ctx: AppContext, manifest, credential_configured: bool) -> dict:
+    """Entirely local/network-free, mirroring _tiktok_dry_run_preview.
+    Reports what CAN be determined without a network call: the caption
+    that would be sent (validated against Instagram's own length/hashtag/
+    mention/forbidden-marker rules), whether the video's duration/file
+    size fall within Instagram's documented Reels limits (a check TikTok's
+    own preview can't make, since TikTok's limits were never confirmed --
+    see docs/PUBLISHING.md), the default platform_options, the expected
+    API mode, and an explicit note that account-info/publishing-limit
+    status require a live check."""
+    from reel_harness.core.errors import VideoTooLargeError, VideoTooLongError
+    from reel_harness.pipeline.publish_metadata import build_title
+    from reel_harness.providers.instagram_media import validate_video_for_reels
+    from reel_harness.providers.instagram_publisher import build_caption
+    from reel_harness.providers.registry import default_platform_options
+
+    title = build_title(manifest.topic, manifest.script_title)
+    caption_error = None
+    try:
+        build_caption(title)
+    except Exception as exc:  # noqa: BLE001 - reported as a field, never raised through dry-run
+        caption_error = str(exc)
+
+    video_file_size_bytes = None
+    final_path = ctx.storage.job_dir(manifest.job_id) / "final" / "final.mp4"
+    if final_path.is_file():
+        video_file_size_bytes = final_path.stat().st_size
+
+    duration_sec = manifest.validation.duration_sec if manifest.validation else None
+    video_limits_error = None
+    if video_file_size_bytes is not None:
+        try:
+            validate_video_for_reels(duration_sec, video_file_size_bytes)
+        except (VideoTooLongError, VideoTooLargeError) as exc:
+            video_limits_error = str(exc)
+        if caption_error is None and video_limits_error is not None:
+            caption_error = video_limits_error  # either failure blocks "ready" the same way
+
+    return {
+        "caption": title, "caption_length": len(title), "caption_error": caption_error,
+        "video_limits_error": video_limits_error,
+        "video_file_size_bytes": video_file_size_bytes,
+        "platform_options": default_platform_options("instagram"),
+        "expected_api_mode": "FILE_UPLOAD_RESUMABLE",
+        "account_info": (
+            "not fetched -- dry-run never contacts the network; run "
+            "`publisher-doctor instagram --check-remote` for a live account-info/publishing-limit check"
+        ),
+        "account_eligibility_status": (
+            "unknown -- not checked (see account_info note above)" if credential_configured
             else "unknown -- no credential configured"
         ),
     }
@@ -1168,6 +1236,8 @@ def cmd_publisher_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
         return _cmd_publisher_doctor_youtube(args, ctx)
     if args.provider == "tiktok":
         return _cmd_publisher_doctor_tiktok(args, ctx)
+    if args.provider == "instagram":
+        return _cmd_publisher_doctor_instagram(args, ctx)
     print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)  # pragma: no cover
     return 2
 
@@ -1537,6 +1607,189 @@ def _cmd_publisher_doctor_tiktok(args: argparse.Namespace, ctx: AppContext) -> i
                            "checks": checks}, indent=2))
     else:
         print(f"TikTok publisher doctor -- account={account!r} -- overall: {overall}")
+        for c in checks:
+            detail = f" -- {c['detail']}" if c.get("detail") else ""
+            print(f"  [{c['status']:^13}] {c['name']}{detail}")
+
+    return _DOCTOR_EXIT_CODE[overall]
+
+
+def _cmd_publisher_doctor_instagram(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Local-first readiness report for Instagram publishing -- mirrors
+    the TikTok/YouTube doctors' shape. --check-remote additionally
+    attempts a real token refresh and a read-only account-info +
+    publishing-limit query. Never prints a secret or token."""
+    import os as os_module
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text as sa_text
+
+    from reel_harness.config import ProviderConfigurationError, validate_instagram_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.db.schema import SCHEMA_VERSION
+    from reel_harness.observability import redact
+    from reel_harness.publisher.secret_store import SecretStoreError
+
+    account = args.account or "default"
+    checks: list[dict] = []
+
+    def add(name: str, status: str, detail: str | None = None) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    try:
+        with ctx.session_factory() as session:
+            session.execute(sa_text("SELECT 1"))
+            version = session.execute(sa_text("SELECT version FROM schema_migrations")).scalar_one()
+        add("database", "PASS")
+        add(
+            "schema_version", "PASS" if version == SCHEMA_VERSION else "FAIL",
+            f"v{version} (expected v{SCHEMA_VERSION})",
+        )
+    except Exception as exc:  # noqa: BLE001 - doctor must report, never raise
+        detail = (redact(str(exc)) or "")[:200]
+        add("database", "FAIL", f"{type(exc).__name__}: {detail}")
+        add("schema_version", "FAIL", "unknown -- database unreachable")
+
+    root = ctx.storage.root_dir
+    if root.is_dir() and os_module.access(root, os_module.W_OK):
+        add("storage", "PASS")
+    else:
+        add("storage", "FAIL", "storage root missing or not writable")
+
+    try:
+        from reel_harness.providers.instagram_publisher import InstagramPublisher  # noqa: F401
+
+        add("publisher_registry", "PASS", "instagram adapter importable")
+    except Exception as exc:  # noqa: BLE001
+        add("publisher_registry", "FAIL", type(exc).__name__)
+
+    try:
+        validate_instagram_credentials_configured(ctx.settings)
+        add("oauth_client_config", "PASS")
+    except ProviderConfigurationError as exc:
+        add("oauth_client_config", "NOT_CONFIGURED", str(exc))
+
+    backend = None
+    try:
+        backend = ctx.credential_backend()
+        add(
+            "credential_backend", "PASS",
+            f"{backend.__class__.__name__} rooted outside the repository (repo-internal paths are rejected "
+            "at construction)",
+        )
+    except SecretStoreError as exc:
+        add("credential_backend", "FAIL", str(exc))
+
+    cred = backend.get_credential("instagram", account) if backend is not None else None
+    if backend is None:
+        pass
+    elif cred is None:
+        add(
+            "account_credential", "NOT_CONFIGURED",
+            f"no saved credential for account {account!r} -- run publisher-auth instagram",
+        )
+    else:
+        add("account_credential", "PASS", f"account={account!r} (instagram_account_id={cred.channel_id!r})")
+        if cred.invalid:
+            add(
+                "credential_valid", "FAIL",
+                f"marked invalid after a failed refresh: {cred.last_refresh_error or 'unknown reason'}",
+            )
+        elif cred.expires_at is None:
+            add("token_expiry", "WARN", "no expiry recorded")
+        else:
+            now = datetime.now(UTC)
+            if cred.expires_at > now + timedelta(minutes=2):
+                add("token_expiry", "PASS", f"valid until {cred.expires_at.isoformat()}")
+            else:
+                # Instagram's long-lived token refreshes itself (no
+                # separate refresh_token -- see oauth_instagram) as long
+                # as it's at least 24h old and not yet fully expired;
+                # this doctor can't know that age/expiry margin without
+                # attempting the refresh, so WARN rather than FAIL here.
+                add("token_expiry", "WARN", "access token expired/near-expiry -- self-refresh will be attempted")
+
+    deps = check_ffmpeg_available()
+    add("ffmpeg", "PASS" if deps.ffmpeg_available else "FAIL")
+    add("ffprobe", "PASS" if deps.ffprobe_available else "FAIL")
+
+    add(
+        "publication_worker_config", "PASS",
+        f"lease_timeout={ctx.settings.lease_timeout_seconds}s "
+        f"poll_interval={ctx.settings.worker_poll_interval_seconds}s",
+    )
+
+    client_configured = bool(
+        ctx.settings.instagram_app_id and ctx.settings.instagram_app_secret.get_secret_value()
+        and ctx.settings.instagram_redirect_uri
+    )
+    if not args.check_remote:
+        add("remote_token_refresh", "PASS", "not requested (pass --check-remote)")
+        add("remote_account_info", "PASS", "not requested (pass --check-remote)")
+        add("account_eligibility_status", "PASS", "not requested (pass --check-remote)")
+    elif not client_configured or cred is None:
+        add("remote_token_refresh", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+        add("remote_account_info", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+        add("account_eligibility_status", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+    else:
+        from reel_harness.providers.instagram_publisher import InstagramPublisher
+        from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+        token: str | None = None
+        try:
+            token = _resolve_fresh_instagram_access_token(ctx.settings, backend, account)
+            add("remote_token_refresh", "PASS")
+        except (ProviderAuthError, TransientProviderError) as exc:
+            add("remote_token_refresh", "FAIL", (redact(str(exc)) or "")[:200])
+
+        if token is None:
+            add("remote_account_info", "FAIL", "skipped -- token refresh failed above")
+            add("account_eligibility_status", "FAIL", "skipped -- token refresh failed above")
+        else:
+            publisher = InstagramPublisher(
+                access_token_provider=lambda: token, graph_url=ctx.settings.instagram_graph_url,
+                api_version=ctx.settings.instagram_graph_api_version, account_id=cred.channel_id,
+                connect_timeout=ctx.settings.instagram_connect_timeout_seconds,
+                read_timeout=ctx.settings.instagram_read_timeout_seconds,
+            )
+            try:
+                account_info = publisher.get_creator_info()
+                if account_info is None:
+                    add("remote_account_info", "FAIL", "no account info returned")
+                    add("account_eligibility_status", "FAIL", "cannot determine -- account info unavailable")
+                else:
+                    add(
+                        "remote_account_info", "PASS",
+                        f"account={account_info.display_name!r} id={account_info.account_identifier!r}",
+                    )
+                    if "publishing_limit_reached" in account_info.warnings:
+                        add(
+                            "account_eligibility_status", "WARN",
+                            "this account has reached Instagram's 100-posts-per-24-hours publishing limit "
+                            "(resets on a rolling basis -- see docs/PUBLISHING.md)",
+                        )
+                    elif account_info.warnings:
+                        add("account_eligibility_status", "FAIL", "; ".join(account_info.warnings))
+                    else:
+                        add("account_eligibility_status", "PASS", "account is Reels-eligible")
+                    add(
+                        "max_video_length", "PASS" if account_info.max_post_duration_sec else "WARN",
+                        f"{account_info.max_post_duration_sec}s" if account_info.max_post_duration_sec
+                        else "not reported",
+                    )
+            except (ProviderAuthError, TransientProviderError) as exc:
+                add("remote_account_info", "FAIL", (redact(str(exc)) or "")[:200])
+                add("account_eligibility_status", "FAIL", "skipped -- account info query failed above")
+            finally:
+                publisher.close()
+
+    overall = max((c["status"] for c in checks), key=lambda s: _DOCTOR_STATUS_RANK[s])
+
+    if args.json:
+        print(json.dumps({"provider": "instagram", "account_reference": account, "overall": overall,
+                           "checks": checks}, indent=2))
+    else:
+        print(f"Instagram publisher doctor -- account={account!r} -- overall: {overall}")
         for c in checks:
             detail = f" -- {c['detail']}" if c.get("detail") else ""
             print(f"  [{c['status']:^13}] {c['name']}{detail}")
@@ -2096,7 +2349,7 @@ def build_parser() -> argparse.ArgumentParser:
         "publish-job", help="Create a Publication for a COMPLETED job (upload happens asynchronously)",
     )
     publish_job.add_argument("job_id")
-    publish_job.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "fake"])
+    publish_job.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "instagram", "fake"])
     publish_job.add_argument("--account", default="default", help="Account alias (default: 'default')")
     publish_job.add_argument(
         "--privacy", default=None,
@@ -2244,7 +2497,7 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_doctor = sub.add_parser(
         "publisher-doctor", help="Local-first readiness report for a publisher (no network by default)",
     )
-    publisher_doctor.add_argument("provider", choices=["youtube", "tiktok"])
+    publisher_doctor.add_argument("provider", choices=["youtube", "tiktok", "instagram"])
     publisher_doctor.add_argument("--account", default=None, help="Account alias (default: 'default')")
     publisher_doctor.add_argument(
         "--check-remote", action="store_true",
@@ -2254,19 +2507,19 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_doctor.set_defaults(func=cmd_publisher_doctor)
 
     account_list = sub.add_parser("publisher-account-list", help="List saved publisher account aliases")
-    account_list.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
+    account_list.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "instagram"])
     account_list.set_defaults(func=cmd_publisher_account_list)
 
     account_show = sub.add_parser("publisher-account-show", help="Show one saved account's safe metadata")
     account_show.add_argument("alias")
-    account_show.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
+    account_show.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "instagram"])
     account_show.set_defaults(func=cmd_publisher_account_show)
 
     account_remove = sub.add_parser(
         "publisher-account-remove", help="Delete a LOCAL saved credential (does not revoke remote authorization)",
     )
     account_remove.add_argument("alias")
-    account_remove.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
+    account_remove.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "instagram"])
     account_remove.add_argument("--confirm", action="store_true")
     account_remove.set_defaults(func=cmd_publisher_account_remove)
 

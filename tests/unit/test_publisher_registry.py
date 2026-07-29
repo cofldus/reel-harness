@@ -41,7 +41,7 @@ def test_resolve_fake_publisher() -> None:
 def test_resolve_unknown_publisher_is_unconfigured() -> None:
     from reel_harness.core.errors import ProviderNotConfiguredError
 
-    unconfigured = resolve_publisher("instagram")
+    unconfigured = resolve_publisher("facebook")
     assert unconfigured.provider_id == "unconfigured"
     with pytest.raises(ProviderNotConfiguredError):
         unconfigured.validate_configuration()
@@ -158,7 +158,7 @@ def test_tiktok_provider_capabilities_are_credential_free() -> None:
 
 def test_unregistered_provider_capabilities_raise_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
-        provider_capabilities("instagram")
+        provider_capabilities("facebook")
 
 
 def test_tiktok_publisher_snapshot_excludes_secrets() -> None:
@@ -183,6 +183,85 @@ def test_default_platform_options() -> None:
     assert tiktok_options["disable_duet"] is True
     assert tiktok_options["disable_stitch"] is True
     assert tiktok_options["is_aigc"] is False
+    instagram_options = default_platform_options("instagram")
+    assert instagram_options["share_to_feed"] is False
+    assert instagram_options["collaborators"] == []
+
+
+def test_instagram_provider_capabilities_are_credential_free() -> None:
+    """No credentials, no Settings -- usable during --dry-run/validation
+    before any adapter instance can be constructed, same as tiktok's."""
+    caps = provider_capabilities("instagram")
+    assert caps.default_privacy == "PUBLIC"
+    assert caps.privacy_values == frozenset({"PUBLIC"})
+    assert caps.public_privacy_values == frozenset({"PUBLIC"})  # every publish is public -- see docs/PUBLISHING.md
+    assert caps.supports_comments_control is False
+    assert caps.supports_remix_control is False
+    assert caps.requires_creator_info is True
+    assert caps.requires_user_confirmation is True
+
+
+def test_instagram_publisher_snapshot_excludes_secrets() -> None:
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    snap = publisher_snapshot(settings, "instagram", "acct-1")
+    assert snap["publisher_provider"] == "instagram"
+    assert snap["publisher_account_reference"] == "acct-1"
+    assert snap["instagram_api_version"] == settings.instagram_graph_api_version
+    assert FAKE_CLIENT_SECRET not in str(snap)
+
+
+def test_resolve_instagram_without_client_credentials_is_unconfigured() -> None:
+    unconfigured = resolve_publisher("instagram", settings=Settings(_env_file=None))
+    assert unconfigured.provider_id == "unconfigured"
+
+
+def test_resolve_instagram_without_saved_credential_is_unconfigured() -> None:
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    unconfigured = resolve_publisher(
+        "instagram", settings=settings, credential_backend=backend, account_reference="default",
+    )
+    assert unconfigured.provider_id == "unconfigured"
+
+
+def test_resolve_instagram_with_saved_credential_builds_real_adapter() -> None:
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="access-1", refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(hours=1), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id="17841400", channel_title="my_reel_account",
+    ))
+    publisher = resolve_publisher("instagram", settings=settings, credential_backend=backend)
+    assert publisher.provider_id == "instagram"
+
+
+def test_resolve_instagram_credential_without_account_id_is_unconfigured() -> None:
+    """A credential missing channel_id (the instagram account id, required
+    to build every content-publishing URL) can't build a real adapter --
+    this should never happen for a credential publisher-auth actually
+    saved, but is defensively checked anyway."""
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="access-1", refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(hours=1), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id=None,
+    ))
+    unconfigured = resolve_publisher("instagram", settings=settings, credential_backend=backend)
+    assert unconfigured.provider_id == "unconfigured"
 
 
 def test_access_token_refresh_returns_cached_token_when_not_near_expiry() -> None:
@@ -447,5 +526,118 @@ def test_tiktok_invalid_credential_refuses_further_attempts_without_a_new_networ
 
     with pytest.raises(ProviderAuthError, match="invalid"):
         _resolve_fresh_tiktok_access_token(
+            settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
+        )
+
+
+def test_instagram_access_token_refresh_returns_cached_token_when_not_near_expiry() -> None:
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="still-valid", refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(days=30), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id="17841400",
+    ))
+    token = _resolve_fresh_instagram_access_token(settings, backend, "default")
+    assert token == "still-valid"
+
+
+def test_instagram_access_token_refresh_when_near_expiry_calls_refresh_endpoint() -> None:
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="stale", refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(seconds=30), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id="17841400", channel_title="my_reel_account",
+    ))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/refresh_access_token"
+        assert dict(request.url.params)["access_token"] == "stale"  # presents itself, not a separate refresh_token
+        return httpx.Response(200, json={"access_token": "fresh-token", "expires_in": 5184000})
+
+    token = _resolve_fresh_instagram_access_token(
+        settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
+    )
+
+    assert token == "fresh-token"
+    refreshed = backend.get_credential("instagram", "default")
+    assert refreshed.access_token == "fresh-token"
+    assert refreshed.refresh_token is None  # instagram never has a separate refresh_token
+    assert refreshed.channel_id == "17841400"
+    assert refreshed.channel_title == "my_reel_account"
+
+
+def test_instagram_access_token_refresh_no_credential_raises_not_configured() -> None:
+    from reel_harness.core.errors import ProviderNotConfiguredError
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    with pytest.raises(ProviderNotConfiguredError):
+        _resolve_fresh_instagram_access_token(settings, backend, "default")
+
+
+def test_instagram_refresh_failure_marks_the_credential_invalid_and_records_the_error() -> None:
+    from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="too-young-or-expired", refresh_token=None,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id="17841400",
+    ))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "token too young to refresh"}})
+
+    with pytest.raises(ProviderAuthError):
+        _resolve_fresh_instagram_access_token(
+            settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
+        )
+
+    broken = backend.get_credential("instagram", "default")
+    assert broken.invalid is True
+    assert broken.last_refresh_error is not None
+
+
+def test_instagram_invalid_credential_refuses_further_attempts_without_a_new_network_call() -> None:
+    from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    settings = Settings(
+        _env_file=None, instagram_app_id="app-1", instagram_app_secret=FAKE_CLIENT_SECRET,
+        instagram_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="dead", refresh_token=None, expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        scope="instagram_business_content_publish", provider="instagram", account_reference="default",
+        channel_id="17841400", invalid=True, last_refresh_error="token too young to refresh",
+    ))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not contact the refresh endpoint for an already-invalid credential")
+
+    with pytest.raises(ProviderAuthError, match="invalid"):
+        _resolve_fresh_instagram_access_token(
             settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
         )

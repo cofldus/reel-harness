@@ -59,6 +59,15 @@ def _seed_tiktok_credential(tmp_path, **overrides) -> None:
     _seed_credential(tmp_path, **defaults)
 
 
+def _seed_instagram_credential(tmp_path, **overrides) -> None:
+    defaults = dict(
+        provider="instagram", refresh_token=None, scope="instagram_business_content_publish",
+        channel_id="17841400", channel_title="my_reel_account",
+    )
+    defaults.update(overrides)
+    _seed_credential(tmp_path, **defaults)
+
+
 def test_doctor_reports_not_configured_with_no_client_and_no_credential(monkeypatch, tmp_path, capsys) -> None:
     _isolate(monkeypatch, tmp_path)
     exit_code = cli_main.main(["publisher-doctor", "youtube", "--json"])
@@ -217,6 +226,73 @@ def test_tiktok_doctor_check_remote_not_run_without_credentials(monkeypatch, tmp
     assert "NOT RUN" in remote_checks["remote_creator_info"]["detail"]
     app_review_check = next(c for c in payload["checks"] if c["name"] == "app_review_status")
     assert app_review_check["status"] == "NOT_CONFIGURED"
+
+
+def test_instagram_doctor_reports_not_configured_with_no_client_and_no_credential(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "instagram", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["overall"] == "NOT_CONFIGURED"
+    names = {c["name"] for c in payload["checks"]}
+    assert "oauth_client_config" in names
+    assert "account_credential" in names
+
+
+def test_instagram_doctor_never_prints_a_secret(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "test-app-id")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", "test-app-secret-value")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_instagram_credential(tmp_path, access_token="super-secret-access-token-xyz")
+    _isolate(monkeypatch, tmp_path)
+    cli_main.main(["publisher-doctor", "instagram", "--json"])
+    out = capsys.readouterr().out
+    assert "super-secret-access-token-xyz" not in out
+    assert "test-app-secret-value" not in out
+
+
+def test_instagram_doctor_passes_with_configured_client_and_fresh_credential(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "test-app-id")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", "test-app-secret")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_instagram_credential(tmp_path)
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "instagram", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["overall"] == "PASS"
+    account_check = next(c for c in payload["checks"] if c["name"] == "account_credential")
+    assert "17841400" in account_check["detail"]
+
+
+def test_instagram_doctor_reports_fail_for_an_invalid_credential(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "test-app-id")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", "test-app-secret")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_instagram_credential(tmp_path, invalid=True, last_refresh_error="token too young to refresh")
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "instagram", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["overall"] == "FAIL"
+    invalid_check = next(c for c in payload["checks"] if c["name"] == "credential_valid")
+    assert "token too young to refresh" in invalid_check["detail"]
+
+
+def test_instagram_doctor_check_remote_not_run_without_credentials(monkeypatch, tmp_path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    cli_main.main(["publisher-doctor", "instagram", "--check-remote", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    remote_checks = {c["name"]: c for c in payload["checks"] if c["name"].startswith("remote_")}
+    assert remote_checks["remote_token_refresh"]["status"] == "NOT_CONFIGURED"
+    assert "NOT RUN" in remote_checks["remote_token_refresh"]["detail"]
+    assert "NOT RUN" in remote_checks["remote_account_info"]["detail"]
+    eligibility_check = next(c for c in payload["checks"] if c["name"] == "account_eligibility_status")
+    assert eligibility_check["status"] == "NOT_CONFIGURED"
 
 
 def test_account_list_is_empty_with_nothing_saved(monkeypatch, tmp_path, capsys) -> None:

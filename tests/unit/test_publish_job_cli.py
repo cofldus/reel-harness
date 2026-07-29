@@ -191,6 +191,74 @@ def test_publish_job_dry_run_tiktok_requires_platform_options_confirmation(monke
     assert payload_confirmed["credential_configured"] is False
 
 
+def test_publish_job_dry_run_instagram_reports_an_instagram_shaped_preview_never_touching_the_network(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    job_id = _make_completed_job_id(tmp_path, "dry-run-instagram-1")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main(["publish-job", job_id, "--provider", "instagram", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1  # no credential configured, and every instagram publish is public
+    assert payload["requested_privacy_status"] == "PUBLIC"  # the only privacy value instagram has
+    assert payload["credential_configured"] is False
+    assert payload["public_upload_allowed"] is False  # public confirmation never given
+    assert payload["metadata_preview"] is None
+    assert payload["tiktok_preview"] is None
+    preview = payload["instagram_preview"]
+    assert preview["caption"]
+    assert preview["caption_error"] is None
+    assert preview["video_limits_error"] is None
+    assert preview["expected_api_mode"] == "FILE_UPLOAD_RESUMABLE"
+    assert preview["video_file_size_bytes"] > 0
+    assert "not fetched" in preview["account_info"]
+    assert "no credential configured" in preview["account_eligibility_status"]
+
+
+def test_publish_job_dry_run_instagram_public_privacy_requires_confirmation(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """Unlike YouTube/TikTok, instagram has no restrictive default at all
+    -- every publish is public, so the double-confirmation gate applies
+    even with no --privacy flag given."""
+    job_id = _make_completed_job_id(tmp_path, "dry-run-instagram-2")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main(["publish-job", job_id, "--provider", "instagram", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["public_upload_allowed"] is False
+
+    monkeypatch.setenv("REEL_HARNESS_ALLOW_PUBLIC_UPLOAD", "true")
+    exit_code_confirmed = cli_main.main([
+        "publish-job", job_id, "--provider", "instagram", "--confirm-public-upload", "--dry-run",
+    ])
+    payload_confirmed = json.loads(capsys.readouterr().out)
+    assert payload_confirmed["public_upload_allowed"] is True
+    assert exit_code_confirmed == 1  # still not "ready" overall -- no credential configured
+
+
+def test_publish_job_dry_run_instagram_requires_platform_options_confirmation(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    job_id = _make_completed_job_id(tmp_path, "dry-run-instagram-3")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main(["publish-job", job_id, "--provider", "instagram", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["requires_user_confirmation"] is True
+    assert payload["platform_options_confirmed"] is False
+    assert exit_code == 1
+
+    exit_code_confirmed = cli_main.main([
+        "publish-job", job_id, "--provider", "instagram", "--confirm-platform-options", "--dry-run",
+    ])
+    payload_confirmed = json.loads(capsys.readouterr().out)
+    assert payload_confirmed["platform_options_confirmed"] is True
+    assert exit_code_confirmed == 1  # still not "ready" overall -- no credential + no public confirmation
+
+
 def test_publish_job_real_run_creates_a_publication(monkeypatch, tmp_path, capsys) -> None:
     job_id = _make_completed_job_id(tmp_path, "real-run-1")
     _isolate(monkeypatch, tmp_path)
