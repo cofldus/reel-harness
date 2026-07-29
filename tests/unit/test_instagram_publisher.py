@@ -1,9 +1,11 @@
 """Contract tests for the Instagram Content Publishing API adapter
 (MockTransport -- no sockets, coexists with the network-block fixture;
-NOT a live Instagram E2E). Covers account-info + platform-options
-validation only -- container upload lands in a later commit. All tokens
-are obviously-fake placeholders."""
+NOT a live Instagram E2E). Covers account-info, container creation,
+resumable upload, processing status + publish, and platform-options
+validation. All tokens are obviously-fake placeholders."""
 from __future__ import annotations
+
+import urllib.parse
 
 import httpx
 import pytest
@@ -15,8 +17,10 @@ from reel_harness.core.errors import (
     PublisherPermissionDeniedError,
     PublisherPublishingLimitReachedError,
     TransientProviderError,
+    UploadRejectedError,
+    UploadSessionExpiredError,
 )
-from reel_harness.providers.base import CreatorInfo
+from reel_harness.providers.base import CreatorInfo, PublicationMetadata, UploadSessionHandle
 from reel_harness.providers.instagram_publisher import (
     CAPABILITIES,
     MAX_CAPTION_LENGTH,
@@ -193,16 +197,233 @@ def test_get_creator_info_500_then_success() -> None:
 
 # -- upload methods not yet implemented --------------------------
 
-def test_upload_methods_not_yet_implemented() -> None:
+def _metadata(**overrides) -> PublicationMetadata:
+    defaults: dict = dict(
+        title="A short-form video", description="", tags=[], category_id="",
+        privacy_status="PUBLIC", made_for_kids=False,
+        platform_options=InstagramReelsOptions().as_platform_options(),
+    )
+    defaults.update(overrides)
+    return PublicationMetadata(**defaults)
+
+
+def _container_response(**overrides) -> dict:
+    data = dict(id="container-id-1")
+    data.update(overrides)
+    return data
+
+
+# -- create_upload_session -------------------------------------------------------
+
+def test_create_upload_session_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/{API_VERSION}/{ACCOUNT_ID}/media"
+        body = dict(urllib.parse.parse_qsl(request.content.decode()))
+        assert body["media_type"] == "REELS"
+        assert body["upload_type"] == "resumable"
+        assert body["caption"] == "A short-form video"
+        assert body["share_to_feed"] == "false"
+        return httpx.Response(200, json=_container_response())
+
+    publisher = _publisher(handler)
+    handle = publisher.create_upload_session(_metadata(), 1_000_000, "video/mp4", "cid-1")
+    assert handle.session_reference == f"https://rupload.facebook.com/ig-api-upload/{API_VERSION}/container-id-1"
+    assert handle.total_bytes == 1_000_000
+    assert handle.chunk_size == 1_000_000  # whole file in one shot -- see docstring
+    assert handle.provider_reference == "container-id-1"
+    publisher.close()
+
+
+def test_create_upload_session_uses_build_caption_validation() -> None:
+    publisher = _publisher(lambda r: (_ for _ in ()).throw(AssertionError("must not call the network")))
+    with pytest.raises(MetadataInvalidError, match="2200"):
+        publisher.create_upload_session(
+            _metadata(title="x" * (MAX_CAPTION_LENGTH + 1)), 100, "video/mp4", "cid",
+        )
+    publisher.close()
+
+
+def test_create_upload_session_missing_container_id_is_transient() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={}))
+    with pytest.raises(TransientProviderError):
+        publisher.create_upload_session(_metadata(), 100, "video/mp4", "cid")
+    publisher.close()
+
+
+def test_create_upload_session_embedded_error_maps_to_auth() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "error": {"message": "bad token", "type": "OAuthException"},
+    }))
+    with pytest.raises(ProviderAuthError):
+        publisher.create_upload_session(_metadata(), 100, "video/mp4", "cid")
+    publisher.close()
+
+
+# -- upload_chunk -------------------------------------------------------
+
+def _session(**overrides) -> UploadSessionHandle:
+    defaults: dict = dict(
+        session_reference=f"https://rupload.facebook.com/ig-api-upload/{API_VERSION}/container-id-1",
+        total_bytes=1000, chunk_size=1000, provider_reference="container-id-1",
+    )
+    defaults.update(overrides)
+    return UploadSessionHandle(**defaults)
+
+
+def test_upload_chunk_success_completes_in_one_shot() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == f"OAuth {FAKE_TOKEN}"
+        assert request.headers["offset"] == "0"
+        assert request.headers["file_size"] == "1000"
+        return httpx.Response(200, json={"success": True, "message": "Upload successful."})
+
+    publisher = _publisher(handler)
+    result = publisher.upload_chunk(_session(), b"x" * 1000, 0, 1000)
+    assert result.completed is True
+    assert result.bytes_uploaded == 1000
+    assert result.provider_video_id == "container-id-1"
+    publisher.close()
+
+
+def test_upload_chunk_404_is_session_expired() -> None:
+    publisher = _publisher(lambda r: httpx.Response(404))
+    with pytest.raises(UploadSessionExpiredError):
+        publisher.upload_chunk(_session(), b"x" * 1000, 0, 1000)
+    publisher.close()
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+def test_upload_chunk_5xx_is_transient(status_code: int) -> None:
+    publisher = _publisher(lambda r: httpx.Response(status_code))
+    with pytest.raises(TransientProviderError):
+        publisher.upload_chunk(_session(), b"x" * 1000, 0, 1000)
+    publisher.close()
+
+
+def test_upload_chunk_retriable_failure_is_transient() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "debug_info": {"retriable": True, "type": "TransientError", "message": "try again"},
+    }))
+    with pytest.raises(TransientProviderError):
+        publisher.upload_chunk(_session(), b"x" * 1000, 0, 1000)
+    publisher.close()
+
+
+def test_upload_chunk_non_retriable_failure_is_rejected() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "debug_info": {"retriable": False, "type": "ProcessingFailedError", "message": "bad video"},
+    }))
+    with pytest.raises(UploadRejectedError):
+        publisher.upload_chunk(_session(), b"x" * 1000, 0, 1000)
+    publisher.close()
+
+
+# -- query_upload_offset -------------------------------------------------------
+
+def test_query_upload_offset_always_raises_session_expired() -> None:
+    """No documented way to query Instagram's confirmed offset -- see
+    docs/PUBLISHING.md. This forces a fresh container rather than
+    guessing."""
     publisher = _publisher(lambda r: httpx.Response(200))
-    with pytest.raises(NotImplementedError):
-        publisher.create_upload_session(None, 0, "video/mp4", "cid")
-    with pytest.raises(NotImplementedError):
-        publisher.upload_chunk(None, b"", 0, 0)
-    with pytest.raises(NotImplementedError):
-        publisher.query_upload_offset(None, 0)
-    with pytest.raises(NotImplementedError):
-        publisher.get_processing_status("id")
+    with pytest.raises(UploadSessionExpiredError):
+        publisher.query_upload_offset(_session(), 1000)
+    publisher.close()
+
+
+# -- get_processing_status -------------------------------------------------------
+
+def test_get_processing_status_in_progress() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={"status_code": "IN_PROGRESS"}))
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "processing"
+    publisher.close()
+
+
+def test_get_processing_status_error() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={"status_code": "ERROR"}))
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "failed"
+    assert status.failure_reason == "container_error"
+    publisher.close()
+
+
+def test_get_processing_status_expired() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={"status_code": "EXPIRED"}))
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "failed"
+    assert status.failure_reason == "container_expired"
+    publisher.close()
+
+
+def test_get_processing_status_already_published_never_republishes() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"status_code": "PUBLISHED"})
+
+    publisher = _publisher(handler)
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "succeeded"
+    assert status.publication_url is None  # never fabricated
+    assert not any("media_publish" in c for c in calls)  # never re-published
+    publisher.close()
+
+
+def test_get_processing_status_finished_publishes_and_fetches_permalink() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media_publish"):
+            body = dict(urllib.parse.parse_qsl(request.content.decode()))
+            assert body["creation_id"] == "container-id-1"
+            return httpx.Response(200, json={"id": "media-id-1"})
+        if request.url.path == f"/{API_VERSION}/media-id-1":
+            assert request.url.params.get("fields") == "permalink"
+            return httpx.Response(200, json={"permalink": "https://www.instagram.com/reel/abc123/"})
+        return httpx.Response(200, json={"status_code": "FINISHED"})
+
+    publisher = _publisher(handler)
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "succeeded"
+    assert status.publication_url == "https://www.instagram.com/reel/abc123/"
+    publisher.close()
+
+
+def test_get_processing_status_finished_publish_missing_media_id_is_transient() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media_publish"):
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"status_code": "FINISHED"})
+
+    publisher = _publisher(handler)
+    with pytest.raises(TransientProviderError):
+        publisher.get_processing_status("container-id-1")
+    publisher.close()
+
+
+def test_get_processing_status_permalink_fetch_failure_is_not_fatal() -> None:
+    """The publish itself already succeeded by the time this is called --
+    a failed permalink lookup must never turn a real success into an
+    error."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media_publish"):
+            return httpx.Response(200, json={"id": "media-id-1"})
+        if request.url.path == f"/{API_VERSION}/media-id-1":
+            return httpx.Response(500)
+        return httpx.Response(200, json={"status_code": "FINISHED"})
+
+    publisher = _publisher(handler)
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "succeeded"
+    assert status.publication_url is None
+    publisher.close()
+
+
+def test_get_processing_status_unknown_status_keeps_polling_never_succeeds() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "status_code": "SOME_FUTURE_STATUS_THIS_ADAPTER_DOES_NOT_KNOW",
+    }))
+    status = publisher.get_processing_status("container-id-1")
+    assert status.processing_status == "processing"
     publisher.close()
 
 

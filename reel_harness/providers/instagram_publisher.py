@@ -15,6 +15,8 @@ from reel_harness.core.errors import (
     PublisherPublishingLimitReachedError,
     PublisherRateLimitedError,
     TransientProviderError,
+    UploadRejectedError,
+    UploadSessionExpiredError,
 )
 from reel_harness.providers.base import (
     CreatorInfo,
@@ -265,23 +267,163 @@ class InstagramPublisher:
             warnings=warnings,
         )
 
-    # -- not yet implemented (container publisher -- a later commit) --------
+    # -- container creation ---------------------------------------------------
 
     def create_upload_session(
         self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,
     ) -> UploadSessionHandle:
-        raise NotImplementedError("instagram container/upload lands in a later Phase 3D commit")
+        caption = build_caption(metadata.title)
+        options = metadata.platform_options or {}
+        body: dict[str, Any] = {
+            "media_type": "REELS", "upload_type": "resumable", "caption": caption,
+            "share_to_feed": bool(options.get("share_to_feed", False)),
+        }
+        if options.get("cover_url"):
+            body["cover_url"] = options["cover_url"]
+        else:
+            body["thumb_offset"] = int(options.get("thumb_offset_ms", 0))
+        collaborators = options.get("collaborators") or []
+        if collaborators:
+            body["collaborators"] = collaborators
+        if options.get("location_id"):
+            body["location_id"] = options["location_id"]
+        if options.get("audio_name"):
+            body["audio_name"] = options["audio_name"]
+
+        response = self._request_with_retry(
+            "POST", self._versioned_url(f"{self._account_id}/media"), data=body,
+        )
+        payload = _parse_graph_response(response, context="container creation")
+        container_id = payload.get("id")
+        if not container_id:
+            raise TransientProviderError("container creation response missing id")
+        # This project only ever sends the whole file in one request (see
+        # docs/PUBLISHING.md -- multi-chunk resumability is not confirmed
+        # against primary docs), so chunk_size=total_bytes makes
+        # worker.publish_runner's generic chunking loop call upload_chunk
+        # exactly once with the entire file.
+        upload_url = f"https://rupload.facebook.com/ig-api-upload/{self._api_version}/{container_id}"
+        return UploadSessionHandle(
+            session_reference=upload_url, total_bytes=total_bytes, chunk_size=total_bytes,
+            provider_reference=container_id,
+        )
+
+    # -- upload -----------------------------------------------------------
 
     def upload_chunk(
         self, session: UploadSessionHandle, chunk: bytes, start_byte: int, total_bytes: int,
     ) -> UploadChunkResult:
-        raise NotImplementedError("instagram container/upload lands in a later Phase 3D commit")
+        """A single whole-file POST to rupload.facebook.com -- see
+        create_upload_session's docstring for why chunk_size=total_bytes
+        guarantees this is only ever called once per session. Uses header-
+        based auth (`Authorization: OAuth ...`), a real, documented
+        difference from graph.instagram.com's query-param access_token
+        convention used by every other call this adapter makes."""
+        headers = {
+            "Authorization": f"OAuth {self._access_token_provider()}",
+            "offset": "0", "file_size": str(total_bytes),
+            "Content-Type": "application/octet-stream",
+        }
+        try:
+            response = self._client.post(session.session_reference, content=chunk, headers=headers)
+        except self._httpx.TimeoutException as exc:
+            raise TransientProviderError(f"chunk upload timed out ({type(exc).__name__})") from exc
+        except self._httpx.HTTPError as exc:
+            raise TransientProviderError(f"chunk upload transport error ({type(exc).__name__})") from exc
+
+        if response.status_code == 404:
+            raise UploadSessionExpiredError("instagram upload container no longer valid")
+        if response.status_code in (500, 502, 503, 504):
+            raise TransientProviderError(f"chunk upload returned HTTP {response.status_code}, retryable")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise TransientProviderError("upload response was not valid JSON") from exc
+
+        if payload.get("success") is True:
+            return UploadChunkResult(
+                bytes_uploaded=total_bytes, completed=True, provider_video_id=session.provider_reference,
+            )
+        debug = payload.get("debug_info") or {}
+        if debug.get("retriable"):
+            raise TransientProviderError(f"instagram upload failed (retriable): {debug.get('message')}")
+        raise UploadRejectedError(f"instagram upload rejected: {debug.get('message', 'unknown error')}")
 
     def query_upload_offset(self, session: UploadSessionHandle, total_bytes: int) -> int | None:
-        raise NotImplementedError("instagram container/upload lands in a later Phase 3D commit")
+        """Instagram's docs do not confirm a way to query a resumable
+        upload session's already-accepted byte offset -- the documented
+        example is a single whole-file POST with offset=0, not a genuine
+        multi-request resumable sequence (see docs/PUBLISHING.md's "not
+        specified" section). Treating every resume attempt as expired is
+        the safe, conservative choice, the same one
+        providers.tiktok_publisher.query_upload_offset makes for its own
+        unconfirmed offset-query gap -- worker.publish_runner already
+        starts a brand-new session from byte 0 on
+        UploadSessionExpiredError."""
+        raise UploadSessionExpiredError(
+            "instagram upload sessions cannot be safely resumed (no documented offset-query endpoint) "
+            "-- starting a new container from byte 0"
+        )
+
+    # -- processing status + publish ------------------------------------------
 
     def get_processing_status(self, provider_video_id: str) -> ProcessingStatusResult:
-        raise NotImplementedError("instagram container/upload lands in a later Phase 3D commit")
+        """`provider_video_id` here is the CONTAINER id (see
+        create_upload_session), not yet Instagram's real media id --
+        Instagram's flow needs an explicit `media_publish` call once the
+        container reaches FINISHED, unlike YouTube/TikTok where upload
+        completion alone is the whole story. That publish call happens
+        HERE, transparently, the first time this method observes
+        FINISHED -- never on every poll (a `PUBLISHED` container status
+        on a later poll means a previous call to this method already
+        published it, and is never re-published)."""
+        container_id = provider_video_id
+        status_response = self._request_with_retry(
+            "GET", self._versioned_url(container_id), params={"fields": "status_code"},
+        )
+        payload = _parse_graph_response(status_response, context="container status")
+        status_code = payload.get("status_code")
+
+        if status_code == "ERROR":
+            return ProcessingStatusResult(processing_status="failed", failure_reason="container_error")
+        if status_code == "EXPIRED":
+            return ProcessingStatusResult(processing_status="failed", failure_reason="container_expired")
+        if status_code == "PUBLISHED":
+            # Already published by an earlier call to this method (or a
+            # crash happened between that publish succeeding and this
+            # process recording it) -- never re-publish. The real media
+            # id/permalink from that earlier call may be unrecoverable
+            # here; never fabricated -- see docs/PUBLISHING.md.
+            return ProcessingStatusResult(processing_status="succeeded", publication_url=None)
+        if status_code == "FINISHED":
+            publish_response = self._request_with_retry(
+                "POST", self._versioned_url(f"{self._account_id}/media_publish"),
+                data={"creation_id": container_id},
+            )
+            publish_payload = _parse_graph_response(publish_response, context="media publish")
+            media_id = publish_payload.get("id")
+            if not media_id:
+                raise TransientProviderError("media_publish response missing media id")
+            return ProcessingStatusResult(
+                processing_status="succeeded", publication_url=self._fetch_permalink(media_id),
+            )
+        # IN_PROGRESS, or anything this adapter doesn't recognize -> keep
+        # polling, never treated as success.
+        return ProcessingStatusResult(processing_status="processing")
+
+    def _fetch_permalink(self, media_id: str) -> str | None:
+        """Best-effort only -- the publish itself already succeeded by
+        the time this is called, so a failure here is never fatal to the
+        publication, only to knowing its public URL right away."""
+        try:
+            response = self._request_with_retry(
+                "GET", self._versioned_url(media_id), params={"fields": "permalink"},
+            )
+            payload = _parse_graph_response(response, context="media permalink")
+            permalink = payload.get("permalink")
+            return str(permalink) if permalink else None
+        except (ProviderAuthError, PublisherPermissionDeniedError, TransientProviderError):
+            return None
 
     # -- shared request plumbing --------------------------------------------
 
