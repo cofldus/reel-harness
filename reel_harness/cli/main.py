@@ -2647,6 +2647,46 @@ def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
     return daemon.run()
 
 
+def cmd_serve(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Runs the API, render worker, and publisher worker together in one
+    supervised process -- see ops.supervisor.Supervisor for the failure
+    policy. Each of --api/--render-worker/--publisher-worker can be
+    disabled individually (all three run by default)."""
+    from reel_harness.ops.supervisor import Supervisor, SupervisorConfig
+    from reel_harness.worker.daemon import DaemonConfig, default_worker_id
+    from reel_harness.worker.publish_daemon import PublisherDaemonConfig, default_publisher_worker_id
+
+    settings = ctx.settings
+    config = SupervisorConfig(
+        run_api=args.api, run_render_worker=args.render_worker, run_publisher_worker=args.publisher_worker,
+        host=args.host, port=args.port,
+        render_workers=args.render_workers, publisher_workers=args.publisher_workers,
+        shutdown_timeout_seconds=args.shutdown_timeout,
+        render_daemon_config=DaemonConfig(
+            worker_id=default_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
+            lease_timeout_seconds=settings.lease_timeout_seconds,
+            heartbeat_interval_seconds=settings.lease_heartbeat_seconds,
+        ),
+        publisher_daemon_config=PublisherDaemonConfig(
+            worker_id=default_publisher_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
+            lease_timeout_seconds=settings.lease_timeout_seconds,
+            process_upload=True, process_status=True,
+        ),
+    )
+    supervisor = Supervisor(ctx, config)
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        supervisor.request_stop(f"signal_{signum}")
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return supervisor.run()
+
+
 def build_parser() -> argparse.ArgumentParser:
     from reel_harness._version import __version__
 
@@ -2866,6 +2906,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only lease processing-poll-lane publications (omit both for both)",
     )
     publisher_run.set_defaults(func=cmd_publisher_run)
+
+    serve = sub.add_parser(
+        "serve", help="Run the API, render worker, and publisher worker together in one supervised process",
+    )
+    serve.add_argument("--api", dest="api", action="store_true", default=True, help="Default: on")
+    serve.add_argument("--no-api", dest="api", action="store_false")
+    serve.add_argument(
+        "--render-worker", dest="render_worker", action="store_true", default=True, help="Default: on",
+    )
+    serve.add_argument("--no-render-worker", dest="render_worker", action="store_false")
+    serve.add_argument(
+        "--publisher-worker", dest="publisher_worker", action="store_true", default=True, help="Default: on",
+    )
+    serve.add_argument("--no-publisher-worker", dest="publisher_worker", action="store_false")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--render-workers", type=int, default=1, help="Thread count for the render worker (SQLite: keep this low)",
+    )
+    serve.add_argument(
+        "--publisher-workers", type=int, default=1,
+        help="Thread count for the publisher worker (SQLite: keep this low)",
+    )
+    serve.add_argument(
+        "--shutdown-timeout", type=float, default=30.0, help="Seconds to wait for graceful shutdown",
+    )
+    serve.set_defaults(func=cmd_serve)
 
     publication_status = sub.add_parser(
         "publication-status", help="Read-only: show a publication's current DB state",

@@ -171,3 +171,86 @@ def test_get_and_cancel_publication_not_found_returns_404(tmp_path) -> None:
         assert cancel_response.status_code == 404
     finally:
         app.dependency_overrides.clear()
+
+
+def test_status_endpoint_reports_version_schema_and_counts(tmp_path) -> None:
+    import reel_harness.api.app as app_module
+
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        response = client.get("/status")
+        assert response.status_code == 200
+        body = response.json()
+        from reel_harness._version import __version__
+        from reel_harness.db.schema import SCHEMA_VERSION
+
+        assert body["version"] == __version__
+        assert body["schema_version"] == SCHEMA_VERSION
+        assert body["schema_version_expected"] == SCHEMA_VERSION
+        assert body["uptime_seconds"] >= 0
+        assert body["job_status_counts"].get("QUEUED", 0) >= 1  # create_job() auto-transitions CREATED -> QUEUED
+        assert body["stale_job_leases"] == 0
+        assert body["stale_publication_leases"] == 0
+        assert body["supervisor"] is None  # not running inside `serve`
+    finally:
+        app.dependency_overrides.clear()
+        app_module._supervisor = None
+
+
+def test_status_endpoint_never_exposes_secrets(tmp_path) -> None:
+    import json
+
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        response = client.get("/status")
+        blob = json.dumps(response.json()).lower()
+        for forbidden in ("api_key", "access_token", "client_secret", "authorization", "test-key"):
+            assert forbidden not in blob
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_status_endpoint_reports_stale_leases(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.core.state_machine import JobStatus
+
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k-stale", topic="t")
+        with ctx.session_factory() as session:
+            from reel_harness.db.models import Job
+
+            db_job = session.get(Job, job.id)
+            db_job.status = JobStatus.RENDERING.value
+            db_job.locked_by = "dead-worker"
+            db_job.heartbeat_at = datetime.now(UTC) - timedelta(seconds=ctx.settings.lease_timeout_seconds + 60)
+            session.commit()
+        response = client.get("/status")
+        assert response.json()["stale_job_leases"] == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_status_endpoint_no_api_key_required(tmp_path) -> None:
+    """Deliberately no auth requirement on /status (matches /healthz,
+    /readyz) -- it exposes no secret, just operational counts, and an
+    operator's monitoring stack should not need a credential just to
+    scrape health/status."""
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        response = client.get("/status")
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()

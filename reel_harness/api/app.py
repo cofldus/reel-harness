@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -20,6 +21,13 @@ from reel_harness.media.deps import check_ffmpeg_available
 
 app = FastAPI(title="Reel Harness API")
 _ctx: AppContext | None = None
+# Set by ops.supervisor.Supervisor._start_api() when the API is running
+# inside `reel-harness serve` -- used only to enrich /status with live
+# component/fatal-error state; None when the API runs standalone (e.g.
+# under a bare uvicorn invocation with no supervisor), which /status
+# reports honestly rather than guessing.
+_supervisor: object | None = None
+_process_started_at = time.monotonic()
 
 
 def get_context() -> AppContext:
@@ -192,6 +200,64 @@ def readyz_publisher(account: str = "default", ctx: AppContext = Depends(get_con
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"ready": ready, "checks": checks},
     )
+
+
+@app.get("/status")
+def get_status(ctx: AppContext = Depends(get_context)) -> dict:
+    """Operational status for dashboards/incident triage -- version, config
+    fingerprint, schema, uptime, job/publication status breakdowns, stale
+    lease counts, and (only when running inside `reel-harness serve`) live
+    component/fatal-error state. Never a secret, token, script, prompt, or
+    job topic/title -- only counts and status enum values."""
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness._version import __version__
+    from reel_harness.core.state_machine import PUBLICATION_ACTIVE_STATUSES, JobStatus
+    from reel_harness.db.models import Job, Publication
+    from reel_harness.worker.policy import ACTIVE_STAGE_STATUSES
+
+    with ctx.session_factory() as session:
+        schema_version = session.execute(text("SELECT version FROM schema_migrations")).scalar_one_or_none()
+        job_status_counts: dict[str, int] = {}
+        for row in session.execute(text("SELECT status, COUNT(*) FROM jobs GROUP BY status")):
+            job_status_counts[row[0]] = row[1]
+        publication_status_counts: dict[str, int] = {}
+        for row in session.execute(text("SELECT status, COUNT(*) FROM publications GROUP BY status")):
+            publication_status_counts[row[0]] = row[1]
+
+        cutoff = datetime.now(UTC) - timedelta(seconds=ctx.settings.lease_timeout_seconds)
+        stale_job_leases = session.query(Job).filter(
+            Job.locked_by.isnot(None), Job.status.in_([s.value for s in ACTIVE_STAGE_STATUSES]),
+            Job.heartbeat_at < cutoff,
+        ).count()
+        stale_publication_leases = session.query(Publication).filter(
+            Publication.locked_by.isnot(None),
+            Publication.status.in_([s.value for s in PUBLICATION_ACTIVE_STATUSES]),
+            Publication.heartbeat_at < cutoff,
+        ).count()
+
+    supervisor_status: dict | None = None
+    if _supervisor is not None:
+        supervisor_status = {
+            "components": _supervisor.component_status(),  # type: ignore[attr-defined]
+            "fatal_errors": dict(_supervisor.fatal_errors),  # type: ignore[attr-defined]
+        }
+
+    return {
+        "version": __version__,
+        "config_fingerprint": ctx.config_fingerprint(),
+        "schema_version": schema_version,
+        "schema_version_expected": SCHEMA_VERSION,
+        "uptime_seconds": round(time.monotonic() - _process_started_at, 3),
+        "job_status_counts": job_status_counts,
+        "publication_status_counts": publication_status_counts,
+        "queue_depth": job_status_counts.get(JobStatus.QUEUED.value, 0) + job_status_counts.get(
+            JobStatus.RETRY_WAIT.value, 0,
+        ),
+        "stale_job_leases": stale_job_leases,
+        "stale_publication_leases": stale_publication_leases,
+        "supervisor": supervisor_status,
+    }
 
 
 @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_key)])
