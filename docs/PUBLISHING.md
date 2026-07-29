@@ -568,3 +568,266 @@ raises it). `app_review_required` is the one genuinely new outcome:
 a proactive, read-only `creator_info` check on a publication that's never
 even started uploading, surfacing an unaudited-app block before the
 operator wastes a retry cycle discovering it the hard way.
+
+# Reel Harness — Publishing (Phase 3D: Instagram Reels)
+
+## Official documentation consulted (checked 2026-07-29)
+
+Fetched directly from `developers.facebook.com` (Meta for Developers) —
+not blog posts, not third-party SDK examples. Where a page returned a 404
+or a fact could only be corroborated by secondary sources, this is stated
+explicitly below rather than presented as primary-source-confirmed.
+
+- Content Publishing overview:
+  `developers.facebook.com/docs/instagram-platform/content-publishing/`
+- `POST /{ig-user-id}/media` reference (container creation):
+  `developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media/`
+- Business Login for Instagram (Instagram Login for Business) OAuth guide:
+  `developers.facebook.com/documentation/instagram-platform/instagram-api-with-instagram-login/business-login`
+- Secondary corroboration only (not primary-source-fetched successfully
+  this session -- `developers.facebook.com/docs/instagram-platform/reference/error-codes`
+  and `.../get-started` both returned HTTP 404 when fetched directly):
+  general error-code shape, exact current API version number. Treated as
+  **not independently confirmed** below, same honesty standard TikTok's
+  research (Phase 3C) used for its own unconfirmed items.
+
+## Account and authorization model
+
+Two distinct login/account models exist for the Instagram Platform API:
+
+- **Instagram Login for Business** ("Business Login for Instagram") -- a
+  direct Instagram OAuth flow. The account model here is an Instagram
+  professional (Business/Creator) account that can exist **without**
+  requiring a linked Facebook Page for this specific login method (per
+  Meta's own description: "businesses and creators with Instagram
+  professional accounts that only have a presence on Instagram and use
+  Business Login for Instagram").
+- **Facebook Login for Business** -- accesses an Instagram professional
+  account **through** a linked Facebook Page and Meta Business Manager;
+  more setup overhead (Page + Business Manager), aimed at agencies/
+  platforms managing many client accounts centrally.
+
+**Design decision: this project implements Instagram Login for Business
+only.** It's the simpler of the two flows, requires no Facebook Page or
+Business Manager setup, and matches this project's single-user, local-
+first design better than the Page-mediated alternative. Facebook Login
+for Business is explicitly out of scope for Phase 3D (an adapter built on
+the same `Publisher` Protocol could add it later without touching core
+code -- same extension-point pattern as everything else in this project).
+
+### OAuth endpoints (Instagram Login for Business)
+
+- Authorization endpoint: `https://www.instagram.com/oauth/authorize`
+- Short-lived token exchange: `https://api.instagram.com/oauth/access_token`
+- Long-lived token exchange: `https://graph.instagram.com/access_token`
+- Token refresh: `https://graph.instagram.com/refresh_access_token`
+- The authorization code is valid for 1 hour and single-use.
+- Long-lived tokens are valid ~60 days and refreshable once at least 24
+  hours old (and not yet expired) -- refreshing extends another ~60 days,
+  the same "keep refreshing before it dies" pattern YouTube/TikTok's
+  adapters already use, just with a much longer window than either.
+- PKCE: not mentioned as supported or required anywhere in the fetched
+  guide (unlike YouTube's and TikTok's installed-app flows, both of which
+  explicitly document PKCE) -- **not independently confirmed either way**,
+  so this adapter still generates and sends a PKCE challenge (cheap,
+  harmless if ignored, consistent with this project's other two OAuth
+  flows) but does not depend on the authorization server requiring it.
+- `redirect_uri` must exactly match a URI pre-registered in the Meta App
+  Dashboard -- no documented loopback-port exception (same situation as
+  TikTok's redirect_uri constraint) -- so `publisher-auth instagram` reuses
+  the exact same dual loopback-or-manual-paste flow already built for
+  TikTok in `publisher.oauth_common`/`oauth_tiktok`'s pattern, generalized
+  rather than re-implemented.
+
+### Permissions (scopes)
+
+`instagram_business_content_publish` (required to publish) plus
+`instagram_business_basic` (required for basic account read access, e.g.
+account-info/eligibility checks). `instagram_business_manage_comments`/
+`instagram_business_manage_messages` are not requested -- this adapter
+never manages comments or DMs. Every permission requires Meta App Review
+before it works on an account this app doesn't own -- the exact analogue
+of TikTok's app-review gate, surfaced the same way (see below).
+
+## Reels publishing flow
+
+Three steps, all against `graph.instagram.com`/`graph.facebook.com` (the
+metadata calls) plus one upload call against a **different host**
+(`rupload.facebook.com`, for the resumable-upload path):
+
+1. **Create a media container**: `POST /{ig-user-id}/media` with
+   `media_type=REELS` and either `video_url` (a URL Meta's own servers
+   fetch -- see "Two upload paths" below) or `upload_type=resumable` (this
+   project's chosen path). Optional: `caption` (max 2200 chars, <=30
+   hashtags, <=20 @mentions -- enforced client-side the same way TikTok's
+   `build_post_text` is), `share_to_feed` (Feed+Reels tabs vs Reels-tab-
+   only), `cover_url`/`thumb_offset` (custom cover vs a frame-offset
+   thumbnail, `cover_url` taking precedence), `collaborators` (<=3
+   usernames), `user_tags`, `location_id`, `audio_name`. Response:
+   `{"id": "<container_id>"}`.
+2. **(resumable path only) Upload the binary**: `POST
+   https://rupload.facebook.com/ig-api-upload/{api_version}/{container_id}`
+   with headers `Authorization: OAuth {access_token}`, `offset: 0`,
+   `file_size: {total_bytes}`, and the raw video bytes as the body.
+   Response: `{"success": true, "message": "Upload successful."}` or a
+   `{"debug_info": {"retriable": ..., "type": ..., "message": ...}}`
+   failure envelope.
+3. **Poll container status**: `GET /{container_id}?fields=status_code`.
+   Documented values: `IN_PROGRESS`, `FINISHED` (ready to publish --
+   the only value the fetched guide explicitly defines the meaning of in
+   full), `ERROR`, `EXPIRED` (not published within 24 hours of creation),
+   `PUBLISHED`. Meta's own guidance: poll roughly once a minute, for no
+   more than 5 minutes.
+4. **Publish**: `POST /{ig-user-id}/media_publish` with `creation_id`
+   (the container ID). Response: the real Instagram media ID on success.
+
+### Two upload paths -- why this project uses `upload_type=resumable`, not `video_url`
+
+The `video_url` path requires Meta's own servers to fetch the video from
+a **publicly reachable HTTPS URL** at the moment of container creation --
+this is the path the Phase 3D request assumed was the only option, and
+sketched an elaborate `MediaDeliveryBackend`/ephemeral-URL-hosting
+abstraction to work around.
+
+Research this session found a second, equally official path:
+`upload_type=resumable`, which uploads the file's bytes **directly** to
+`rupload.facebook.com` -- no public URL, no hosting, no tunnel. This is
+structurally the same shape as YouTube's and TikTok's own upload
+protocols (a direct authenticated PUT/POST of file bytes to a provider-
+controlled endpoint), and it's the path this project implements.
+
+**This is a deliberate, reasoned deviation from the request's assumed
+architecture, not an oversight** -- building and operating a public HTTPS
+endpoint just to hand Meta a URL would be a materially larger, riskier
+surface (a new network service, TLS, a public listener, a real attack
+surface for `docs/OPERATIONS.md`'s cancellation/security model to cover)
+for a local-first, single-user tool that doesn't otherwise run any public
+service. `MediaDeliveryBackend` as sketched in the request (Protocol +
+pluggable backends + TTL + revoke) is still built (see below) as a
+narrow, honestly-scoped concept -- but it exists to describe *this
+adapter's internal resumable-upload session*, not to stand up a new
+public HTTP server. A `video_url`-based backend (accepting an operator-
+supplied, already-hosted HTTPS URL -- e.g. one they generated with their
+own S3/CDN setup) is supported as an alternative `MediaDeliveryBackend`
+implementation for an operator who already has such a URL, but building
+new public-hosting infrastructure is explicitly out of scope, matching
+the project's existing "no cloud secret manager/queue/storage this
+phase" boundary.
+
+**Not independently confirmed**: whether the resumable-upload endpoint
+supports true multi-request chunking with a resumable offset (analogous
+to YouTube's `308 Resume Incomplete`/TikTok's -- nonexistent -- offset
+query). The documented example sends the entire file in one POST with
+`offset: 0` and a `file_size` header describing the whole file; no
+worked example of a genuine multi-chunk sequence (`offset: N` on a
+second request) was found. This project therefore treats it the same way
+Phase 3C treated TikTok's unconfirmed resumability: **a single-shot
+upload of the whole file**, and any interruption is handled by starting a
+brand-new container + fresh upload attempt rather than guessing at
+undocumented multi-chunk semantics. `REEL_HARNESS_INSTAGRAM_UPLOAD_CHUNK_SIZE`
+does not exist as a setting for this reason -- there is no confirmed
+chunking contract to size chunks against.
+
+### Video/container specifications (fetched from the `ig-user/media` reference)
+
+Container: MOV or MP4, no edit lists, moov atom at front. Video codec:
+HEVC or H264, progressive scan, closed GOP, 4:2:0 chroma subsampling.
+Frame rate 23-60 FPS. Resolution: max 1920px horizontal, 9:16 recommended.
+Aspect ratio: 0.01:1 to 10:1. **Duration: 3 seconds minimum, 15 minutes
+maximum.** Bitrate: VBR, 25 Mbps max. Audio: AAC, <=48kHz, mono/stereo,
+128kbps. **File size: 300 MB maximum.** Cover photo (if `cover_url` used):
+JPEG, <=8 MB, 9:16 recommended.
+
+Containers expire 24 hours after creation if never published. Maximum
+400 containers per account per rolling 24-hour period (a *creation* cap,
+distinct from the *publish* rate limit below).
+
+### Publishing limit
+
+`GET /{ig-user-id}/content_publishing_limit` reports current usage
+against a documented cap of **100 API-published posts per 24-hour moving
+period**. This project's `get_creator_info`-equivalent (`get_account_info`
+below) always queries this fresh before every publish attempt, the same
+"never trust an old snapshot" discipline TikTok's `creator_info` uses --
+a publishing-limit rejection is surfaced as an explicit
+`PUBLISHING_LIMIT_REACHED` error, never silently retried into a second
+rate-limit rejection.
+
+### Error handling
+
+Documented error identifiers found: `EXPIRED` (container status),
+`ERROR` (container status), branded-content-specific
+`INSTAGRAM_PLATFORM_API__PERMISSION`/`INSTAGRAM_PLATFORM_API__INVALID_PARAM`
+(not used by this adapter, since collaborators/branded-content tagging
+isn't implemented). Beyond these, Meta's general Graph API error envelope
+(`{"error": {"message", "type", "code", "error_subcode", "fbtrace_id"}}`)
+is assumed for HTTP-level failures, consistent with every other Graph API
+surface -- but a specific, complete error-code table for the content-
+publishing endpoints specifically was **not independently confirmed**
+(the dedicated error-codes reference page 404'd when fetched directly
+this session). The adapter classifies failures from the live HTTP status
+code and error envelope rather than a hardcoded exhaustive code table,
+the same conservative approach `providers.tiktok_publisher._parse_envelope`
+already takes for TikTok's own not-fully-enumerated error vocabulary.
+
+### What the official docs do NOT specify (recorded, not guessed at)
+
+True multi-chunk resumable upload semantics for the `rupload.facebook.com`
+endpoint (see above). A complete, dedicated error-code/subcode table for
+content-publishing failures specifically (the general error-codes
+reference page could not be fetched this session). Whether Facebook Page
+linkage is required or optional for the Instagram-Login-for-Business
+account model specifically (the fetched Business Login guide is silent on
+this; account eligibility is instead confirmed empirically via a fresh
+account-info call before every publish, never assumed either way).
+
+## Instagram capability model
+
+`providers.base.PublisherCapabilities` for `"instagram"`:
+`supports_direct_publish=True`, `supports_upload_only=False` (no
+inbox-draft concept exists), `supports_scheduled_publish=False` (not
+documented for this API), `supports_public_privacy=True` (Reels
+publishing is inherently public -- there is no private/unlisted
+equivalent), `supports_unlisted_privacy=False`, `supports_public_privacy`
+being the ONLY privacy value means `public_privacy_values` equals the
+entire `privacy_values` set -- every publish requires the double-
+confirmation gate, no restrictive default exists to fall back to (unlike
+YouTube's `private` or TikTok's `SELF_ONLY`). `supports_comments_control=False`,
+`supports_remix_control=False` (not documented as configurable via this
+API). `supports_processing_poll=True` (container status polling).
+`supports_remote_delete=False`. `requires_creator_info=True` (this
+project's generic name for account-info/publishing-limit checks).
+`requires_user_confirmation=True` (share_to_feed/cover/collaborator
+choices are consequential per-post decisions, same reasoning as TikTok's
+comment/duet/stitch confirmation requirement).
+
+## Design decisions this research drove
+
+- **`upload_type=resumable` direct upload, not `video_url` hosting** --
+  see the dedicated section above; the single biggest architectural
+  decision this research changed from the request's initial assumption.
+- **Instagram Login for Business only** -- no Facebook Page/Business
+  Manager dependency, matching this project's single-user scope; Facebook
+  Login for Business is explicitly out of scope.
+- **Every publish is public** -- Instagram Reels has no private-visibility
+  concept the way YouTube/TikTok do, so the double-confirmation gate
+  (`--confirm-public-upload` + `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD`) applies
+  to *every* Instagram publish, not just a `public`-flavored option.
+- **Publishing limit checked fresh before every attempt**, never assumed
+  from an earlier snapshot, mirroring `creator_info`'s discipline.
+- **No hardcoded chunk-size setting** -- there's no confirmed chunking
+  contract to configure one against; the whole file is sent in one
+  request, sized only by Meta's documented 300 MB cap.
+- **A single-shot upload failure starts a brand-new container** rather
+  than guessing at resumability, the same conservative choice TikTok's
+  adapter already makes for its own unconfirmed offset-query gap.
+- **Video duration/file-size are validated locally before any upload
+  attempt** (`providers.instagram_media.validate_video_for_reels`) --
+  reusing facts the render pipeline already confirmed (`ValidationInfo.
+  duration_sec`) and the final file's own byte size, never a fresh
+  ffprobe call. Unlike TikTok (whose equivalent limits were never
+  confirmed against primary docs, so this project never hardcoded them),
+  Instagram's 3s-15min duration window and 300 MB file-size cap ARE
+  documented, so violating either fails fast and locally
+  (`VIDEO_TOO_LONG`/`VIDEO_TOO_LARGE`) instead of only being discovered
+  from a live API rejection.

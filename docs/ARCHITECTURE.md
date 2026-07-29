@@ -255,11 +255,22 @@ commands that are known to work.
   contract tests use a mock transport.
 - **Subtitle overlay + BGM mixing** in `media/ffmpeg_render.py`
 - **Web admin UI** — CLI is the only interface today
-- **Instagram/Facebook Reels publishing** — the `Publisher` Protocol,
+- **Facebook Reels publishing** — the `Publisher` Protocol,
   `PublisherCapabilities` capability model, and the provider-generic
   worker/reconciliation/retry framework already support this without
   further core changes; only a new adapter module + registry entry is
-  needed (see `providers/youtube_publisher.py`/`providers/tiktok_publisher.py`
-  for the pattern). YouTube (Phase 3A/3B) and TikTok (Phase 3C) are both
-  real, tested implementations as of `docs/STATUS.md`'s current entry —
-  this is no longer an unimplemented Protocol.
+  needed (see `providers/youtube_publisher.py`/`providers/tiktok_publisher.py`/
+  `providers/instagram_publisher.py` for the pattern). YouTube (Phase
+  3A/3B), TikTok (Phase 3C), and Instagram Reels (Phase 3D) are all real,
+  tested implementations as of `docs/STATUS.md`'s current entry — Facebook
+  Reels (a distinct product/API surface from Instagram, deliberately out of
+  scope through Phase 3D) is the only Publisher Protocol target still
+  unimplemented.
+- **A public media-hosting `MediaDeliveryBackend`** — deliberately not
+  built in Phase 3D even though Instagram's Content Publishing API
+  supports a `video_url`-hosted upload mode alongside the resumable
+  direct-upload mode this project implements. See
+  `docs/PUBLISHING.md`/`docs/OPERATIONS.md` for the reasoning: operating a
+  new public HTTPS listener is a materially larger security/operational
+  surface than this local-first, single-user tool needs when the
+  resumable path already covers the same publishing capability.

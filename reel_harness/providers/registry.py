@@ -475,6 +475,19 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
             "processing_poll_interval_seconds": poll_interval,
             "processing_max_duration_seconds": max_duration,
         }
+    if name == "instagram":
+        from reel_harness.providers.instagram_publisher import ADAPTER_VERSION as INSTAGRAM_ADAPTER_VERSION
+
+        assert settings is not None
+        return {
+            "publisher_provider": "instagram",
+            "publisher_adapter_version": INSTAGRAM_ADAPTER_VERSION,
+            "publisher_account_reference": account_reference,
+            "instagram_graph_url": settings.instagram_graph_url,
+            "instagram_api_version": settings.instagram_graph_api_version,
+            "processing_poll_interval_seconds": poll_interval,
+            "processing_max_duration_seconds": max_duration,
+        }
     if name != "youtube":
         raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
     from reel_harness.providers.youtube_publisher import ADAPTER_VERSION
@@ -504,13 +517,17 @@ def default_platform_options(provider: str) -> dict:
         from reel_harness.providers.tiktok_publisher import TikTokPostOptions
 
         return TikTokPostOptions().as_platform_options()
+    if name == "instagram":
+        from reel_harness.providers.instagram_publisher import InstagramReelsOptions
+
+        return InstagramReelsOptions().as_platform_options()
     return {}
 
 
 def validate_platform_options(provider: str, creator_info, privacy_status: str, platform_options: dict) -> None:
     """Dispatches to the provider-specific platform-options validator
-    (TikTok's providers.tiktok_publisher.validate_publish_options) -- a
-    no-op for a provider without one (YouTube, whose capabilities has
+    (TikTok's/Instagram's own providers.*_publisher.validate_publish_options)
+    -- a no-op for a provider without one (YouTube, whose capabilities has
     requires_creator_info=False so callers never even reach this with a
     real creator_info). Keeps worker.publish_runner free of a hardcoded
     vendor name; see docs/PUBLISHING.md's capability model."""
@@ -519,6 +536,13 @@ def validate_platform_options(provider: str, creator_info, privacy_status: str, 
         from reel_harness.providers.tiktok_publisher import platform_options_from_dict, validate_publish_options
 
         validate_publish_options(creator_info, privacy_status, platform_options_from_dict(platform_options))
+    if name == "instagram":
+        from reel_harness.providers.instagram_publisher import (
+            platform_options_from_dict as instagram_options_from_dict,
+        )
+        from reel_harness.providers.instagram_publisher import validate_publish_options as validate_instagram
+
+        validate_instagram(creator_info, instagram_options_from_dict(platform_options))
 
 
 def provider_capabilities(provider: str) -> PublisherCapabilities:
@@ -540,6 +564,10 @@ def provider_capabilities(provider: str) -> PublisherCapabilities:
         from reel_harness.providers.tiktok_publisher import CAPABILITIES as TIKTOK_CAPABILITIES
 
         return TIKTOK_CAPABILITIES
+    if name == "instagram":
+        from reel_harness.providers.instagram_publisher import CAPABILITIES as INSTAGRAM_CAPABILITIES
+
+        return INSTAGRAM_CAPABILITIES
     raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
 
 
@@ -664,6 +692,67 @@ def _resolve_fresh_tiktok_access_token(
     return refreshed.access_token
 
 
+def _resolve_fresh_instagram_access_token(
+    settings: Settings, credential_backend, account_reference: str, oauth_transport: object = None,
+) -> str:
+    """Mirrors _resolve_fresh_tiktok_access_token's shape, but Instagram's
+    token model is genuinely different from every other provider here:
+    there is no separate refresh_token grant. A long-lived access token
+    refreshes *itself* (presenting its own current value to the refresh
+    endpoint) and gets back a new long-lived token with a renewed ~60-day
+    expiry -- see publisher.oauth_instagram.InstagramOAuthClient's
+    docstring. `OAuthCredential.refresh_token` stays None for every
+    Instagram credential; `cred.access_token` is both the live credential
+    and the thing presented to refresh itself."""
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.observability import redact
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_instagram import InstagramOAuthClient
+
+    cred = credential_backend.get_credential("instagram", account_reference)
+    if cred is None:
+        raise ProviderNotConfiguredError(f"no instagram credential saved for account {account_reference!r}")
+    if cred.invalid:
+        raise ProviderAuthError(
+            f"instagram credential for {account_reference!r} is marked invalid after a failed refresh "
+            "-- re-run publisher-auth instagram"
+        )
+    if cred.expires_at is None or cred.expires_at > datetime.now(UTC) + timedelta(minutes=2):
+        return cred.access_token
+
+    client = InstagramOAuthClient(
+        settings.instagram_app_id, settings.instagram_app_secret.get_secret_value(),
+        settings.instagram_token_url, settings.instagram_graph_url, transport=oauth_transport,
+    )
+    try:
+        try:
+            tokens = client.refresh_long_lived_token(cred.access_token)
+        except ProviderAuthError as exc:
+            # The token is too near/past expiry (or younger than the
+            # documented 24-hour minimum) to refresh -- record this on
+            # the credential (never delete it) so publisher-doctor can
+            # surface it without a network call, then let the caller's
+            # own AUTH_REQUIRED handling apply.
+            cred.last_refresh_error = (redact(str(exc)) or "")[:300]
+            cred.invalid = True
+            credential_backend.save_credential(cred)
+            raise
+    finally:
+        client.close()
+    refreshed = OAuthCredential(
+        access_token=tokens.access_token, refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in),
+        scope=cred.scope, provider="instagram", account_reference=account_reference,
+        channel_id=cred.channel_id, channel_title=cred.channel_title,
+        created_at=cred.created_at, last_refreshed_at=datetime.now(UTC),
+        last_refresh_error=None, invalid=False,
+    )
+    credential_backend.save_credential(refreshed)
+    return refreshed.access_token
+
+
 def resolve_publisher(
     name: str, settings: Settings | None = None,
     credential_backend: CredentialBackend | None = None, account_reference: str = "default",
@@ -677,6 +766,8 @@ def resolve_publisher(
         return FakePublisher()
     if normalized == "tiktok":
         return _resolve_tiktok_publisher(settings, credential_backend, account_reference)
+    if normalized == "instagram":
+        return _resolve_instagram_publisher(settings, credential_backend, account_reference)
     if normalized != "youtube":
         return _UnconfiguredPublisher(f"publisher {name!r} is not registered")
     if settings is None or not settings.youtube_client_id or not settings.youtube_client_secret.get_secret_value():
@@ -723,4 +814,38 @@ def _resolve_tiktok_publisher(
         base_url=settings.tiktok_base_url, chunk_size=settings.tiktok_upload_chunk_size,
         connect_timeout=settings.tiktok_connect_timeout_seconds, read_timeout=settings.tiktok_read_timeout_seconds,
         max_retries=settings.tiktok_max_retries, retry_backoff_seconds=settings.tiktok_retry_backoff_seconds,
+    )
+
+
+def _resolve_instagram_publisher(
+    settings: Settings | None, credential_backend: CredentialBackend | None, account_reference: str,
+) -> Publisher:
+    if (
+        settings is None or not settings.instagram_app_id
+        or not settings.instagram_app_secret.get_secret_value() or not settings.instagram_redirect_uri
+    ):
+        return _UnconfiguredPublisher(
+            "instagram publishing requires REEL_HARNESS_INSTAGRAM_APP_ID / "
+            "REEL_HARNESS_INSTAGRAM_APP_SECRET / REEL_HARNESS_INSTAGRAM_REDIRECT_URI"
+        )
+    if credential_backend is None:
+        return _UnconfiguredPublisher(
+            f"no instagram credential saved for account {account_reference!r} -- run publisher-auth instagram"
+        )
+    cred = credential_backend.get_credential("instagram", account_reference)
+    if cred is None or not cred.channel_id:
+        return _UnconfiguredPublisher(
+            f"no instagram credential saved for account {account_reference!r} -- run publisher-auth instagram"
+        )
+    from reel_harness.providers.instagram_publisher import InstagramPublisher
+
+    return InstagramPublisher(
+        access_token_provider=lambda: _resolve_fresh_instagram_access_token(
+            settings, credential_backend, account_reference,
+        ),
+        graph_url=settings.instagram_graph_url, api_version=settings.instagram_graph_api_version,
+        account_id=cred.channel_id,
+        connect_timeout=settings.instagram_connect_timeout_seconds,
+        read_timeout=settings.instagram_read_timeout_seconds,
+        max_retries=settings.instagram_max_retries, retry_backoff_seconds=settings.instagram_retry_backoff_seconds,
     )

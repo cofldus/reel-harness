@@ -226,6 +226,71 @@ class Settings(BaseSettings):
     tiktok_default_privacy: str = Field(
         "SELF_ONLY", validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_DEFAULT_PRIVACY", "TIKTOK_DEFAULT_PRIVACY"))
 
+    # Instagram Reels OAuth + Content Publishing (Phase 3D -- see
+    # docs/PUBLISHING.md, official docs checked 2026-07-29). Uses Instagram
+    # Login for Business only (no Facebook Page/Business Manager
+    # dependency) -- `instagram_app_id`/`_secret` come from a Meta App
+    # Dashboard app, `instagram_redirect_uri` has NO default (must be a URI
+    # the operator actually registered), same reasoning as TikTok's.
+    instagram_app_id: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_APP_ID", "INSTAGRAM_APP_ID"))
+    instagram_app_secret: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_APP_SECRET", "INSTAGRAM_APP_SECRET"))
+    instagram_redirect_uri: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "INSTAGRAM_REDIRECT_URI"))
+    instagram_auth_url: str = Field(
+        "https://www.instagram.com/oauth/authorize",
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_AUTH_URL", "INSTAGRAM_AUTH_URL"))
+    instagram_token_url: str = Field(
+        "https://api.instagram.com/oauth/access_token",
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_TOKEN_URL", "INSTAGRAM_TOKEN_URL"))
+    # Separate from the short-lived token exchange above -- Instagram Login
+    # for Business's long-lived-token step is its own endpoint (see
+    # docs/PUBLISHING.md), unlike YouTube/TikTok's single-endpoint refresh.
+    instagram_graph_url: str = Field(
+        "https://graph.instagram.com",
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_GRAPH_BASE_URL", "INSTAGRAM_GRAPH_BASE_URL"))
+    # Graph API versions are periodically deprecated/sunset by Meta (see
+    # docs/PUBLISHING.md) -- kept operator-overridable rather than
+    # hardcoded so a sunset version doesn't require a code change.
+    instagram_graph_api_version: str = Field(
+        "v25.0",
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_GRAPH_API_VERSION", "INSTAGRAM_GRAPH_API_VERSION"))
+    instagram_connect_timeout_seconds: float = Field(
+        10.0,
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_CONNECT_TIMEOUT", "INSTAGRAM_CONNECT_TIMEOUT_SECONDS"))
+    instagram_read_timeout_seconds: float = Field(
+        60.0,
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_READ_TIMEOUT", "INSTAGRAM_READ_TIMEOUT_SECONDS"))
+    instagram_max_retries: int = Field(
+        3, validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_MAX_RETRIES", "INSTAGRAM_MAX_RETRIES"))
+    instagram_retry_backoff_seconds: float = Field(
+        2.0,
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_RETRY_BACKOFF", "INSTAGRAM_RETRY_BACKOFF_SECONDS"))
+    # "resumable" (default, implemented): direct binary upload to
+    # rupload.facebook.com, no public hosting needed -- see
+    # docs/PUBLISHING.md's "Two upload paths" section for why this is the
+    # default instead of Meta's video_url-hosted alternative.
+    # "external_url" is accepted as a config value (an operator may already
+    # have a hosted-URL setup) but is NOT implemented this phase --
+    # selecting it fails validation explicitly, the same
+    # documented-but-unimplemented precedent as TikTok's PULL_FROM_URL.
+    instagram_media_url_mode: str = Field(
+        "resumable",
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_MEDIA_URL_MODE", "INSTAGRAM_MEDIA_URL_MODE"))
+    # Only meaningful for the (unimplemented) external_url mode -- kept as a
+    # validated setting now so enabling that mode later is a pure adapter
+    # change, not a config-schema change.
+    instagram_media_url_ttl_seconds: float = Field(
+        3600.0,
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_MEDIA_URL_TTL", "INSTAGRAM_MEDIA_URL_TTL_SECONDS"))
+    # Reels publishing is always public (Instagram has no private/unlisted
+    # concept -- see docs/PUBLISHING.md) -- share_to_feed only controls
+    # Feed+Reels-tab vs Reels-tab-only visibility, not privacy.
+    instagram_share_to_feed_default: bool = Field(
+        False,
+        validation_alias=_llm_alias("REEL_HARNESS_INSTAGRAM_SHARE_TO_FEED", "INSTAGRAM_SHARE_TO_FEED_DEFAULT"))
+
     # Processing poller (Phase 3B, worker.publish_runner._processing_stage /
     # worker.publish_lease.lease_next_processing_publication). Pinned onto
     # each publication's publisher_config at session-creation time (like
@@ -388,6 +453,54 @@ def validate_tiktok_credentials_configured(settings: Settings) -> None:
         )
 
 
+def _validate_instagram_settings(settings: Settings) -> None:
+    if settings.instagram_connect_timeout_seconds <= 0 or settings.instagram_read_timeout_seconds <= 0:
+        raise ProviderConfigurationError("instagram timeouts must be positive")
+    if settings.instagram_max_retries < 0:
+        raise ProviderConfigurationError("instagram retry count must not be negative")
+    if settings.instagram_media_url_ttl_seconds <= 0:
+        raise ProviderConfigurationError("instagram media url TTL must be positive")
+    if settings.instagram_media_url_mode not in ("resumable", "external_url"):
+        raise ProviderConfigurationError(
+            f"unknown instagram media_url_mode {settings.instagram_media_url_mode!r} "
+            "(supported: resumable, external_url)"
+        )
+    _instagram_redirect_prefixes = ("https://", "http://127.0.0.1", "http://localhost")
+    if settings.instagram_redirect_uri and not settings.instagram_redirect_uri.startswith(
+        _instagram_redirect_prefixes
+    ):
+        raise ProviderConfigurationError(
+            "instagram redirect_uri must be an https:// URL registered with the Meta app, or a "
+            "loopback http://127.0.0.1/http://localhost address -- see docs/PUBLISHING.md"
+        )
+
+
+def validate_instagram_credentials_configured(settings: Settings) -> None:
+    """Called only when Instagram publishing is actually attempted
+    (publisher-auth instagram, publish-job --provider instagram,
+    provider-smoke publisher instagram) -- mirrors
+    validate_tiktok_credentials_configured. Also refuses explicitly if
+    media_url_mode=external_url is selected -- that path is not
+    implemented this phase (see docs/PUBLISHING.md), so it must fail
+    loudly before any network call, not silently fall back to resumable."""
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_INSTAGRAM_APP_ID", settings.instagram_app_id),
+            ("REEL_HARNESS_INSTAGRAM_APP_SECRET", settings.instagram_app_secret.get_secret_value()),
+            ("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", settings.instagram_redirect_uri),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            "instagram publishing requires an OAuth client: missing " + ", ".join(missing)
+        )
+    if settings.instagram_media_url_mode == "external_url":
+        raise ProviderConfigurationError(
+            "REEL_HARNESS_INSTAGRAM_MEDIA_URL_MODE=external_url is not implemented this phase -- "
+            "only 'resumable' (direct upload to rupload.facebook.com) is supported; see docs/PUBLISHING.md"
+        )
+
+
 def validate_youtube_credentials_configured(settings: Settings) -> None:
     """Called only when YouTube publishing is actually attempted (publisher-
     auth youtube, publish-job --provider youtube, provider-smoke publisher
@@ -415,6 +528,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)
+    _validate_instagram_settings(settings)
 
 
 def load_settings() -> Settings:

@@ -26,6 +26,7 @@ class AppContext:
         register_secret(self.settings.asset_api_key.get_secret_value())
         register_secret(self.settings.youtube_client_secret.get_secret_value())
         register_secret(self.settings.tiktok_client_secret.get_secret_value())
+        register_secret(self.settings.instagram_app_secret.get_secret_value())
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
