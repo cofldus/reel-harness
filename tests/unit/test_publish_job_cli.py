@@ -243,3 +243,136 @@ def test_provider_smoke_publisher_requires_youtube_positional(monkeypatch, tmp_p
     _isolate(monkeypatch, tmp_path)
     assert cli_main.main(["provider-smoke", "publisher"]) == 2
     assert "usage" in capsys.readouterr().err
+
+
+def test_provider_smoke_publisher_tiktok_not_run_without_client_credentials(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "tiktok"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "NOT RUN" in out
+    assert "credentials not configured" in out
+
+
+def test_provider_smoke_publisher_tiktok_not_run_without_saved_credential(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "tiktok"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "NOT RUN" in out
+
+
+def test_provider_smoke_publisher_tiktok_upload_smoke_not_run_without_all_three_flags(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """Distinct wording from the app-permission-unavailable case -- three
+    separate NOT RUN reasons must never be conflated (doctor remote,
+    read-only smoke, private upload smoke)."""
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "tiktok"])
+    out = capsys.readouterr().out
+    assert exit_code == 2  # still no saved credential -- never reaches the upload-flag check
+    assert "NOT RUN" in out
+
+
+class _FakeCreatorInfo:
+    def __init__(self, allowed_privacy_values, comments_configurable=True, remix_configurable=True) -> None:
+        self.account_identifier = "creator1"
+        self.display_name = "Creator One"
+        self.allowed_privacy_values = allowed_privacy_values
+        self.comments_configurable = comments_configurable
+        self.remix_configurable = remix_configurable
+        self.max_post_duration_sec = 300.0
+        self.warnings: list = []
+
+
+def _seed_tiktok_credential_for_smoke(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.publisher.credentials import FileCredentialBackend, OAuthCredential
+    from reel_harness.publisher.secret_store import FileSecretStore
+
+    store = FileSecretStore(
+        tmp_path.parent / f"{tmp_path.name}-secrets", repo_root=tmp_path.parent / "unrelated-repo",
+    )
+    FileCredentialBackend(store).save_credential(OAuthCredential(
+        access_token="fake-access-token", refresh_token="fake-refresh-token",
+        expires_at=datetime.now(UTC) + timedelta(hours=1), scope="video.publish",
+        provider="tiktok", account_reference="default", channel_id="open-id-1",
+    ))
+
+
+def _isolate_tiktok_smoke(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential_for_smoke(tmp_path)
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "reel_harness.providers.registry._resolve_fresh_tiktok_access_token", lambda *a, **k: "fake-token",
+    )
+
+
+def test_provider_smoke_publisher_tiktok_readonly_reports_app_review_required(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate_tiktok_smoke(monkeypatch, tmp_path)
+
+    class _FakePublisher:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get_creator_info(self):
+            return _FakeCreatorInfo(allowed_privacy_values=frozenset({"SELF_ONLY"}))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("reel_harness.providers.tiktok_publisher.TikTokPublisher", _FakePublisher)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "tiktok"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["app_review_status"] == "app_review_required"
+    assert payload["upload_permission_checked"] is False
+    assert payload["test_upload"] is None
+
+
+def test_provider_smoke_publisher_tiktok_upload_smoke_not_run_without_application_permission(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """The distinct wording the prompt requires -- not the generic
+    'credentials not configured' NOT RUN, but 'application permission
+    not available'."""
+    _isolate_tiktok_smoke(monkeypatch, tmp_path)
+
+    class _FakePublisher:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get_creator_info(self):
+            return _FakeCreatorInfo(allowed_privacy_values=frozenset())  # no permission at all
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("reel_harness.providers.tiktok_publisher.TikTokPublisher", _FakePublisher)
+    exit_code = cli_main.main([
+        "provider-smoke", "publisher", "tiktok",
+        "--upload-private-test", "--confirm-test-upload", "--confirm-platform-options",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "TikTok private upload smoke: NOT RUN — application permission not available" in out
+    payload = json.loads(out[out.index("{"):])
+    assert payload["test_upload"]["ran"] is False
+    assert payload["test_upload"]["reason"] == "application permission not available"

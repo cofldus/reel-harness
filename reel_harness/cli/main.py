@@ -1609,6 +1609,191 @@ def _run_publisher_test_upload(ctx: AppContext, account: str, access_token: str)
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _smoke_publisher_tiktok(
+    ctx: AppContext, account: str, upload_private_test: bool, confirm_test_upload: bool,
+    confirm_platform_options: bool,
+) -> int:
+    """Read-only by default: credential, token refresh, creator_info,
+    scope, publishability, and this account's actual privacy options --
+    never uploads. The opt-in test upload requires all three of
+    --upload-private-test/--confirm-test-upload/--confirm-platform-options
+    AND real application permission (confirmed via creator_info) -- always
+    the most restrictive privacy (SELF_ONLY), a very short scratch clip,
+    clear test wording, and comments/duet/stitch all disabled. Never
+    public, never auto-deleted."""
+    from reel_harness.config import ProviderConfigurationError, validate_tiktok_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, PublisherPermissionDeniedError, TransientProviderError
+    from reel_harness.observability import redact
+
+    try:
+        validate_tiktok_credentials_configured(ctx.settings)
+    except ProviderConfigurationError:
+        print(
+            "tiktok publisher OAuth client not configured -- set REEL_HARNESS_TIKTOK_CLIENT_KEY, "
+            "REEL_HARNESS_TIKTOK_CLIENT_SECRET, and REEL_HARNESS_TIKTOK_REDIRECT_URI.",
+            file=sys.stderr,
+        )
+        print("NOT RUN — credentials not configured")
+        return 2
+
+    backend = ctx.credential_backend()
+    if not backend.has_credential("tiktok", account):
+        print(
+            f"no saved tiktok credential for account {account!r} -- run "
+            f"`reel-harness publisher-auth tiktok --account {account}` first.",
+            file=sys.stderr,
+        )
+        print("NOT RUN — credentials not configured")
+        return 2
+
+    from reel_harness.providers.registry import _resolve_fresh_tiktok_access_token
+    from reel_harness.providers.tiktok_publisher import TikTokPublisher
+
+    try:
+        access_token = _resolve_fresh_tiktok_access_token(ctx.settings, backend, account)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+
+    publisher = TikTokPublisher(
+        access_token_provider=lambda: access_token, base_url=ctx.settings.tiktok_base_url,
+        connect_timeout=ctx.settings.tiktok_connect_timeout_seconds,
+        read_timeout=ctx.settings.tiktok_read_timeout_seconds, max_retries=0,
+    )
+    try:
+        creator_info = publisher.get_creator_info()
+    except ProviderAuthError as exc:
+        publisher.close()
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except PublisherPermissionDeniedError as exc:
+        publisher.close()
+        print(f"permission error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        publisher.close()
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+
+    # Real application permission means creator_info actually reports SOME
+    # allowed privacy level -- an empty set (as opposed to the normal
+    # unaudited-app case, which is always at least {SELF_ONLY}) is the
+    # signature of a deeper permission problem than the audit-status gate.
+    app_permission_available = creator_info is not None and bool(creator_info.allowed_privacy_values)
+    app_review_status = "unknown"
+    if creator_info is not None:
+        app_review_status = (
+            "app_review_required" if creator_info.allowed_privacy_values == frozenset({"SELF_ONLY"})
+            else "passed"
+        )
+    summary: dict = {
+        "provider": "tiktok", "account_reference": account,
+        "account_identifier": creator_info.account_identifier if creator_info else None,
+        "allowed_privacy_values": sorted(creator_info.allowed_privacy_values) if creator_info else [],
+        "app_review_status": app_review_status,
+        "comments_configurable": creator_info.comments_configurable if creator_info else None,
+        "remix_configurable": creator_info.remix_configurable if creator_info else None,
+        "max_post_duration_sec": creator_info.max_post_duration_sec if creator_info else None,
+        "upload_permission_checked": False, "test_upload": None,
+    }
+
+    if upload_private_test and confirm_test_upload and confirm_platform_options:
+        if not app_permission_available:
+            print("TikTok private upload smoke: NOT RUN — application permission not available")
+            summary["test_upload"] = {"ran": False, "reason": "application permission not available"}
+        else:
+            summary["upload_permission_checked"] = True
+            summary["test_upload"] = _run_tiktok_test_upload(ctx, access_token, creator_info)
+    elif upload_private_test or confirm_test_upload or confirm_platform_options:
+        print(
+            "--upload-private-test, --confirm-test-upload, and --confirm-platform-options must all be given "
+            "to run the opt-in test upload -- read-only creator_info check only.",
+            file=sys.stderr,
+        )
+
+    publisher.close()
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def _run_tiktok_test_upload(ctx: AppContext, access_token: str, creator_info) -> dict:
+    import hashlib
+    import shutil
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from reel_harness.media.deps import check_ffmpeg_available
+    from reel_harness.media.runner import run
+    from reel_harness.providers.base import PublicationMetadata
+    from reel_harness.providers.tiktok_publisher import (
+        TikTokPostOptions,
+        TikTokPublisher,
+        build_post_text,
+        validate_publish_options,
+    )
+
+    deps = check_ffmpeg_available()
+    if not deps.all_available:
+        return {"ran": False, "reason": "ffmpeg/ffprobe not available"}
+
+    # Every default: SELF_ONLY, comments/duet/stitch disabled, no disclosure
+    # toggles -- the most restrictive combination this account allows.
+    options = TikTokPostOptions()
+    try:
+        validate_publish_options(creator_info, "SELF_ONLY", options)
+    except Exception as exc:  # noqa: BLE001 - reported, never crashes the smoke command
+        return {"ran": False, "reason": f"platform options rejected: {exc}"}
+
+    scratch = Path(tempfile.mkdtemp(prefix="reel-harness-tiktok-smoke-"))
+    try:
+        video_path = scratch / "smoke.mp4"
+        argv = [
+            str(deps.ffmpeg.path), "-y",
+            "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(video_path),
+        ]
+        result = run(argv, timeout=30)
+        if result.returncode != 0:
+            return {"ran": False, "reason": "failed to build the local test clip"}
+
+        video_bytes = video_path.read_bytes()
+        post_text = build_post_text("[reel-harness provider-smoke test upload -- safe to ignore]")
+        publisher = TikTokPublisher(
+            access_token_provider=lambda: access_token, base_url=ctx.settings.tiktok_base_url,
+            chunk_size=ctx.settings.tiktok_upload_chunk_size,
+            connect_timeout=ctx.settings.tiktok_connect_timeout_seconds,
+            read_timeout=ctx.settings.tiktok_read_timeout_seconds, max_retries=0,
+        )
+        try:
+            metadata = PublicationMetadata(
+                title=post_text, description="", tags=[], category_id="", privacy_status="SELF_ONLY",
+                made_for_kids=False, platform_options=options.as_platform_options(),
+            )
+            session = publisher.create_upload_session(
+                metadata, len(video_bytes), "video/mp4", str(uuid.uuid4()),
+            )
+            chunk_result = publisher.upload_chunk(session, video_bytes, 0, len(video_bytes))
+        finally:
+            publisher.close()
+
+        return {
+            "ran": True,
+            "provider_video_id": chunk_result.provider_video_id or session.provider_reference,
+            "privacy_status": "SELF_ONLY",
+            "checksum_prefix": hashlib.sha256(video_bytes).hexdigest()[:12],
+            "note": "remote deletion is never automatic -- see docs/OPERATIONS.md",
+        }
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
@@ -1618,13 +1803,21 @@ def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     if args.target == "asset":
         return _smoke_asset(ctx)
     if args.target == "publisher":
-        if args.publisher_provider != "youtube":
-            print("usage: provider-smoke publisher youtube [--account ALIAS] [...]", file=sys.stderr)
-            return 2
-        return _smoke_publisher_youtube(
-            ctx, account=args.account or "default",
-            upload_private_test=args.upload_private_test, confirm_test_upload=args.confirm_test_upload,
+        if args.publisher_provider == "youtube":
+            return _smoke_publisher_youtube(
+                ctx, account=args.account or "default",
+                upload_private_test=args.upload_private_test, confirm_test_upload=args.confirm_test_upload,
+            )
+        if args.publisher_provider == "tiktok":
+            return _smoke_publisher_tiktok(
+                ctx, account=args.account or "default",
+                upload_private_test=args.upload_private_test, confirm_test_upload=args.confirm_test_upload,
+                confirm_platform_options=args.confirm_platform_options,
+            )
+        print(
+            "usage: provider-smoke publisher {youtube|tiktok} [--account ALIAS] [...]", file=sys.stderr,
         )
+        return 2
     return _smoke_tts(ctx)
 
 
@@ -1891,17 +2084,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_smoke.add_argument("target", choices=["llm", "tts", "asset", "publisher"])
     provider_smoke.add_argument(
-        "publisher_provider", nargs="?", default=None, choices=["youtube", None],
+        "publisher_provider", nargs="?", default=None, choices=["youtube", "tiktok", None],
         help="Required when target=publisher, e.g. 'provider-smoke publisher youtube'",
     )
     provider_smoke.add_argument("--account", default=None, help="Account alias (default: 'default')")
     provider_smoke.add_argument(
         "--upload-private-test", action="store_true",
-        help="Also run a real, private, clearly-labeled test upload (requires --confirm-test-upload too)",
+        help="Also run a real, private, clearly-labeled test upload (requires --confirm-test-upload too, "
+             "and --confirm-platform-options too for tiktok)",
     )
     provider_smoke.add_argument(
         "--confirm-test-upload", action="store_true",
         help="Required alongside --upload-private-test to actually run the test upload",
+    )
+    provider_smoke.add_argument(
+        "--confirm-platform-options", action="store_true",
+        help="Required alongside --upload-private-test/--confirm-test-upload for tiktok (see "
+             "providers.base.PublisherCapabilities.requires_user_confirmation) -- ignored for youtube",
     )
     provider_smoke.set_defaults(func=cmd_provider_smoke)
 
