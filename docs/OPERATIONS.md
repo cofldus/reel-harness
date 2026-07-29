@@ -1,4 +1,4 @@
-# Reel Harness — Operations (Phase 3D)
+# Reel Harness — Operations (Phase 4A)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
 LLM/TTS/asset provider configuration, YouTube publishing (including
@@ -11,15 +11,20 @@ completion state in `docs/STATUS.md`.
 
 `.github/workflows/ci.yml` runs on every push/PR: a Windows + Ubuntu ×
 Python 3.11/3.12 matrix (lockfile check, import check, mypy, ruff, the full
-pytest suite, a secret/token grep, a tracked-artifact check), a dedicated
-Ubuntu `production-smoke` job (real ffmpeg, 1080x1920), and a
-`package-smoke` job that builds the wheel/sdist and installs the wheel into
-a brand-new venv to confirm the CLI entry point, imports, and a real
-fake-provider job all work from the **installed package**, not the source
-tree. No real provider credentials are configured anywhere in CI; the fake-
-provider E2E and the httpx.MockTransport-based YouTube contract E2E cover
-what runs there, and live provider smoke checks are never invoked. Build
-locally with `uv build`.
+pytest suite — which includes the schema-upgrade E2E, the backup/restore
+E2E, the supervisor subprocess E2E, and the Linux-only real-symlink
+security test — a secret/token grep excluding `tests/`, a tracked-artifact
+check), a dedicated Ubuntu `production-smoke` job (real ffmpeg, 1080x1920),
+a `package-smoke` job that builds the wheel/sdist, installs the wheel into
+a brand-new venv to confirm the CLI entry point/imports/`--version`/a real
+fake-provider job all work from the **installed package** (not the source
+tree), and validates a real release manifest against the built wheel/sdist,
+and a `release-check` job (`--skip-slow`, since the test matrix above
+already covers the full pytest/mypy/ruff gate across every OS/Python
+combination). No real provider credentials are configured anywhere in CI;
+the fake-provider E2E and the httpx.MockTransport-based publisher contract
+E2Es cover what runs there, and live provider smoke/live-verify upload
+tests are never invoked. Build locally with `uv build`.
 
 ## Worker daemon
 
@@ -947,20 +952,261 @@ refused once a job is `CANCELLED`.
   storage root writable, provider configuration valid (checked locally, no
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
+- `GET /status` — version, config fingerprint, schema version, process
+  uptime, job/publication status-count breakdowns, queue depth, stale-lease
+  counts, and (only inside `reel-harness serve`) live per-component status
+  and fatal errors. No API key required, same as `/healthz`/`/readyz`.
+- `GET /metrics` — dependency-free Prometheus text exposition. See
+  "Operational metrics" below.
 
-## Not yet supported (Phase 3D scope ends here)
+## Production operations (Phase 4A)
+
+This section covers the release-candidate operations surface: readiness
+diagnostics, database/storage backup and verification, the unified runtime
+supervisor, metrics/incident tooling, live cross-platform verification, and
+the release process itself. Everything here is local-first and requires no
+new external services — a Prometheus endpoint is exposed, but nothing
+pushes to one.
+
+### Preflight — one command before running for real
+
+```
+uv run reel-harness preflight [--profile fake|production] [--check-remote]
+    [--provider llm|tts|asset ...] [--publisher youtube|tiktok|instagram ...] [--json]
+```
+
+Local-only by default: config, DB connectivity/schema, storage
+root/permissions/free space, credential and journal directory safety
+(rejects a repo-internal path or a symlink/junction, same guarantee as
+`publisher-auth`), ffmpeg/ffprobe, runtime Python dependencies, the
+provider/publisher registry, worker lease/heartbeat sanity (heartbeat must
+stay under ⅓ of the lease timeout), upload chunk-size validity, the
+public-upload feature flag (WARNs if enabled with no publisher configured
+to use it), API-key strength, and known-placeholder secret detection.
+
+`--profile production` escalates a fixed set of these from WARN to FAIL —
+a placeholder API key/secret, a repo-internal credential path, an
+unwritable storage root, an unsupported schema version, an unsafe
+heartbeat/lease ratio, a public-upload flag with nothing configured to use
+it, or risky credential-file permissions. `--profile fake` (the default) is
+the permissive local-dev bar. `--check-remote` adds real, read-only
+publisher account checks (reusing the same token-refresh/identity calls
+`publisher-doctor` makes) — the only case this command ever touches a
+network. Exit codes mirror `provider-smoke`: 0 (PASS/WARN), 1 (FAIL), 2
+(NOT_CONFIGURED).
+
+### Config fingerprint
+
+Every process logs a `startup_config_fingerprint` JSON event at boot: a
+deterministic, non-secret snapshot (provider ids/models/hosts, worker/
+publisher policy settings, publisher registry) — never an API key, OAuth
+token, or signed URL. The same fingerprint (and its short hash) is reused
+by `/status`, the release manifest, incident bundles, and live-verify
+records, so an operator can always tie a diagnostic artifact back to
+exactly how the process that produced it was configured. Settings changed
+after a job/publication was created never retroactively change that job's
+own already-persisted snapshot.
+
+### Database operations
+
+```
+uv run reel-harness db-status
+uv run reel-harness db-migrate [--dry-run] [--backup-dir DIR | --no-backup]
+uv run reel-harness db-backup --dest-dir DIR
+uv run reel-harness db-restore <backup_path> --confirm-restore --pre-restore-backup-dir DIR
+uv run reel-harness db-verify
+```
+
+- **`db-status`**: current vs. latest schema version, pending column/version
+  migrations, table row counts, `PRAGMA integrity_check`, a safe (filename
+  only, never the full path) db identifier.
+- **`db-migrate`**: wraps the existing idempotent `init_db()` — a default
+  pre-migration safety backup (`--backup-dir` required unless you pass
+  `--no-backup` explicitly), a PID-lockfile exclusive lock so two
+  invocations can't interleave, `--dry-run` to report the plan without
+  touching anything, and a safe no-op on repeated runs.
+- **`db-backup`**: SQLite's own online backup API (safe to run while the DB
+  is in use), written atomically with a checksummed JSON manifest
+  alongside it. The manifest's `schema_version` is the database's own
+  **actual** version at backup time — never assumed to match the running
+  code's version, so a backup of a not-yet-migrated database honestly
+  records that fact.
+- **`db-restore`**: destructive, so every check before the final atomic
+  swap can refuse and leave the live database untouched — explicit
+  `--confirm-restore`, refuses while any lease looks actively held by a
+  running worker (heartbeat within the lease timeout), verifies the
+  backup's checksum against its own manifest, refuses a backup from a
+  schema newer than this build supports, and always takes its own backup
+  of the current database first (`--pre-restore-backup-dir`).
+- **`db-verify`**: `PRAGMA integrity_check`, foreign-key check, orphan
+  publications (no matching job), and the forbidden ACTIVE+unlocked state
+  — reusing the exact same detectors the worker daemons themselves use.
+  Cross-checking the DB against what's actually on disk is `storage-verify`'s
+  job, not duplicated here.
+
+### Storage verification and backup bundles
+
+```
+uv run reel-harness storage-verify [--repair-safe]
+uv run reel-harness backup-create --dest-path PATH
+uv run reel-harness backup-inspect <bundle_path>
+uv run reel-harness backup-restore <bundle_path> --confirm-restore
+```
+
+`storage-verify` walks every job directory and cross-checks it against the
+DB: asset/final-video checksum verification, `manifest.json` validation,
+unsafe symlink/junction detection, orphan directories with no matching Job
+row, and leaked temp files from an interrupted write. Read-only by default;
+`--repair-safe` deletes **only** stale (>1h) temp files matching
+`storage.local`'s own known scratch-file naming convention — it never
+touches `final.mp4`, rewrites a manifest, changes a Publication's status,
+or retries a remote upload.
+
+`backup-create` produces a single portable `tar.gz` of the SQLite database,
+the jobs storage tree, and the durable publish journal — **never** OAuth
+tokens, API keys, `.env`, the rest of the credential backend, ffmpeg
+binaries, caches, or logs (see "Credential backup policy" below). Every
+archived file is content-checksummed. `backup-restore` validates every
+archive member **before** extracting anything (absolute paths, `..`
+traversal, symlinks/hardlinks, and a per-file/total size cap are all
+refused outright), extracts to a private scratch directory first, verifies
+checksums, and only then moves data into the real destinations — a
+corrupt or malicious bundle never partially overwrites live data.
+
+**Credential backup policy**: OAuth credentials and the client secret are
+deliberately never included in a `backup-create` bundle. Back them up (if
+at all) by copying `REEL_HARNESS_CREDENTIAL_DIR` directly through your own
+OS-level backup tooling, with the same care you'd give any other secret
+store — this project does not provide a credential-bundling command, to
+avoid ever making it easy to accidentally ship a token inside a file meant
+to be shared or archived long-term.
+
+### Runtime supervisor
+
+```
+uv run reel-harness serve [--no-api] [--no-render-worker] [--no-publisher-worker]
+    [--host HOST] [--port PORT] [--render-workers N] [--publisher-workers N]
+    [--shutdown-timeout SEC]
+```
+
+Runs the API, render-worker daemon(s), and publisher-worker daemon(s)
+together in one process, as threads sharing a single `AppContext` (the API
+never constructs a second one). Threads, not subprocesses: the work here is
+I/O-bound (DB, HTTP, an ffmpeg subprocess that already runs outside the
+GIL), and every worker already assumes concurrent DB access via the
+existing lease-fencing mechanism — separate processes would add real
+coordination complexity for no benefit on a single machine. `--render-workers`/
+`--publisher-workers` > 1 spins up that many daemon threads, each with a
+distinct worker id; since SQLite is single-writer, keep this low (a soft
+guidance warning is logged past a small threshold, never enforced).
+
+**Failure policy**: the API server dying is fatal to the whole supervisor
+(new requests can never be served without it) — other components are
+signaled to stop and the process exits non-zero. A render-worker thread
+dying leaves the publisher worker running (and vice versa); either dying
+is tracked without tearing down everything else, since the daemons already
+isolate ordinary per-job/per-publication failures themselves — check
+`/status`'s `supervisor.fatal_errors` field. Graceful shutdown on SIGINT/
+SIGTERM/SIGBREAK/Ctrl+Break signals every component to stop, then joins
+each with a bounded `--shutdown-timeout`, logging (never hanging
+indefinitely) if one doesn't finish in time.
+
+### Operational metrics
+
+`GET /metrics` — dependency-free Prometheus text exposition (no
+`prometheus_client` package): `jobs_created/completed/failed_total`,
+`active_jobs`, `queue_depth`, `retries_total`,
+`stage_duration_seconds_count`/`_sum`, `publications_created/published/
+failed_total`, `upload_bytes_total`, `worker_lease_lost_total`,
+`stale_recoveries_total`, `provider_errors_total`, `publisher_retries_total`.
+Every value is **derived fresh from current DB state at scrape time**,
+never an in-memory counter — an in-memory counter would silently reset to
+zero on every process restart, exactly the kind of gap a metrics system
+exists to catch. No job topic/title/script text is ever a metric value or
+label. No API key required.
+
+### Incident bundles
+
+```
+uv run reel-harness incident-bundle --dest-path PATH
+```
+
+A zip archive for offline incident analysis: app/schema version, config
+fingerprint, a full local preflight report, DB status, job/publication
+status breakdowns, recent failure codes, publish-journal integrity (per
+publication: raw line count vs. integrity-verified event count, flagging
+any gap), and dependency/platform versions. Never a token, API key,
+credential path, full script/prompt text, a signed URL, or media bytes.
+The fully assembled report is independently secret-scanned (reusing the
+same redaction rules and every registered secret) before being written —
+refuses to write rather than ship a bundle containing anything
+secret-shaped that slipped through. Atomic.
+
+### Live verification across platforms
+
+```
+uv run reel-harness live-verify [--youtube] [--tiktok] [--instagram]
+    [--account ALIAS] [--upload-tests]
+    [--confirm-youtube-private] [--confirm-tiktok-restricted] [--confirm-instagram-public] [--json]
+```
+
+A single command sweeping live account state across all three publishers
+(all three by default). Read-only unless `--upload-tests` is given, and
+even then a platform only runs its real upload test if its **own**
+specific confirm flag is also present — Instagram (no private-post option)
+deliberately requires the strongest gate. A provider with no saved
+credential is reported `NOT_CONFIGURED` and the sweep continues to the
+next platform. Every run (read-only and upload-test) is appended to an
+append-only live-verification log, rooted alongside the publish journal
+and distinct from `Publication`/`PublicationAuditEvent` — a diagnostic
+verification record, not a real publish attempt.
+
+### Release process
+
+```
+uv run reel-harness release-manifest --dest-path PATH [--wheel-path P] [--sdist-path P]
+    [--lock-path P] [--test-summary-json P] [--live-verification-status STATUS]
+uv run reel-harness release-check [--skip-slow] [--json]
+```
+
+`release-manifest` records version, git commit, build timestamp, supported
+Python versions/platforms/providers, schema version, dependency-lock/
+wheel/sdist checksums (`null` for an artifact that wasn't built — never a
+guess), a fixed known-limitations list shared with `CHANGELOG.md`, and
+`live_verification` — explicitly `"not_run"` by default, never silently
+omitted.
+
+`release-check` is the pre-tag gate: git working-tree cleanliness, current
+branch, sync status against `origin` (a real `git fetch`), `pyproject.toml`/
+`__version__` consistency, `uv.lock` freshness, the full pytest suite,
+mypy, ruff, a secret/token grep (excluding `tests/`, where redaction tests
+deliberately embed fake secret-shaped fixtures), and a tracked-artifact
+check. Never creates a commit or tag itself — only reports a verdict.
+`--skip-slow` omits the full pytest/mypy/ruff run for a fast iterative
+check; the real pre-tag gate must always run without it.
+
+Versioning is single-sourced from `reel_harness._version.__version__`
+(PEP 440, e.g. `0.1.0rc1`), read by `reel-harness --version`,
+`pyproject.toml` (kept in sync, verified by `release-check`), `/status`,
+and the release manifest.
+
+## Not yet supported (Phase 4A scope ends here)
 
 YouTube, TikTok, and Instagram Reels publishing all exist (see the three
 "Publishing (...)" sections above), sharing production-reliability
 features: `publisher-doctor`, account management, durable crash-recovery
-reconciliation, manual retry, and a processing poller. Facebook Reels
+reconciliation, manual retry, and a processing poller. Production
+operations exist (preflight, DB/storage backup and verification, the
+`serve` supervisor, metrics, incident bundles, live-verify, and the
+release-manifest/release-check/tagging process). Facebook Reels
 publishing does not exist. Also not yet supported: automatic public
 publishing (public always requires the explicit double-confirmation +
 feature flag above), scheduled-publish automation, automatic remote
 video/post delete, thumbnail/subtitle upload, analytics collection, an
 OAuth account-management UI, PostgreSQL, cloud storage/CDN (beyond
-Instagram's own resumable upload), web UI, face-recognition smart crop,
-BGM mixing, subtitle burn-in, multi-language dubbing.
+Instagram's own resumable upload), a credential-bundling backup command
+(see "Credential backup policy" above), web UI, face-recognition smart
+crop, BGM mixing, subtitle burn-in, multi-language dubbing.
 
 ## Troubleshooting
 
@@ -991,3 +1237,12 @@ BGM mixing, subtitle burn-in, multi-language dubbing.
 | `publish-job --provider instagram` refused | Instagram requires `--confirm-public-upload` AND `--confirm-platform-options` every time (no private option exists) | add both flags and set `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` |
 | `publisher-doctor instagram --check-remote` reports `BUSINESS_ACCOUNT_REQUIRED`/`PAGE_CONNECTION_REQUIRED` | the connected Instagram account isn't a Business/Creator account eligible for Reels publishing | convert the account in the Instagram app, then re-run `publisher-auth instagram` |
 | `provider-smoke publisher instagram --upload-public-test` prints `NOT RUN — application permission not available` | the app hasn't been granted `instagram_business_content_publish`, or the publishing limit is exhausted | check Meta App Review status / wait for the rolling 24h publishing-limit window to reset |
+| `preflight` reports `repo_internal_credential: FAIL` | `REEL_HARNESS_CREDENTIAL_DIR` resolves under the current working directory | point it at a directory genuinely outside the repository |
+| `preflight --profile production` fails on `api_authentication`/`secret_placeholder` | the default/placeholder value is still set | set a real, long `APP_API_KEY` and real provider secrets before running in production |
+| `db-migrate` refuses with a lock error | another `db-migrate` is running, or a previous run crashed without cleaning up | wait for the other run, or delete the `.migrate.lock` file next to the DB once you've confirmed no migration is actually in progress |
+| `db-restore` refuses with "running worker" | a job/publication lease is still within the lease timeout | stop all workers (`serve`/`worker-run`/`publisher-run`) first, then retry |
+| `db-restore`/`backup-restore` refuses with a checksum mismatch | the backup/bundle file was truncated or edited after creation | re-create the backup/bundle from source; never hand-edit a backup file |
+| `backup-restore` refuses with "path traversal"/"absolute path"/"symlink" | the archive is corrupt or was tampered with | do not extract it manually either — treat it as untrusted and discard it |
+| `serve` exits immediately with a fatal API error | the configured `--port` is already in use, or the API failed to bind for another reason | check `--port`, or run with `--no-api` if only the workers are needed |
+| `release-check` reports `lockfile: FAIL` | `uv.lock` is stale relative to `pyproject.toml` (e.g. after a version bump) | run `uv lock` and commit the updated lockfile |
+| `release-check` reports `secret_scan: FAIL` outside of `tests/` | a real-looking API key/token literal is in tracked source | remove it and use environment variables / the credential backend instead |

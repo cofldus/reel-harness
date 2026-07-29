@@ -274,3 +274,37 @@ commands that are known to work.
   new public HTTPS listener is a materially larger security/operational
   surface than this local-first, single-user tool needs when the
   resumable path already covers the same publishing capability.
+- **A credential-bundling backup command** — deliberately not built in
+  Phase 4A even though `backup-create` bundles the DB, jobs storage, and
+  publish journal. See `docs/OPERATIONS.md`'s "Credential backup policy":
+  bundling OAuth tokens/client secrets into an archive meant to be moved
+  or shared makes it too easy to accidentally ship a live credential
+  long-term; the credential directory is left to the operator's own
+  OS-level backup tooling instead.
+
+## Production operations (Phase 4A)
+
+`reel_harness/ops/` is a new top-level package for everything that makes
+the system operable rather than functional: `preflight.py` (readiness
+diagnostics), `fingerprint.py` (safe config snapshotting), `db_tools.py`
+(migration/backup/restore/verify), `storage_tools.py` (job-storage
+verification), `backup_bundle.py` (portable archive create/inspect/
+restore), `supervisor.py` (the `serve` runtime supervisor), `metrics.py`
+(Prometheus text exposition), `incident.py` (diagnostics bundles),
+`live_verify.py` (cross-platform live-account verification), `release.py`
+(release manifest), and `release_check.py` (the pre-tag gate). This
+package depends on the rest of the application (`core`, `db`, `providers`,
+`publisher`, `worker`, `storage`) — nothing in those packages imports from
+`ops/`, keeping the dependency direction one-way. `cli/main.py` and
+`api/app.py` are the only two callers of `ops/`.
+
+`reel-harness serve` (`ops/supervisor.py`) runs the FastAPI app and the
+render/publisher worker daemons as **threads** inside one process, sharing
+a single `AppContext` — not separate processes. The existing lease-fencing
+mechanism (`worker/lease.py`, `worker/publish_lease.py`) already makes
+concurrent multi-worker access to the same SQLite DB safe, and the actual
+CPU-heavy work (ffmpeg encoding) already runs in a subprocess outside the
+GIL — so there is no GIL-bound work here for separate OS processes to
+usefully parallelize, and threads avoid the real complexity multiprocess
+coordination would add (separate `AppContext`s, IPC for shutdown, no
+shared memory) for zero benefit on a single machine.
