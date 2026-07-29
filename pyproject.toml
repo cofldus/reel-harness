@@ -1,6 +1,6 @@
 [project]
 name = "reel-harness"
-version = "0.1.0"
+version = "0.1.0rc2"
 description = "Local-first TikTok/Shorts short-form video generation service"
 requires-python = ">=3.11"
 dependencies = [

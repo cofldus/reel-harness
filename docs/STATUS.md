@@ -1,10 +1,148 @@
 # Status
 
-Last updated: 2026-07-29 (Phase 3D instagram-publisher session, on branch
-`phase3/instagram-publisher`). Phase 2A through Phase 3C are merged into
+Last updated: 2026-07-29 (Phase 4A release-candidate session, on branch
+`phase4/release-candidate`). Phase 2A through Phase 3D are merged into
 `main`.
 
-## Phase 3D — Instagram Reels publisher (this branch)
+## Phase 4A — Production release candidate (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
+`CHANGELOG.md` for the user-facing summary). This phase does not add a new
+content/publishing provider — it makes the existing pipeline genuinely
+operable: diagnostics, backup/restore, a unified runtime supervisor,
+metrics/incident tooling, live cross-platform verification, and a real
+release process.
+
+- **Phase 3D merged to `main`** (pre-merge gate: 794 collected/793 passed/1
+  skipped, mypy+ruff clean), then `phase4/release-candidate` branched from
+  the freshly-updated `main`.
+- **`reel-harness preflight`** (`reel_harness/ops/preflight.py`): a single
+  local-first readiness report (config, DB, storage, credential/journal
+  safety, ffmpeg, runtime dependencies, the provider/publisher registry,
+  worker lease/heartbeat sanity, upload chunk settings, the public-upload
+  flag, API-key strength, placeholder-secret detection) with a stricter
+  `--profile production` bar and an opt-in `--check-remote` that reuses the
+  same real token-refresh/identity calls `publisher-doctor` already makes
+  — never a second, possibly-divergent implementation.
+- **`ops.fingerprint.config_fingerprint()`**: a safe, deterministic,
+  non-secret configuration snapshot, logged once at every process startup
+  and reused by `/status`, incident bundles, the release manifest, and
+  live-verification records.
+- **Database operations** (`db-status`/`db-migrate`/`db-backup`/
+  `db-restore`/`db-verify`): wraps the existing idempotent additive-column
+  `init_db()` with a migration lock, default safety backups, dry-run,
+  SQLite-online-backup-API backups with checksummed manifests, and a
+  destructive `db-restore` that refuses on a running worker, a checksum
+  mismatch, or a too-new schema, always taking its own pre-restore backup
+  first.
+- **Storage verification and backup bundles** (`storage-verify
+  [--repair-safe]`, `backup-create`/`-inspect`/`-restore`): cross-checks
+  job storage against the DB (checksums, manifests, orphan directories,
+  leaked temp files), and a single portable, checksummed,
+  traversal/archive-bomb-hardened `tar.gz` of the DB + jobs storage +
+  publish journal — deliberately never OAuth credentials.
+- **Unified runtime supervisor** (`reel-harness serve`): the API and
+  render/publisher workers as threads sharing one `AppContext`, with a
+  documented per-component failure policy (API death is fatal to the
+  whole process; a render- or publisher-worker thread dying is tracked
+  without tearing down the other) and graceful, bounded-timeout shutdown.
+- **`GET /status`**: version, config fingerprint, schema, uptime,
+  job/publication status breakdowns, stale-lease counts, and (inside
+  `serve`) live component/fatal-error state. No API key required.
+- **`GET /metrics`**: dependency-free Prometheus text exposition, every
+  value derived fresh from DB state at scrape time rather than an
+  in-memory counter that would silently reset on restart.
+- **`reel-harness incident-bundle`**: a self-secret-scanned diagnostics
+  zip (preflight report, DB status, status breakdowns, recent failure
+  codes, publish-journal integrity, dependency/platform versions) —
+  refuses to write rather than ship anything secret-shaped.
+- **`reel-harness live-verify`**: a single read-only sweep across
+  YouTube/TikTok/Instagram, with a real upload test gated behind an
+  explicit per-platform confirmation flag (Instagram's is deliberately the
+  strongest, since it has no private-post option). An append-only
+  live-verification log records every run, distinct from `Publication`.
+- **Release process**: single-source PEP 440 versioning (`0.1.0rc1`,
+  `reel-harness --version`), `reel-harness release-manifest` (version/
+  commit/schema/checksums/known-limitations/`live_verification` status),
+  `reel-harness release-check` (the pre-tag gate — git/version/lockfile/
+  full-test/mypy/ruff/secret-scan/artifact-scan; never creates a commit or
+  tag itself), and `CHANGELOG.md`.
+- **CI additions**: a CLI `--version` smoke check and release-manifest
+  validation added to `package-smoke`; a new `release-check` job
+  (`--skip-slow`, since the existing test matrix already covers the full
+  gate across every OS/Python combination). Schema-upgrade, backup/
+  restore, and supervisor-subprocess E2Es all run automatically as part
+  of the existing full-suite `test` job — no new CI step needed for those.
+- **Real bugs found and fixed this session** (each via building/testing
+  the feature that exposed it, not a separate audit pass):
+  1. `observability.configure_logging()`'s `StreamHandler` pinned whatever
+     `sys.stderr` object was live the first time logging was configured in
+     a process and never rebound it — once something later replaced
+     `sys.stderr` (pytest's `capsys` between tests; a real process
+     redirecting/rotating its stream), every subsequent log call failed
+     and Python's own logging module printed a `--- Logging error ---`
+     traceback onto the *current* stderr, corrupting unrelated output.
+     Fixed by re-binding the handler's stream on every `configure_logging()`
+     call.
+  2. `db_backup()`'s manifest hardcoded the running code's `SCHEMA_VERSION`
+     constant instead of the database's own actual version — a backup of
+     an old, not-yet-migrated database falsely claimed to already be
+     current, which would have made `db_restore`'s "refuse a backup newer
+     than supported" check meaningless. Fixed by reading the real version
+     from the backup file itself.
+  3. The SQLAlchemy engine's connection pool kept a real open file handle
+     to the SQLite database during `db-restore`, which `os.replace()`
+     silently allows swapping out from under on POSIX but Windows refuses
+     outright — fixed by disposing the engine's pool immediately before
+     the atomic file swap.
+  4. `observability.redact()`'s "authorization" pattern used a bare `\S+`
+     value charset (unlike its sibling api-key pattern), which greedily
+     consumed a trailing JSON closing quote when redacted text was
+     re-scanned a second time — found by `incident-bundle`'s own
+     self-secret-scan re-running `redact()` over already-redacted JSON.
+     Fixed by giving it the same safe charset the api-key pattern already
+     used.
+  5. `uv.lock` had been stale since this phase's own version bump
+     (`0.1.0` → `0.1.0rc1`) — `uv lock --check` was silently failing;
+     regenerated via `uv lock`.
+  6. The CI secret/token grep (and `release-check`'s own copy of it)
+     flagged a pre-existing, legitimate test fixture
+     (`tests/unit/test_publish_journal.py`'s deliberate
+     `"Bearer ya29.fake-leaked-token"` value, used to prove the journal
+     *rejects* forbidden-substring content) as a possible real leak.
+     Fixed by excluding `tests/` from the pattern-based scan on both
+     copies.
+- **Deliberate scope decisions**: `db-verify`/`storage-verify` split DB-
+  internal consistency from DB-vs-disk consistency rather than
+  duplicating checks in both; a credential-bundling backup command was
+  deliberately not built (see `docs/OPERATIONS.md`'s "Credential backup
+  policy") to avoid making it easy to accidentally archive a token
+  long-term; `serve` uses threads, not subprocesses (see "Runtime
+  supervisor" in `docs/OPERATIONS.md` for the full reasoning);
+  `preflight --check-remote` covers publishers fully but intentionally
+  does not perform a real LLM/TTS/asset generation call (that remains
+  `provider-smoke`'s job, to avoid an unexpected-cost diagnostic).
+
+Explicitly out of scope this phase: Facebook Reels publishing, automatic
+public/scheduled publishing, automatic remote delete, an OAuth
+account-management UI, PostgreSQL, cloud object storage/CDN, a credential-
+bundling backup command, arbitrary tunneling, a web dashboard, analytics,
+subtitle/thumbnail upload, and automating any platform's own app-review
+process.
+
+Suite after Phase 4A: **928 passed, 0 failed, 1 skipped** (794 → 929
+collected — one net skip accounted for by the pre-existing Windows
+symlink test). The skip is the same pre-existing, unrelated one from
+Phase 3A–3D. mypy clean (84 source files). ruff clean (`reel_harness` +
+`tests`).
+
+Live verification: `NOT RUN — credentials not configured` for all three
+publishers on this machine. `reel-harness live-verify` (read-only) and
+`reel-harness preflight --check-remote` are the documented paths to run
+once credentials exist. **Live external-platform verification remains not
+run because production credentials and permissions were not configured.**
+
+## Phase 3D — Instagram Reels publisher (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
 `docs/PUBLISHING.md` for the official-doc research this is built from,

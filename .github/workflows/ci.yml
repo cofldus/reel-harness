@@ -68,11 +68,15 @@ jobs:
       # A repo-internal credential-directory or OAuth-token-shaped literal
       # in tracked source is a defect regardless of which commit introduced
       # it -- checked on every CI run, not only when publisher code changes.
+      # tests/ is excluded: redaction/forbidden-substring tests (e.g.
+      # test_publish_journal.py) deliberately embed fake secret-SHAPED
+      # values to prove rejection/redaction logic works -- that is the
+      # opposite of a leak, not a thing to flag.
       - name: Secret/token grep
         shell: bash
         run: |
           set -euo pipefail
-          if git grep -nIE "AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,}" -- '*.py'; then
+          if git grep -nIE "AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,}" -- '*.py' ':!tests'; then
             echo "::error::possible real API key/token literal found in tracked .py files"
             exit 1
           fi
@@ -132,10 +136,20 @@ jobs:
           /tmp/clean-venv/bin/python -c "
           import reel_harness, reel_harness.api.app, reel_harness.cli.main
           import reel_harness.providers.youtube_publisher, reel_harness.publisher.oauth_youtube
+          import reel_harness.providers.tiktok_publisher, reel_harness.providers.instagram_publisher
+          import reel_harness.ops.preflight, reel_harness.ops.supervisor, reel_harness.ops.release
           assert 'site-packages' in reel_harness.__file__, 'imported from source tree, not the installed wheel'
           print('installed-package imports OK:', reel_harness.__file__)
           "
           /tmp/clean-venv/bin/reel-harness --help
+
+      - name: CLI --version (never requires an AppContext)
+        working-directory: /tmp
+        run: |
+          version_output=$(/tmp/clean-venv/bin/reel-harness --version)
+          echo "$version_output"
+          echo "$version_output" | grep -qE '^reel-harness [0-9]+\.[0-9]+\.[0-9]+' || \
+            (echo "::error::unexpected --version output: $version_output" && exit 1)
 
       - name: Fake-provider bootstrap + migration init (installed package only)
         working-directory: /tmp
@@ -145,3 +159,50 @@ jobs:
         run: |
           /tmp/clean-venv/bin/reel-harness doctor
           /tmp/clean-venv/bin/reel-harness channel-create --name smoke --niche cooking --language en
+
+      - name: Release manifest validation (installed package, real dist/ artifacts)
+        working-directory: /tmp
+        env:
+          DATABASE_URL: "sqlite:////tmp/package-smoke.db"
+          JOBS_DIR: "/tmp/package-smoke-jobs"
+        run: |
+          mkdir -p /tmp/dist_copy
+          cp $GITHUB_WORKSPACE/dist/*.whl $GITHUB_WORKSPACE/dist/*.tar.gz /tmp/dist_copy/
+          WHEEL=$(ls /tmp/dist_copy/*.whl)
+          SDIST=$(ls /tmp/dist_copy/*.tar.gz)
+          /tmp/clean-venv/bin/reel-harness release-manifest --dest-path /tmp/release_manifest.json \
+            --wheel-path "$WHEEL" --sdist-path "$SDIST"
+          python3 -c "
+          import json
+          m = json.load(open('/tmp/release_manifest.json'))
+          assert m['version'], 'missing version'
+          assert m['schema_version'], 'missing schema_version'
+          assert m['wheel_checksum_sha256'], 'wheel checksum not computed'
+          assert m['sdist_checksum_sha256'], 'sdist checksum not computed'
+          assert m['live_verification'] == 'not_run', 'CI has no live credentials -- must be not_run'
+          assert m['known_limitations'], 'known_limitations must not be empty'
+          print('release manifest OK:', m['version'], m['git_commit'])
+          "
+
+  release-check:
+    name: release-check (fast checks -- full pytest/mypy/ruff already run in the test matrix)
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      # --skip-slow: the `test` job above already ran the full pytest/mypy/
+      # ruff gate across the full OS/Python matrix -- rerunning it here
+      # would be pure duplication. A human running `reel-harness
+      # release-check` locally before tagging an RC should omit
+      # --skip-slow for the real, full pre-tag gate.
+      - name: release-check --skip-slow
+        run: uv run reel-harness release-check --skip-slow --json

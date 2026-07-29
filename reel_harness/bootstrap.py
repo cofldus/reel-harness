@@ -27,6 +27,7 @@ class AppContext:
         register_secret(self.settings.youtube_client_secret.get_secret_value())
         register_secret(self.settings.tiktok_client_secret.get_secret_value())
         register_secret(self.settings.instagram_app_secret.get_secret_value())
+        self._log_startup_fingerprint()
         self.engine = create_engine_from_url(self.settings.database_url)
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
@@ -39,6 +40,30 @@ class AppContext:
         )
         self.publications = PublicationService(self.session_factory, self.storage)
         self._secret_store = None
+
+    def config_fingerprint(self) -> dict:
+        """Safe, non-secret snapshot of how this process is configured --
+        see ops.fingerprint.config_fingerprint for what is and is not
+        included. Memoized would be wrong here: settings.jobs_dir/etc.
+        never change after construction, but callers (e.g. a long-running
+        `serve` process) should always see the fingerprint as of right
+        now, not a stale copy from process start."""
+        from reel_harness.ops.fingerprint import config_fingerprint
+
+        return config_fingerprint(self.settings)
+
+    def _log_startup_fingerprint(self) -> None:
+        import json
+        import logging
+
+        from reel_harness.ops.fingerprint import config_fingerprint, fingerprint_hash
+
+        fingerprint = config_fingerprint(self.settings)
+        logging.getLogger("reel_harness").info(json.dumps({
+            "event": "startup_config_fingerprint",
+            "config_fingerprint_hash": fingerprint_hash(fingerprint),
+            **fingerprint,
+        }))
 
     def _get_secret_store(self):
         """Lazily constructed and memoized: the secret directory is validated

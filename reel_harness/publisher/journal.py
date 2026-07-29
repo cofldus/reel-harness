@@ -56,6 +56,14 @@ class PublishJournal:
         self._root = root_dir
         self._root.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def root_dir(self) -> Path:
+        """Exposed for ops tooling (backup-create/backup-restore) that needs
+        to locate the journal directory on disk -- never used to read a
+        credential; the journal itself never contains one (see append()'s
+        _FORBIDDEN_SUBSTRINGS check)."""
+        return self._root
+
     def _path_for(self, publication_id: str) -> Path:
         if not publication_id or any(c in publication_id for c in ("/", "\\", "..")):
             raise PublishJournalError(f"invalid publication id: {publication_id!r}")

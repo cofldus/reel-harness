@@ -5,6 +5,7 @@ import json
 import signal
 import sys
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from reel_harness.bootstrap import AppContext
@@ -67,6 +68,282 @@ def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def cmd_preflight(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Single operator-facing readiness check before running this process
+    for real -- see docs/OPERATIONS.md. `--profile production` escalates a
+    fixed set of operationally-risky findings (placeholder secrets, an
+    unwritable storage root, an unsafe heartbeat/lease ratio, ...) from WARN
+    to FAIL; `--profile fake` (default) is the permissive local-dev bar.
+    Local checks only unless `--check-remote` is also passed."""
+    from reel_harness.ops.preflight import PreflightCheck, run_preflight, run_remote_checks
+
+    report = run_preflight(ctx.settings, ctx.session_factory, profile=args.profile)
+    remote_checks: list[PreflightCheck] = []
+    if args.check_remote:
+        requested_publishers = tuple(args.publisher) if args.publisher else ("youtube", "tiktok", "instagram")
+        remote_checks = run_remote_checks(ctx.settings, ctx.credential_backend(), publishers=requested_publishers)
+        for name in args.provider or ():
+            remote_checks.append(PreflightCheck(
+                f"remote_{name}", "NOT_CONFIGURED",
+                f"live check not performed by preflight -- use `reel-harness provider-smoke {name}`",
+            ))
+    else:
+        for name in (args.publisher or ()) :
+            remote_checks.append(PreflightCheck(f"remote_{name}", "PASS", "not requested (pass --check-remote)"))
+        for name in (args.provider or ()):
+            remote_checks.append(PreflightCheck(f"remote_{name}", "PASS", "not requested (pass --check-remote)"))
+
+    payload = report.to_dict()
+    payload["checks"].extend(c.to_dict() for c in remote_checks)
+    overall_rank = {"PASS": 0, "NOT_CONFIGURED": 1, "WARN": 2, "FAIL": 3}
+    payload["overall"] = max(payload["checks"], key=lambda c: overall_rank[c["status"]])["status"] \
+        if payload["checks"] else "PASS"
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Preflight ({payload['profile']} profile) -- overall: {payload['overall']}")
+        for check in payload["checks"]:
+            detail = f" -- {check['detail']}" if check.get("detail") else ""
+            print(f"  [{check['status']:^13}] {check['name']}{detail}")
+
+    if payload["overall"] == "FAIL":
+        return 1
+    if payload["overall"] == "NOT_CONFIGURED":
+        return 2
+    return 0
+
+
+def cmd_db_status(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import db_status
+
+    status = db_status(ctx.engine, ctx.settings.database_url)
+    print(json.dumps(status.to_dict(), indent=2))
+    return 0 if not status.pending_migrations and status.integrity_status == "ok" else 1
+
+
+def cmd_db_migrate(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import MigrationLockedError, db_migrate
+
+    backup_dir = Path(args.backup_dir) if args.backup_dir else None
+    if not args.dry_run and not args.no_backup and backup_dir is None:
+        print(
+            "db-migrate requires --backup-dir (or --no-backup to explicitly skip the safety backup)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = db_migrate(
+            ctx.engine, ctx.settings.database_url, dry_run=args.dry_run,
+            backup_dir=None if args.no_backup else backup_dir,
+        )
+    except MigrationLockedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_backup(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import DbToolsError, db_backup
+
+    try:
+        result = db_backup(ctx.settings.database_url, Path(args.dest_dir))
+    except DbToolsError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_restore(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import DbToolsError, RestoreRefusedError, db_restore
+
+    try:
+        result = db_restore(
+            ctx.settings.database_url, Path(args.backup_path), confirm_restore=args.confirm_restore,
+            session_factory=ctx.session_factory, lease_timeout_seconds=ctx.settings.lease_timeout_seconds,
+            pre_restore_backup_dir=Path(args.pre_restore_backup_dir), engine=ctx.engine,
+        )
+    except (RestoreRefusedError, DbToolsError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import db_verify
+
+    result = db_verify(ctx.engine, ctx.session_factory)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0 if result.ok else 1
+
+
+def cmd_storage_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.storage_tools import storage_verify
+
+    result = storage_verify(ctx.storage, ctx.session_factory, repair_safe=args.repair_safe)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0 if result.ok else 1
+
+
+def cmd_backup_create(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import backup_create
+
+    result = backup_create(
+        ctx.settings.database_url, ctx.storage.root_dir, ctx.publish_journal().root_dir,
+        ctx.config_fingerprint(), Path(args.dest_path),
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_backup_inspect(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import BackupBundleError, backup_inspect
+
+    try:
+        result = backup_inspect(Path(args.bundle_path))
+    except BackupBundleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_backup_restore(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import BackupBundleError, backup_restore
+
+    try:
+        result = backup_restore(
+            Path(args.bundle_path), ctx.storage.root_dir, ctx.settings.database_url,
+            ctx.publish_journal().root_dir, confirm_restore=args.confirm_restore,
+        )
+    except BackupBundleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_incident_bundle(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.incident import IncidentBundleSecretDetectedError, build_incident_bundle
+
+    try:
+        result = build_incident_bundle(ctx, Path(args.dest_path))
+    except IncidentBundleSecretDetectedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_live_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Single-command read-only sweep (default) across YouTube/TikTok/
+    Instagram live account state, optionally followed by a real,
+    per-platform-confirmed upload test. A provider with no saved
+    credential is reported NOT_CONFIGURED and the sweep continues to the
+    next platform -- never aborts the whole run. Every result (read-only
+    and upload-test) is appended to the append-only live-verification
+    log, distinct from Publication."""
+    from reel_harness.ops.live_verify import LiveVerificationLog, LiveVerificationRecord, run_read_only_live_verify
+
+    requested = [p for p, enabled in (
+        ("youtube", args.youtube), ("tiktok", args.tiktok), ("instagram", args.instagram),
+    ) if enabled] or ["youtube", "tiktok", "instagram"]
+    account = args.account or "default"
+    log = LiveVerificationLog(ctx.publish_journal().root_dir.parent / "live_verification")
+
+    records = run_read_only_live_verify(ctx, providers=tuple(requested), account=account)
+    for record in records:
+        log.append(record)
+
+    if args.upload_tests:
+        confirm_map = {
+            "youtube": args.confirm_youtube_private, "tiktok": args.confirm_tiktok_restricted,
+            "instagram": args.confirm_instagram_public,
+        }
+        upload_fn_map = {
+            "youtube": lambda: _smoke_publisher_youtube(
+                ctx, account, upload_private_test=True, confirm_test_upload=True,
+            ),
+            "tiktok": lambda: _smoke_publisher_tiktok(
+                ctx, account, upload_private_test=True, confirm_test_upload=True, confirm_platform_options=True,
+            ),
+            "instagram": lambda: _smoke_publisher_instagram(
+                ctx, account, upload_public_test=True, confirm_test_upload=True,
+                confirm_public_upload=True, confirm_platform_options=True,
+            ),
+        }
+        from datetime import UTC, datetime
+
+        from reel_harness._version import __version__
+        from reel_harness.ops.fingerprint import fingerprint_hash
+
+        for provider in requested:
+            if not confirm_map[provider]:
+                continue  # never runs an upload test without this platform's explicit confirmation flag
+            started_at = datetime.now(UTC).isoformat()
+            exit_code = upload_fn_map[provider]()
+            outcome = "PASS" if exit_code == 0 else "FAIL"
+            record = LiveVerificationRecord(
+                provider=provider, account_alias=account, verification_type="upload_test",
+                started_at=started_at, completed_at=datetime.now(UTC).isoformat(), outcome=outcome,
+                application_version=__version__,
+                config_fingerprint_hash=fingerprint_hash(ctx.config_fingerprint()),
+                detail=f"exit_code={exit_code}",
+            )
+            records.append(record)
+            log.append(record)
+
+    payload = {"providers": requested, "account": account, "records": [r.to_dict() for r in records]}
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        for record in records:
+            print(
+                f"[{record.outcome:^20}] {record.provider} ({record.verification_type}) -- {record.detail}",
+            )
+    return 0 if all(r.outcome in ("PASS", "NOT_CONFIGURED") for r in records) else 1
+
+
+def cmd_release_manifest(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.release import build_release_manifest, write_release_manifest
+
+    test_summary = None
+    if args.test_summary_json:
+        test_summary = json.loads(Path(args.test_summary_json).read_text(encoding="utf-8"))
+    manifest = build_release_manifest(
+        repo_root=Path.cwd(),
+        wheel_path=Path(args.wheel_path) if args.wheel_path else None,
+        sdist_path=Path(args.sdist_path) if args.sdist_path else None,
+        lock_path=Path(args.lock_path) if args.lock_path else None,
+        test_summary=test_summary,
+        live_verification_status=args.live_verification_status,
+    )
+    dest = write_release_manifest(manifest, Path(args.dest_path))
+    print(json.dumps(manifest, indent=2))
+    print(f"written to {dest}", file=sys.stderr)
+    return 0
+
+
+def cmd_release_check(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Everything that must pass before an RC tag is created. Never
+    creates a commit or tag itself -- see docs/OPERATIONS.md for the tag
+    step, which is always a separate, explicit, manual action."""
+    from reel_harness.ops.release_check import run_release_check
+
+    report = run_release_check(Path.cwd(), skip_slow=args.skip_slow, pytest_timeout=args.pytest_timeout)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(f"release-check -- overall: {report.overall} -- ready_to_tag: {report.ready_to_tag}")
+        for item in report.items:
+            detail = f" -- {item.detail}" if item.detail else ""
+            print(f"  [{item.status:^8}] {item.name}{detail}")
+    return 0 if report.ready_to_tag else 1
 
 
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
@@ -2488,11 +2765,200 @@ def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
     return daemon.run()
 
 
+def cmd_serve(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Runs the API, render worker, and publisher worker together in one
+    supervised process -- see ops.supervisor.Supervisor for the failure
+    policy. Each of --api/--render-worker/--publisher-worker can be
+    disabled individually (all three run by default)."""
+    from reel_harness.ops.supervisor import Supervisor, SupervisorConfig
+    from reel_harness.worker.daemon import DaemonConfig, default_worker_id
+    from reel_harness.worker.publish_daemon import PublisherDaemonConfig, default_publisher_worker_id
+
+    settings = ctx.settings
+    config = SupervisorConfig(
+        run_api=args.api, run_render_worker=args.render_worker, run_publisher_worker=args.publisher_worker,
+        host=args.host, port=args.port,
+        render_workers=args.render_workers, publisher_workers=args.publisher_workers,
+        shutdown_timeout_seconds=args.shutdown_timeout,
+        render_daemon_config=DaemonConfig(
+            worker_id=default_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
+            lease_timeout_seconds=settings.lease_timeout_seconds,
+            heartbeat_interval_seconds=settings.lease_heartbeat_seconds,
+        ),
+        publisher_daemon_config=PublisherDaemonConfig(
+            worker_id=default_publisher_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
+            lease_timeout_seconds=settings.lease_timeout_seconds,
+            process_upload=True, process_status=True,
+        ),
+    )
+    supervisor = Supervisor(ctx, config)
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        supervisor.request_stop(f"signal_{signum}")
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return supervisor.run()
+
+
 def build_parser() -> argparse.ArgumentParser:
+    from reel_harness._version import __version__
+
     parser = argparse.ArgumentParser(prog="reel-harness")
+    # argparse's "version" action prints and exits inside parse_args() itself,
+    # before main() ever constructs an AppContext -- so --version never needs
+    # a working DB/storage/provider config.
+    parser.add_argument("--version", action="version", version=f"reel-harness {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+
+    preflight = sub.add_parser("preflight", help="Single operator readiness check before running for real")
+    preflight.add_argument("--profile", choices=["fake", "production"], default="fake")
+    preflight.add_argument(
+        "--provider", action="append", choices=["llm", "tts", "asset"],
+        help="Repeatable; scopes --check-remote to specific pipeline providers (llm/tts/asset)",
+    )
+    preflight.add_argument(
+        "--publisher", action="append", choices=["youtube", "tiktok", "instagram"],
+        help="Repeatable; scopes --check-remote to specific publishers (default: all three)",
+    )
+    preflight.add_argument(
+        "--check-remote", action="store_true", help="Also attempt real, read-only remote checks",
+    )
+    preflight.add_argument("--json", action="store_true")
+    preflight.set_defaults(func=cmd_preflight)
+
+    sub.add_parser("db-status", help="Schema/migration/integrity summary").set_defaults(func=cmd_db_status)
+
+    db_migrate_p = sub.add_parser("db-migrate", help="Apply pending schema migrations")
+    db_migrate_p.add_argument("--dry-run", action="store_true", help="Report the plan; touch nothing")
+    db_migrate_p.add_argument(
+        "--backup-dir", default=None,
+        help="Directory for the pre-migration safety backup (required unless --no-backup)",
+    )
+    db_migrate_p.add_argument(
+        "--no-backup", action="store_true", help="Skip the pre-migration safety backup (not recommended)",
+    )
+    db_migrate_p.set_defaults(func=cmd_db_migrate)
+
+    db_backup_p = sub.add_parser("db-backup", help="SQLite online backup with checksum manifest")
+    db_backup_p.add_argument(
+        "--dest-dir", required=True, help="Directory to write the backup into (outside the repository)",
+    )
+    db_backup_p.set_defaults(func=cmd_db_backup)
+
+    db_restore_p = sub.add_parser("db-restore", help="Restore the database from a db-backup archive")
+    db_restore_p.add_argument("backup_path", help="Path to a *.sqlite3.bak file produced by db-backup")
+    db_restore_p.add_argument(
+        "--confirm-restore", action="store_true", help="Required -- this replaces the live database",
+    )
+    db_restore_p.add_argument(
+        "--pre-restore-backup-dir", required=True,
+        help="Directory for the automatic backup of the CURRENT database taken before restoring",
+    )
+    db_restore_p.set_defaults(func=cmd_db_restore)
+
+    sub.add_parser(
+        "db-verify", help="Integrity check, foreign keys, orphan rows, forbidden ACTIVE+unlocked rows",
+    ).set_defaults(func=cmd_db_verify)
+
+    storage_verify_p = sub.add_parser(
+        "storage-verify", help="Cross-check job storage against the DB (checksums, manifests, orphans)",
+    )
+    storage_verify_p.add_argument(
+        "--repair-safe", action="store_true",
+        help="Also delete stale (>1h) leaked temp files -- never touches final.mp4/manifests/Publication status",
+    )
+    storage_verify_p.set_defaults(func=cmd_storage_verify)
+
+    backup_create_p = sub.add_parser("backup-create", help="Portable archive of DB + jobs storage + journal")
+    backup_create_p.add_argument(
+        "--dest-path", required=True, help="Output archive path (outside the repository)",
+    )
+    backup_create_p.set_defaults(func=cmd_backup_create)
+
+    backup_inspect_p = sub.add_parser(
+        "backup-inspect", help="Read-only: validate and summarize a backup-create bundle",
+    )
+    backup_inspect_p.add_argument("bundle_path")
+    backup_inspect_p.set_defaults(func=cmd_backup_inspect)
+
+    backup_restore_p = sub.add_parser("backup-restore", help="Restore a backup-create bundle (destructive)")
+    backup_restore_p.add_argument("bundle_path")
+    backup_restore_p.add_argument(
+        "--confirm-restore", action="store_true", help="Required -- this overwrites the destination",
+    )
+    backup_restore_p.set_defaults(func=cmd_backup_restore)
+
+    incident_bundle_p = sub.add_parser(
+        "incident-bundle", help="Diagnostics zip for offline incident analysis (secret-scanned before writing)",
+    )
+    incident_bundle_p.add_argument(
+        "--dest-path", required=True, help="Output archive path (outside the repository)",
+    )
+    incident_bundle_p.set_defaults(func=cmd_incident_bundle)
+
+    live_verify_p = sub.add_parser(
+        "live-verify",
+        help="Read-only live account sweep across YouTube/TikTok/Instagram (default), or upload tests",
+    )
+    live_verify_p.add_argument("--youtube", action="store_true")
+    live_verify_p.add_argument("--tiktok", action="store_true")
+    live_verify_p.add_argument("--instagram", action="store_true")
+    live_verify_p.add_argument("--account", default=None, help="Default: 'default'")
+    live_verify_p.add_argument(
+        "--read-only", action="store_true",
+        help="No-op -- read-only is always the default; --upload-tests is the only opt-out",
+    )
+    live_verify_p.add_argument(
+        "--upload-tests", action="store_true",
+        help="Opt-in: allow a real per-platform upload test IF that platform's confirm flag is also given",
+    )
+    live_verify_p.add_argument(
+        "--confirm-youtube-private", action="store_true",
+        help="Required (with --upload-tests) to run YouTube's private test upload",
+    )
+    live_verify_p.add_argument(
+        "--confirm-tiktok-restricted", action="store_true",
+        help="Required (with --upload-tests) to run TikTok's SELF_ONLY test upload",
+    )
+    live_verify_p.add_argument(
+        "--confirm-instagram-public", action="store_true",
+        help="Required (with --upload-tests) to run Instagram's public test Reel -- the strongest confirmation",
+    )
+    live_verify_p.add_argument("--json", action="store_true")
+    live_verify_p.set_defaults(func=cmd_live_verify)
+
+    release_manifest_p = sub.add_parser(
+        "release-manifest", help="Build a release manifest (version/commit/schema/checksums/known limitations)",
+    )
+    release_manifest_p.add_argument("--dest-path", required=True)
+    release_manifest_p.add_argument("--wheel-path", default=None)
+    release_manifest_p.add_argument("--sdist-path", default=None)
+    release_manifest_p.add_argument("--lock-path", default=None)
+    release_manifest_p.add_argument(
+        "--test-summary-json", default=None, help="Path to a JSON file to embed verbatim as test_summary",
+    )
+    release_manifest_p.add_argument(
+        "--live-verification-status", default="not_run",
+        help="Default 'not_run' -- pass a real status only after actually running live-verify",
+    )
+    release_manifest_p.set_defaults(func=cmd_release_manifest)
+
+    release_check_p = sub.add_parser(
+        "release-check", help="Pre-tag gate: git/version/lockfile/tests/mypy/ruff/secret-scan/artifact-scan",
+    )
+    release_check_p.add_argument(
+        "--skip-slow", action="store_true", help="Skip full_pytest/mypy/ruff -- fast iterative check only",
+    )
+    release_check_p.add_argument("--pytest-timeout", type=float, default=900.0)
+    release_check_p.add_argument("--json", action="store_true")
+    release_check_p.set_defaults(func=cmd_release_check)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
@@ -2623,6 +3089,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only lease processing-poll-lane publications (omit both for both)",
     )
     publisher_run.set_defaults(func=cmd_publisher_run)
+
+    serve = sub.add_parser(
+        "serve", help="Run the API, render worker, and publisher worker together in one supervised process",
+    )
+    serve.add_argument("--api", dest="api", action="store_true", default=True, help="Default: on")
+    serve.add_argument("--no-api", dest="api", action="store_false")
+    serve.add_argument(
+        "--render-worker", dest="render_worker", action="store_true", default=True, help="Default: on",
+    )
+    serve.add_argument("--no-render-worker", dest="render_worker", action="store_false")
+    serve.add_argument(
+        "--publisher-worker", dest="publisher_worker", action="store_true", default=True, help="Default: on",
+    )
+    serve.add_argument("--no-publisher-worker", dest="publisher_worker", action="store_false")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--render-workers", type=int, default=1, help="Thread count for the render worker (SQLite: keep this low)",
+    )
+    serve.add_argument(
+        "--publisher-workers", type=int, default=1,
+        help="Thread count for the publisher worker (SQLite: keep this low)",
+    )
+    serve.add_argument(
+        "--shutdown-timeout", type=float, default=30.0, help="Seconds to wait for graceful shutdown",
+    )
+    serve.set_defaults(func=cmd_serve)
 
     publication_status = sub.add_parser(
         "publication-status", help="Read-only: show a publication's current DB state",
