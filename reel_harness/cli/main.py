@@ -309,6 +309,26 @@ def cmd_live_verify(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0 if all(r.outcome in ("PASS", "NOT_CONFIGURED") for r in records) else 1
 
 
+def cmd_release_manifest(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.release import build_release_manifest, write_release_manifest
+
+    test_summary = None
+    if args.test_summary_json:
+        test_summary = json.loads(Path(args.test_summary_json).read_text(encoding="utf-8"))
+    manifest = build_release_manifest(
+        repo_root=Path.cwd(),
+        wheel_path=Path(args.wheel_path) if args.wheel_path else None,
+        sdist_path=Path(args.sdist_path) if args.sdist_path else None,
+        lock_path=Path(args.lock_path) if args.lock_path else None,
+        test_summary=test_summary,
+        live_verification_status=args.live_verification_status,
+    )
+    dest = write_release_manifest(manifest, Path(args.dest_path))
+    print(json.dumps(manifest, indent=2))
+    print(f"written to {dest}", file=sys.stderr)
+    return 0
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2896,6 +2916,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live_verify_p.add_argument("--json", action="store_true")
     live_verify_p.set_defaults(func=cmd_live_verify)
+
+    release_manifest_p = sub.add_parser(
+        "release-manifest", help="Build a release manifest (version/commit/schema/checksums/known limitations)",
+    )
+    release_manifest_p.add_argument("--dest-path", required=True)
+    release_manifest_p.add_argument("--wheel-path", default=None)
+    release_manifest_p.add_argument("--sdist-path", default=None)
+    release_manifest_p.add_argument("--lock-path", default=None)
+    release_manifest_p.add_argument(
+        "--test-summary-json", default=None, help="Path to a JSON file to embed verbatim as test_summary",
+    )
+    release_manifest_p.add_argument(
+        "--live-verification-status", default="not_run",
+        help="Default 'not_run' -- pass a real status only after actually running live-verify",
+    )
+    release_manifest_p.set_defaults(func=cmd_release_manifest)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
