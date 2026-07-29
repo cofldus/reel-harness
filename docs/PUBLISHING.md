@@ -502,3 +502,69 @@ on `Publication.provider_video_id`.
 - **`upload_url` is never persisted verbatim** (same pattern as YouTube's
   resumable session URI) — only an opaque local reference, via the same
   `publisher.session_store`.
+- **`creator_info` is re-validated in the actual worker publish path**,
+  not just the CLI's `provider-smoke`/`publish-job --dry-run` checks:
+  `worker.publish_runner._verify_platform_options` re-fetches it and
+  re-validates the requested privacy/options immediately before creating
+  (or re-creating) an upload session, for any provider whose capabilities
+  say it requires this (`PublisherCapabilities.requires_creator_info`) —
+  a no-op for YouTube.
+- **A real efficiency bug found by the contract E2E test, fixed at the
+  shared-code level**: `worker.publish_runner._upload_stage` used to call
+  `query_upload_offset` unconditionally, even on a session created moments
+  earlier in the same `run_publication` call. Harmless for YouTube (a
+  fresh session's offset query just returns 0), but actively wasteful for
+  TikTok — since `query_upload_offset` always raises
+  `UploadSessionExpiredError` by design (see above), this forced an
+  immediate, silently-discarded *second* session (a wasted `publish_id`)
+  on every single ordinary, uninterrupted publish attempt. Fixed by
+  skipping the query entirely when `Publication.bytes_uploaded == 0` (there
+  is nothing to resume yet, so byte 0 is always correct regardless of what
+  the provider might report) — verified as a genuine, if minor, efficiency
+  improvement for YouTube too (its full adapter/E2E/reconciliation/retry
+  suite passes unchanged), not a TikTok-only patch.
+
+## Platform capability model (Phase 3C)
+
+`providers.base.PublisherCapabilities` (populated per adapter, looked up
+credential-free via `providers.registry.provider_capabilities`) is what the
+CLI/API/service layers check instead of branching on a vendor name.
+TikTok's shape: `supports_direct_publish=True`, `supports_upload_only=False`
+(no inbox-draft mode is ever requested), `supports_scheduled_publish=False`,
+`supports_public_privacy=True` (API-level capability — independent of the
+unaudited-app runtime restriction), `supports_unlisted_privacy=False` (no
+TikTok privacy level maps to "unlisted"), `supports_comments_control=True`,
+`supports_remix_control=True` (duet/stitch), `supports_processing_poll=True`,
+`supports_remote_delete=False`, `requires_creator_info=True`,
+`requires_user_confirmation=True`, `privacy_values={SELF_ONLY,
+MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR, PUBLIC_TO_EVERYONE}`,
+`default_privacy=SELF_ONLY`, `public_privacy_values={PUBLIC_TO_EVERYONE}`.
+
+## Error codes introduced this phase
+
+`APP_REVIEW_REQUIRED` (`PublisherAppReviewRequiredError`), `PRIVACY_NOT_ALLOWED`
+(`PublisherPrivacyNotAllowedError`), `CREATOR_NOT_ELIGIBLE`
+(`PublisherCreatorNotEligibleError`) — all in `reel_harness/core/errors.py`,
+all `retryable=False` (none of these are fixed by retrying; the operator or
+the account's own state has to change first). The existing generic
+`METADATA_INVALID`/`UPSTREAM_AUTH`/`UPSTREAM_PERMISSION_DENIED`/
+`UPSTREAM_RATE_LIMITED`/`UPLOAD_SESSION_EXPIRED`/`UPLOAD_REJECTED`
+error codes (built in Phase 3A/3B) are reused as-is for TikTok's own
+equivalent failures rather than duplicated under TikTok-specific names.
+
+## Reconciliation outcome vocabulary (Phase 3C)
+
+`core.publish_reconciliation.RECONCILE_OUTCOMES` is intentionally shared
+across every provider rather than forked per-provider. TikTok-flavored
+concepts map onto the existing names: "upload session created but nothing
+uploaded yet" / "upload complete, not yet published" / "publish
+submitted" → `already_consistent` (the granular remote status, e.g.
+`processing_status=PROCESSING_UPLOAD`, is already in the result's
+`reasons`); "remote post found" / "remote post missing" →
+`recovered_remote_video` / `remote_video_missing`; "session expired" →
+`upload_session_expired` (which every TikTok publication with a
+resumable-in-progress session reaches, since `query_upload_offset` always
+raises it). `app_review_required` is the one genuinely new outcome:
+a proactive, read-only `creator_info` check on a publication that's never
+even started uploading, surfacing an unaudited-app block before the
+operator wastes a retry cycle discovering it the hard way.

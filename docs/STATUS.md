@@ -1,8 +1,149 @@
 # Status
 
-Last updated: 2026-07-28 (Phase 3B youtube-production-reliability session,
-on branch `phase3/youtube-production`). Phase 2A through Phase 3A are
-merged into `main`.
+Last updated: 2026-07-29 (Phase 3C tiktok-publisher session, on branch
+`phase3/tiktok-publisher`). Phase 2A through Phase 3B are merged into
+`main`.
+
+## Phase 3C — TikTok publisher (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
+`docs/PUBLISHING.md` for the official-doc research this is built from,
+checked 2026-07-29):
+
+- **A platform capability model** (`providers.base.PublisherCapabilities`/
+  `CreatorInfo`, `providers.registry.provider_capabilities`/
+  `default_platform_options`/`validate_platform_options`): what one
+  publisher adapter actually supports (direct publish, upload-only,
+  scheduled publish, public/unlisted privacy, comments/remix control,
+  processing poll, remote delete, whether creator-info/user confirmation
+  is required, the provider's own privacy vocabulary and most-restrictive
+  default) — checked by the service/CLI/API layers instead of scattering
+  `if provider == "..."` conditionals through domain code. YouTube and the
+  fake provider were retrofitted onto the same model with no behavior
+  change (verified by the full pre-existing YouTube suite passing
+  unchanged).
+- **TikTok OAuth**: `publisher-auth tiktok` (PKCE + `state`, `video.publish`
+  scope only) supports both an operator-registered loopback redirect (bound
+  to its exact registered port, unlike YouTube's any-ephemeral-port
+  installed-app flow) and a manual-paste flow for the documented `https://`
+  redirect_uri case — TikTok's docs don't describe a loopback exception the
+  way Google's do. `OAuthCredential` gained `refresh_expires_at` (TikTok's
+  refresh token itself expires, ~365 days); a refresh call rotating the
+  refresh token is handled (a real behavioral difference from YouTube's,
+  which never rotates). Shared PKCE/state/loopback-server code was
+  extracted from `publisher.oauth_youtube` into `publisher.oauth_common`
+  with zero behavior change (verified by the existing YouTube OAuth suite).
+- **`TikTokPublisher` adapter** (`providers/tiktok_publisher.py`): Direct
+  Post / `FILE_UPLOAD` only (`PULL_FROM_URL` needs hosting this project has
+  no equivalent of — explicitly out of scope). `get_creator_info` is always
+  a fresh network call, never cached; `validate_publish_options` rejects an
+  unsupported privacy/interaction combination explicitly (including a
+  distinct `APP_REVIEW_REQUIRED` signal for the unaudited-app case, never a
+  silent fallback). `build_post_text` validates length (2200 UTF-16 units)
+  and rejects disallowed internal markers (job id/local path/secret/
+  signed-URL fragments) as defense in depth. TikTok's `publish_id` is known
+  immediately at session-creation time (`UploadSessionHandle.
+  provider_reference`), persisted onto `Publication.provider_video_id`
+  right away — an even earlier crash-recovery closure than YouTube's.
+  `query_upload_offset` always raises `UploadSessionExpiredError`: the
+  official docs don't document a way to query a session's confirmed
+  offset, so every interruption starts a **brand-new** session and
+  re-uploads the entire file rather than guessing at an offset (a real
+  efficiency cost, documented, not hidden). A real bug surfaced by the
+  contract E2E test and fixed this session: `worker.publish_runner.
+  _upload_stage` previously queried the upload offset unconditionally,
+  even on a session created moments earlier in the same call — harmless
+  for YouTube (a fresh-session offset query just returns 0) but actively
+  wasteful for TikTok (forced an immediate, silently-discarded second
+  session on every single publish attempt). Fixed by skipping the query
+  entirely when nothing has been uploaded yet; verified as a genuine
+  efficiency improvement for YouTube too, not just a TikTok fix (its own
+  full test suite, including the contract E2E, passes unchanged).
+- **Creator-info validation wired into the real publish path**, not just
+  the CLI smoke command: `worker.publish_runner` re-fetches `creator_info`
+  fresh and re-validates the requested privacy/platform-options against it
+  immediately before creating (or re-creating) an upload session, for any
+  provider whose capabilities require it — never trusting an earlier
+  snapshot, never silently substituting a different option if something
+  changed since the publication was created.
+- **`publisher-doctor tiktok [--check-remote] [--json]`**: mirrors
+  YouTube's doctor plus TikTok-specific checks (granted scope,
+  refresh-token expiry) and a distinct `app_review_status` check
+  (`PASS`/`APP_REVIEW_REQUIRED`/`FAIL`/`NOT_CONFIGURED`) from a live
+  `creator_info` query — surfaced explicitly, never hidden inside a
+  generic failure.
+- **`publish-job --provider tiktok --dry-run`**: a TikTok-shaped preview
+  (post text + validation, default platform_options, `FILE_UPLOAD` chunk
+  plan) entirely local — never even calls `creator_info`, let alone
+  publish-init; `creator_info`/`app_review_status` are explicitly reported
+  as "not fetched" with a pointer to the live-check command.
+  `--confirm-platform-options` is required for TikTok publications
+  (`PublisherCapabilities.requires_user_confirmation`).
+- **`provider-smoke publisher tiktok`**: read-only by default
+  (credential/token refresh/creator_info/scope/privacy-options); the opt-in
+  private upload smoke requires all three of `--upload-private-test
+  --confirm-test-upload --confirm-platform-options` AND real application
+  permission (confirmed via `creator_info`) — always `SELF_ONLY`, a very
+  short scratch clip, comments/duet/stitch all disabled. Distinct `NOT
+  RUN` wording for missing credentials vs. missing application permission.
+- **TikTok reconciliation and idempotency**, reusing the existing
+  provider-generic `core.publish_reconciliation`/durable-journal framework
+  rather than forking a parallel one: the DB unique constraint
+  (`provider`, `account_reference`, `job_id`, `final_video_checksum`) is
+  already provider-scoped, so a YouTube and a TikTok publication for the
+  same job/account never collide. One genuinely new outcome,
+  `app_review_required`, proactively surfaces an unaudited-app block on a
+  publication that's never even started uploading, via a read-only
+  `creator_info` check — the rest of TikTok's needed vocabulary (session
+  can't be resumed, a recovered/missing video id, credentials
+  unavailable) maps onto the existing generic outcomes, whose `reasons`
+  already carry the TikTok-specific detail.
+- **Registry wiring**: `resolve_publisher`/`provider_capabilities`/
+  `publisher_snapshot` all recognize `"tiktok"`, so the existing
+  provider-generic worker (`publisher-run`), API
+  (`POST /v1/jobs/{id}/publications`), and `bundle_for_publication` wiring
+  needed **zero** TikTok-specific code — the capability model built in the
+  first commit of this phase already generalized them.
+- **TikTok contract E2E** (`tests/e2e/test_tiktok_publisher_e2e.py`): a
+  real ffmpeg-built `final.mp4` driven through the full publish state
+  machine against the real `TikTokPublisher` adapter and a stateful fake
+  TikTok server (creator_info/init/upload/status, validating the real wire
+  contract — Content-Range/Content-Length, the `{data, error}` envelope —
+  not just returning canned responses). Covers idempotent publication
+  creation, a transient mid-upload failure, the documented
+  can't-resume-only-restart behavior (a second, distinct `publish_id`;
+  the first session's partial bytes permanently abandoned), the early
+  `provider_video_id` closure, real polled processing completion, the
+  full audit trail, and that no secret/token/local path ever reaches the
+  DB, the journal, or the post text actually sent.
+- **YouTube regression explicitly re-verified** after all of the above
+  (adapter tests, contract E2E, OAuth, reconciliation, retry, publisher
+  worker, doctor, API, metadata fingerprint, public-upload safety gate,
+  registry): 174 YouTube-relevant tests, all passing unchanged.
+
+Explicitly out of scope this phase (see `docs/OPERATIONS.md`): Instagram/
+Facebook Reels publishers, `PULL_FROM_URL`/`URL_PULL_FROM_SERVER` upload,
+automating TikTok's own app-review process, automatic public publishing,
+scheduled-publish automation, automatic remote post delete, thumbnail/
+cover-image upload beyond the default timestamp, subtitle upload,
+analytics collection, a web dashboard, PostgreSQL, a cloud secret manager,
+a cloud queue, and a CLI surface for per-post platform_options overrides
+(comments/duet/stitch/disclosures currently always use the safest
+combination).
+
+Suite after Phase 3C: **663 passed, 0 failed, 1 skipped** (536 → 664
+collected, 128 new tests). The one skip is the same pre-existing,
+unrelated one from Phase 3A/3B (`test_secret_store.py`'s symlink-rejection
+test — this Windows machine doesn't permit symlink creation without
+elevated privileges). mypy clean (68 source files). ruff clean
+(`reel_harness` + `tests`).
+
+Live smoke: `NOT RUN — credentials not configured` (no
+`REEL_HARNESS_TIKTOK_CLIENT_KEY`/`_CLIENT_SECRET`/`_REDIRECT_URI` set on
+this machine). `publisher-doctor tiktok --check-remote` and
+`provider-smoke publisher tiktok [--upload-private-test --confirm-test-upload
+--confirm-platform-options]` are the documented paths to run them once
+credentials and TikTok app permissions exist.
 
 ## Phase 3B — YouTube production reliability (this branch)
 
