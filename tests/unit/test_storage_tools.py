@@ -140,3 +140,38 @@ def test_storage_verify_never_repairs_without_the_flag(job_service, channel, ses
     assert stale_temp.exists()
     assert result.repaired == []
     assert any(i.kind == "stale_temp_file" for i in result.issues)
+
+
+def test_storage_verify_never_flags_a_freshly_queued_job_as_missing_directory(
+    job_service, channel, session_factory, storage,
+) -> None:
+    """A job that was just created and is still QUEUED (or earlier) has
+    legitimately written nothing to disk yet -- SCRIPT/POLICY only touch
+    the DB, and the first stage to write a real file is ASSET_FETCHING.
+    Found via a real Phase 4B soak test: a handful of jobs still queued
+    behind a busy render worker made storage-verify FAIL on an otherwise
+    perfectly healthy system."""
+    job_service.create_job(channel.id, idempotency_key="k1", topic="t")  # QUEUED, no directory written
+    result = storage_verify(storage, session_factory)
+    assert result.ok is True
+    assert result.issues == []
+
+
+def test_storage_verify_still_flags_missing_directory_past_asset_fetching(
+    job_service, channel, session_factory, storage,
+) -> None:
+    """Once a job has progressed past the point where SOME file should
+    exist (ASSET_FETCHING or later), a genuinely missing directory is
+    still a real defect and must still be reported."""
+    job, _ = job_service.create_job(channel.id, idempotency_key="k1", topic="t")
+    with session_factory() as session:
+        db_job = session.get(Job, job.id)
+        db_job.script = {"title": "T", "llm_provider_id": "fake", "llm_model_id": "m", "prompt_version": "v"}
+        for status in (JobStatus.SCRIPT_GENERATING, JobStatus.POLICY_CHECKING, JobStatus.ASSET_FETCHING):
+            apply_transition(db_job, status)
+        session.commit()
+    # No directory was ever created for this job despite being past
+    # ASSET_FETCHING -- a real inconsistency.
+    result = storage_verify(storage, session_factory)
+    assert result.ok is False
+    assert any(i.kind == "missing_directory" for i in result.issues)

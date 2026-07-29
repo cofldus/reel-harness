@@ -15,6 +15,19 @@ _TEMP_FILE_PATTERNS = ("*.tmp-*", "final-inprogress-*")
 # might be a live worker's in-progress write, never touched.
 _STALE_TEMP_AGE_SECONDS = 3600.0
 
+# Statuses a job passes through before ANY stage has written anything to
+# disk -- SCRIPT/POLICY only ever touch the DB (Job.script is a JSON
+# column, never a file), and the first stage to actually write a file is
+# ASSET_FETCHING. A job sitting in one of these statuses (freshly created,
+# still queued, or mid-script/policy) legitimately has no job directory
+# yet -- that is normal operational state, not a defect, and must never
+# be reported as "missing_directory" (found via a real Phase 4B soak test:
+# a handful of jobs still queued behind a busy render worker made
+# storage-verify FAIL on an otherwise perfectly healthy system).
+_PRE_STORAGE_JOB_STATUSES = frozenset({
+    "CREATED", "QUEUED", "TOPIC_GENERATING", "SCRIPT_GENERATING", "POLICY_CHECKING",
+})
+
 
 def is_reparse_point(path: Path) -> bool:
     """Same check as publisher.secret_store's -- duplicated rather than
@@ -181,7 +194,8 @@ def storage_verify(storage, session_factory, repair_safe: bool = False) -> Stora
         for job in jobs:
             job_dir = storage.job_dir(job.id)
             if not job_dir.is_dir():
-                issues.append(StorageIssue("missing_directory", job.id, f"{job_dir} does not exist"))
+                if job.status not in _PRE_STORAGE_JOB_STATUSES:
+                    issues.append(StorageIssue("missing_directory", job.id, f"{job_dir} does not exist"))
                 continue
             _check_asset_checksums(storage, session, job.id, issues)
             manifest_bytes = _check_manifest(storage, job.id, issues)

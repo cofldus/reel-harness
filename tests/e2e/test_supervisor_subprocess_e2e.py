@@ -89,13 +89,23 @@ def test_supervisor_subprocess_e2e_full_lifecycle(tmp_path) -> None:
     if os.name == "nt":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    # 1. reel-harness serve, as a real subprocess
+    # 1. reel-harness serve, as a real subprocess. encoding="utf-8" is
+    # required, not optional: cli.main._make_console_encoding_safe()
+    # forces the CHILD process's stdout to UTF-8 regardless of platform,
+    # but text=True alone makes the PARENT decode with
+    # locale.getpreferredencoding() -- cp949 on this machine -- so any
+    # Korean path/text in the child's output (this repo's own absolute
+    # path always qualifies) risks a UnicodeDecodeError once enough log
+    # volume accumulates for a mismatched byte sequence to appear. Found
+    # via a real Phase 4B soak-test run with a heavier multi-job log
+    # volume than this single-job test happened to produce.
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "reel_harness.cli.main", "serve",
             "--host", "127.0.0.1", "--port", str(port), "--render-workers", "1", "--publisher-workers", "1",
         ],
-        env=env, cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **popen_kwargs,
+        env=env, cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", **popen_kwargs,
     )
     stdout_text = ""
     exit_code: int | None = None
