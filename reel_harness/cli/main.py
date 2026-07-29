@@ -2174,6 +2174,212 @@ def _run_tiktok_test_upload(ctx: AppContext, access_token: str, creator_info) ->
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _smoke_publisher_instagram(
+    ctx: AppContext, account: str, upload_public_test: bool, confirm_test_upload: bool,
+    confirm_public_upload: bool, confirm_platform_options: bool,
+) -> int:
+    """Read-only by default: credential, token refresh, account info, and
+    current publishing-limit usage -- never uploads. The opt-in test
+    upload requires ALL FOUR of --upload-public-test/--confirm-test-upload/
+    --confirm-public-upload/--confirm-platform-options AND real account
+    eligibility (confirmed via account info) -- Instagram has no private-
+    visibility option, so this is never offered under a misleading
+    '--upload-private-test' name the way YouTube's/TikTok's smoke is: any
+    real Instagram test upload IS genuinely public. A very short (3.5s,
+    above Instagram's documented 3s minimum) scratch clip, clear test
+    wording, comments disabled, Reels-tab only (not also Feed). Never
+    auto-deleted."""
+    from reel_harness.config import ProviderConfigurationError, validate_instagram_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, PublisherPermissionDeniedError, TransientProviderError
+    from reel_harness.observability import redact
+
+    try:
+        validate_instagram_credentials_configured(ctx.settings)
+    except ProviderConfigurationError:
+        print(
+            "instagram publisher OAuth client not configured -- set REEL_HARNESS_INSTAGRAM_APP_ID, "
+            "REEL_HARNESS_INSTAGRAM_APP_SECRET, and REEL_HARNESS_INSTAGRAM_REDIRECT_URI.",
+            file=sys.stderr,
+        )
+        print("NOT RUN — credentials not configured")
+        return 2
+
+    backend = ctx.credential_backend()
+    cred = backend.get_credential("instagram", account)
+    if cred is None:
+        print(
+            f"no saved instagram credential for account {account!r} -- run "
+            f"`reel-harness publisher-auth instagram --account {account}` first.",
+            file=sys.stderr,
+        )
+        print("NOT RUN — credentials not configured")
+        return 2
+
+    from reel_harness.providers.instagram_publisher import InstagramPublisher
+    from reel_harness.providers.registry import _resolve_fresh_instagram_access_token
+
+    try:
+        access_token = _resolve_fresh_instagram_access_token(ctx.settings, backend, account)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+
+    publisher = InstagramPublisher(
+        access_token_provider=lambda: access_token, graph_url=ctx.settings.instagram_graph_url,
+        api_version=ctx.settings.instagram_graph_api_version, account_id=cred.channel_id,
+        connect_timeout=ctx.settings.instagram_connect_timeout_seconds,
+        read_timeout=ctx.settings.instagram_read_timeout_seconds, max_retries=0,
+    )
+    try:
+        account_info = publisher.get_creator_info()
+    except ProviderAuthError as exc:
+        publisher.close()
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except PublisherPermissionDeniedError as exc:
+        publisher.close()
+        print(f"permission error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        publisher.close()
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+
+    # Real eligibility means account info reports no warnings at all
+    # (a non-professional account type, or an exhausted publishing limit,
+    # are both concrete blockers -- see providers.instagram_publisher.get_creator_info).
+    app_permission_available = account_info is not None and not account_info.warnings
+    summary: dict = {
+        "provider": "instagram", "account_reference": account,
+        "account_identifier": account_info.account_identifier if account_info else None,
+        "display_name": account_info.display_name if account_info else None,
+        "warnings": account_info.warnings if account_info else [],
+        "max_post_duration_sec": account_info.max_post_duration_sec if account_info else None,
+        "upload_permission_checked": False, "test_upload": None,
+    }
+
+    if upload_public_test and confirm_test_upload and confirm_public_upload and confirm_platform_options:
+        if not app_permission_available:
+            print("Instagram public upload smoke: NOT RUN — application permission not available")
+            summary["test_upload"] = {"ran": False, "reason": "application permission not available"}
+        else:
+            summary["upload_permission_checked"] = True
+            summary["test_upload"] = _run_instagram_test_upload(ctx, access_token, account_info)
+    elif upload_public_test or confirm_test_upload or confirm_public_upload or confirm_platform_options:
+        print(
+            "--upload-public-test, --confirm-test-upload, --confirm-public-upload, and "
+            "--confirm-platform-options must all be given to run the opt-in test upload -- read-only "
+            "account-info check only.",
+            file=sys.stderr,
+        )
+
+    publisher.close()
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def _run_instagram_test_upload(ctx: AppContext, access_token: str, account_info) -> dict:
+    import hashlib
+    import shutil
+    import tempfile
+    import time as time_module
+    import uuid
+    from pathlib import Path
+
+    from reel_harness.media.deps import check_ffmpeg_available
+    from reel_harness.media.runner import run
+    from reel_harness.providers.base import PublicationMetadata
+    from reel_harness.providers.instagram_publisher import (
+        InstagramPublisher,
+        InstagramReelsOptions,
+        build_caption,
+        validate_publish_options,
+    )
+
+    deps = check_ffmpeg_available()
+    if not deps.all_available:
+        return {"ran": False, "reason": "ffmpeg/ffprobe not available"}
+
+    # Comments disabled, Reels-tab only (not also Feed), no collaborators/
+    # disclosures -- the most restrictive combination this account allows.
+    options = InstagramReelsOptions()
+    try:
+        validate_publish_options(account_info, options)
+    except Exception as exc:  # noqa: BLE001 - reported, never crashes the smoke command
+        return {"ran": False, "reason": f"platform options rejected: {exc}"}
+
+    scratch = Path(tempfile.mkdtemp(prefix="reel-harness-instagram-smoke-"))
+    try:
+        video_path = scratch / "smoke.mp4"
+        argv = [
+            str(deps.ffmpeg.path), "-y",
+            # 3.5s -- above Instagram's documented 3s Reels minimum.
+            "-f", "lavfi", "-i", "testsrc=duration=3.5:size=320x568:rate=25",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=3.5",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(video_path),
+        ]
+        result = run(argv, timeout=30)
+        if result.returncode != 0:
+            return {"ran": False, "reason": "failed to build the local test clip"}
+
+        video_bytes = video_path.read_bytes()
+        caption = build_caption("[reel-harness provider-smoke test upload -- safe to ignore]")
+        publisher = InstagramPublisher(
+            access_token_provider=lambda: access_token, graph_url=ctx.settings.instagram_graph_url,
+            api_version=ctx.settings.instagram_graph_api_version, account_id=account_info.account_identifier,
+            connect_timeout=ctx.settings.instagram_connect_timeout_seconds,
+            read_timeout=ctx.settings.instagram_read_timeout_seconds, max_retries=0,
+        )
+        try:
+            metadata = PublicationMetadata(
+                title=caption, description="", tags=[], category_id="", privacy_status="PUBLIC",
+                made_for_kids=False, platform_options=options.as_platform_options(),
+            )
+            session = publisher.create_upload_session(
+                metadata, len(video_bytes), "video/mp4", str(uuid.uuid4()),
+            )
+            chunk_result = publisher.upload_chunk(session, video_bytes, 0, len(video_bytes))
+            if not chunk_result.completed or not chunk_result.provider_video_id:
+                return {"ran": False, "reason": "upload did not complete in one shot"}
+
+            container_id: str = chunk_result.provider_video_id
+            status = None
+            # Meta's own guidance: poll roughly once a minute, for no more
+            # than 5 minutes -- scaled down for this short test clip.
+            deadline = time_module.monotonic() + 60.0
+            while time_module.monotonic() < deadline:
+                status = publisher.get_processing_status(container_id)
+                if status.processing_status in ("succeeded", "failed", "terminated"):
+                    break
+                time_module.sleep(3.0)
+        finally:
+            publisher.close()
+
+        if status is None or status.processing_status != "succeeded":
+            return {
+                "ran": True, "published": False, "container_id": container_id,
+                "reason": (
+                    f"processing did not succeed within the smoke test's wait window "
+                    f"(last status: {status.processing_status if status else 'unknown'})"
+                ),
+                "note": "the container may still complete later -- check publisher-doctor instagram directly; "
+                        "remote deletion is never automatic -- see docs/OPERATIONS.md",
+            }
+        return {
+            "ran": True, "published": True, "container_id": container_id,
+            "publication_url": status.publication_url,
+            "checksum_prefix": hashlib.sha256(video_bytes).hexdigest()[:12],
+            "note": "remote deletion is never automatic -- see docs/OPERATIONS.md",
+        }
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
@@ -2194,8 +2400,15 @@ def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
                 upload_private_test=args.upload_private_test, confirm_test_upload=args.confirm_test_upload,
                 confirm_platform_options=args.confirm_platform_options,
             )
+        if args.publisher_provider == "instagram":
+            return _smoke_publisher_instagram(
+                ctx, account=args.account or "default",
+                upload_public_test=args.upload_public_test, confirm_test_upload=args.confirm_test_upload,
+                confirm_public_upload=args.confirm_public_upload,
+                confirm_platform_options=args.confirm_platform_options,
+            )
         print(
-            "usage: provider-smoke publisher {youtube|tiktok} [--account ALIAS] [...]", file=sys.stderr,
+            "usage: provider-smoke publisher {youtube|tiktok|instagram} [--account ALIAS] [...]", file=sys.stderr,
         )
         return 2
     return _smoke_tts(ctx)
@@ -2464,23 +2677,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_smoke.add_argument("target", choices=["llm", "tts", "asset", "publisher"])
     provider_smoke.add_argument(
-        "publisher_provider", nargs="?", default=None, choices=["youtube", "tiktok", None],
+        "publisher_provider", nargs="?", default=None, choices=["youtube", "tiktok", "instagram", None],
         help="Required when target=publisher, e.g. 'provider-smoke publisher youtube'",
     )
     provider_smoke.add_argument("--account", default=None, help="Account alias (default: 'default')")
     provider_smoke.add_argument(
         "--upload-private-test", action="store_true",
         help="Also run a real, private, clearly-labeled test upload (requires --confirm-test-upload too, "
-             "and --confirm-platform-options too for tiktok)",
+             "and --confirm-platform-options too for tiktok) -- youtube/tiktok only, instagram has no "
+             "private-visibility option (see --upload-public-test)",
+    )
+    provider_smoke.add_argument(
+        "--upload-public-test", action="store_true",
+        help="instagram only: run a real, PUBLIC, clearly-labeled test Reel upload (requires "
+             "--confirm-test-upload, --confirm-public-upload, AND --confirm-platform-options) -- instagram "
+             "has no private-visibility option, so this is never silently offered as 'private'",
     )
     provider_smoke.add_argument(
         "--confirm-test-upload", action="store_true",
-        help="Required alongside --upload-private-test to actually run the test upload",
+        help="Required alongside --upload-private-test/--upload-public-test to actually run the test upload",
+    )
+    provider_smoke.add_argument(
+        "--confirm-public-upload", action="store_true",
+        help="Required alongside --upload-public-test for instagram, on top of --confirm-test-upload -- "
+             "the same double-confirmation discipline every real public upload in this project requires",
     )
     provider_smoke.add_argument(
         "--confirm-platform-options", action="store_true",
-        help="Required alongside --upload-private-test/--confirm-test-upload for tiktok (see "
-             "providers.base.PublisherCapabilities.requires_user_confirmation) -- ignored for youtube",
+        help="Required alongside --upload-private-test/--upload-public-test/--confirm-test-upload for "
+             "tiktok/instagram (see providers.base.PublisherCapabilities.requires_user_confirmation) -- "
+             "ignored for youtube",
     )
     provider_smoke.set_defaults(func=cmd_provider_smoke)
 

@@ -444,3 +444,145 @@ def test_provider_smoke_publisher_tiktok_upload_smoke_not_run_without_applicatio
     payload = json.loads(out[out.index("{"):])
     assert payload["test_upload"]["ran"] is False
     assert payload["test_upload"]["reason"] == "application permission not available"
+
+
+def test_provider_smoke_publisher_instagram_not_run_without_client_credentials(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "instagram"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "NOT RUN" in out
+    assert "credentials not configured" in out
+
+
+def test_provider_smoke_publisher_instagram_not_run_without_saved_credential(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "test-app-id")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", "test-app-secret")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "instagram"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "NOT RUN" in out
+
+
+class _FakeInstagramAccountInfo:
+    def __init__(self, warnings=None) -> None:
+        self.account_identifier = "17841400"
+        self.display_name = "my_reel_account"
+        self.allowed_privacy_values = frozenset({"PUBLIC"})
+        self.comments_configurable = False
+        self.remix_configurable = False
+        self.max_post_duration_sec = 900.0
+        self.warnings = warnings or []
+
+
+def _seed_instagram_credential_for_smoke(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.publisher.credentials import FileCredentialBackend, OAuthCredential
+    from reel_harness.publisher.secret_store import FileSecretStore
+
+    store = FileSecretStore(
+        tmp_path.parent / f"{tmp_path.name}-secrets", repo_root=tmp_path.parent / "unrelated-repo",
+    )
+    FileCredentialBackend(store).save_credential(OAuthCredential(
+        access_token="fake-access-token", refresh_token=None,
+        expires_at=datetime.now(UTC) + timedelta(days=30), scope="instagram_business_content_publish",
+        provider="instagram", account_reference="default", channel_id="17841400",
+    ))
+
+
+def _isolate_instagram_smoke(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "test-app-id")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", "test-app-secret")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_instagram_credential_for_smoke(tmp_path)
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "reel_harness.providers.registry._resolve_fresh_instagram_access_token", lambda *a, **k: "fake-token",
+    )
+
+
+def test_provider_smoke_publisher_instagram_readonly_reports_warnings(monkeypatch, tmp_path, capsys) -> None:
+    _isolate_instagram_smoke(monkeypatch, tmp_path)
+
+    class _FakePublisher:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get_creator_info(self):
+            return _FakeInstagramAccountInfo(warnings=["publishing_limit_reached"])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("reel_harness.providers.instagram_publisher.InstagramPublisher", _FakePublisher)
+    exit_code = cli_main.main(["provider-smoke", "publisher", "instagram"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["warnings"] == ["publishing_limit_reached"]
+    assert payload["upload_permission_checked"] is False
+    assert payload["test_upload"] is None
+
+
+def test_provider_smoke_publisher_instagram_upload_smoke_not_run_without_all_four_flags(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate_instagram_smoke(monkeypatch, tmp_path)
+
+    class _FakePublisher:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get_creator_info(self):
+            return _FakeInstagramAccountInfo()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("reel_harness.providers.instagram_publisher.InstagramPublisher", _FakePublisher)
+    exit_code = cli_main.main([
+        "provider-smoke", "publisher", "instagram", "--upload-public-test", "--confirm-test-upload",
+    ])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["upload_permission_checked"] is False
+    assert payload["test_upload"] is None
+    assert "must all be given" in captured.err
+
+
+def test_provider_smoke_publisher_instagram_upload_smoke_not_run_without_application_permission(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    """The distinct wording the prompt requires -- not the generic
+    'credentials not configured' NOT RUN, but 'application permission
+    not available'."""
+    _isolate_instagram_smoke(monkeypatch, tmp_path)
+
+    class _FakePublisher:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get_creator_info(self):
+            return _FakeInstagramAccountInfo(warnings=["account_type='PERSONAL' is not eligible"])
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("reel_harness.providers.instagram_publisher.InstagramPublisher", _FakePublisher)
+    exit_code = cli_main.main([
+        "provider-smoke", "publisher", "instagram",
+        "--upload-public-test", "--confirm-test-upload", "--confirm-public-upload", "--confirm-platform-options",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Instagram public upload smoke: NOT RUN — application permission not available" in out
+    payload = json.loads(out[out.index("{"):])
+    assert payload["test_upload"]["ran"] is False
+    assert payload["test_upload"]["reason"] == "application permission not available"
