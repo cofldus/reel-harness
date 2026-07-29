@@ -51,6 +51,14 @@ def _seed_credential(tmp_path, **overrides) -> None:
     backend.save_credential(OAuthCredential(**defaults))
 
 
+def _seed_tiktok_credential(tmp_path, **overrides) -> None:
+    defaults = dict(
+        provider="tiktok", scope="video.publish", channel_id="tiktok-open-id", channel_title=None,
+    )
+    defaults.update(overrides)
+    _seed_credential(tmp_path, **defaults)
+
+
 def test_doctor_reports_not_configured_with_no_client_and_no_credential(monkeypatch, tmp_path, capsys) -> None:
     _isolate(monkeypatch, tmp_path)
     exit_code = cli_main.main(["publisher-doctor", "youtube", "--json"])
@@ -118,6 +126,97 @@ def test_doctor_check_remote_not_run_without_credentials(monkeypatch, tmp_path, 
     assert remote_checks["remote_token_refresh"]["status"] == "NOT_CONFIGURED"
     assert "NOT RUN" in remote_checks["remote_token_refresh"]["detail"]
     assert "NOT RUN" in remote_checks["remote_channel_identity"]["detail"]
+
+
+def test_tiktok_doctor_reports_not_configured_with_no_client_and_no_credential(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["overall"] == "NOT_CONFIGURED"
+    names = {c["name"] for c in payload["checks"]}
+    assert "oauth_client_config" in names
+    assert "account_credential" in names
+
+
+def test_tiktok_doctor_never_prints_a_secret(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret-value")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential(tmp_path, access_token="super-secret-access-token-xyz")
+    _isolate(monkeypatch, tmp_path)
+    cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    out = capsys.readouterr().out
+    assert "super-secret-access-token-xyz" not in out
+    assert "test-client-secret-value" not in out
+
+
+def test_tiktok_doctor_passes_with_configured_client_and_fresh_credential(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential(tmp_path)
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["overall"] == "PASS"
+    scope_check = next(c for c in payload["checks"] if c["name"] == "required_scope_granted")
+    assert scope_check["status"] == "PASS"
+
+
+def test_tiktok_doctor_reports_warn_when_refresh_token_missing(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential(tmp_path, refresh_token=None)
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["overall"] == "WARN"
+
+
+def test_tiktok_doctor_reports_fail_for_an_invalid_credential(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential(tmp_path, invalid=True, last_refresh_error="invalid_grant")
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["overall"] == "FAIL"
+    invalid_check = next(c for c in payload["checks"] if c["name"] == "credential_valid")
+    assert "invalid_grant" in invalid_check["detail"]
+
+
+def test_tiktok_doctor_reports_fail_for_an_expired_refresh_token(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_KEY", "test-client-key")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("REEL_HARNESS_TIKTOK_REDIRECT_URI", "https://example.invalid/callback")
+    _seed_tiktok_credential(tmp_path, refresh_expires_at=datetime.now(UTC) - timedelta(days=1))
+    _isolate(monkeypatch, tmp_path)
+    exit_code = cli_main.main(["publisher-doctor", "tiktok", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["overall"] == "FAIL"
+    refresh_check = next(c for c in payload["checks"] if c["name"] == "refresh_token_expiry")
+    assert refresh_check["status"] == "FAIL"
+
+
+def test_tiktok_doctor_check_remote_not_run_without_credentials(monkeypatch, tmp_path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    cli_main.main(["publisher-doctor", "tiktok", "--check-remote", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    remote_checks = {c["name"]: c for c in payload["checks"] if c["name"].startswith("remote_")}
+    assert remote_checks["remote_token_refresh"]["status"] == "NOT_CONFIGURED"
+    assert "NOT RUN" in remote_checks["remote_token_refresh"]["detail"]
+    assert "NOT RUN" in remote_checks["remote_creator_info"]["detail"]
+    app_review_check = next(c for c in payload["checks"] if c["name"] == "app_review_status")
+    assert app_review_check["status"] == "NOT_CONFIGURED"
 
 
 def test_account_list_is_empty_with_nothing_saved(monkeypatch, tmp_path, capsys) -> None:

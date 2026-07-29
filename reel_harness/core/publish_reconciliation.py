@@ -84,7 +84,7 @@ def _result(outcome: str, publication_id: str, reasons: list[str], provider_vide
 
 def _chunk_size_for(publication: Publication) -> int:
     config = publication.publisher_config or {}
-    size = config.get("youtube_chunk_size")
+    size = config.get("youtube_chunk_size") or config.get("tiktok_chunk_size")
     return int(size) if isinstance(size, int) and size > 0 else _DEFAULT_CHUNK_SIZE
 
 

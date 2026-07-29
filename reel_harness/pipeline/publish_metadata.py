@@ -130,12 +130,23 @@ def build_publication_metadata(
     made_for_kids: bool,
     channel_niche: str | None = None,
     footer_template: str | None = None,
+    platform_options: dict | None = None,
 ) -> PublicationMetadata:
+    """`title` doubles as TikTok's post caption (see
+    providers.tiktok_publisher.build_post_text, which validates it against
+    TikTok's own length/forbidden-marker rules) -- `build_title`'s 100-char
+    cap is always far under TikTok's 2200-UTF-16-unit limit, so the same
+    deterministic, manifest-only-derived title is safe to reuse as-is
+    rather than building a second, TikTok-specific caption. `platform_options`
+    carries TikTok-specific fields (see providers.base.PublicationMetadata's
+    docstring); a provider without a concept of this (YouTube) always gets
+    an empty dict."""
     return PublicationMetadata(
         title=build_title(manifest.topic, manifest.script_title),
         description=build_description(manifest, footer_template=footer_template),
         tags=build_tags(manifest.script_title, manifest.topic, channel_niche),
         category_id=category_id, privacy_status=privacy_status, made_for_kids=made_for_kids,
+        platform_options=dict(platform_options) if platform_options else {},
     )
 
 
@@ -162,5 +173,6 @@ def metadata_fingerprint(
         "title": metadata.title, "description": metadata.description,
         "tags": list(metadata.tags), "category_id": metadata.category_id,
         "privacy_status": metadata.privacy_status, "made_for_kids": metadata.made_for_kids,
+        "platform_options": metadata.platform_options,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

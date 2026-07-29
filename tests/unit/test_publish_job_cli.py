@@ -136,6 +136,61 @@ def test_publish_job_dry_run_public_without_confirmation_is_not_allowed(monkeypa
     assert payload["public_upload_allowed"] is False
 
 
+def test_publish_job_dry_run_tiktok_reports_a_tiktok_shaped_preview_never_touching_the_network(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    job_id = _make_completed_job_id(tmp_path, "dry-run-tiktok-1")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main(["publish-job", job_id, "--provider", "tiktok", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1  # no credential configured -- credential_configured is False
+    assert payload["requested_privacy_status"] == "SELF_ONLY"  # provider's own most-restrictive default
+    assert payload["credential_configured"] is False
+    assert payload["metadata_preview"] is None  # tiktok never gets youtube's shape
+    preview = payload["tiktok_preview"]
+    assert preview["post_text"]
+    assert preview["post_text_error"] is None
+    assert preview["expected_api_mode"] == "FILE_UPLOAD"
+    assert preview["chunk_size_bytes"] > 0
+    assert preview["total_chunk_count"] >= 1
+    assert "not fetched" in preview["creator_info"]
+    assert "no credential configured" in preview["app_review_status"]
+
+
+def test_publish_job_dry_run_tiktok_public_privacy_requires_confirmation(monkeypatch, tmp_path, capsys) -> None:
+    job_id = _make_completed_job_id(tmp_path, "dry-run-tiktok-2")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main([
+        "publish-job", job_id, "--provider", "tiktok", "--privacy", "PUBLIC_TO_EVERYONE", "--dry-run",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["public_upload_allowed"] is False
+
+
+def test_publish_job_dry_run_tiktok_requires_platform_options_confirmation(monkeypatch, tmp_path, capsys) -> None:
+    job_id = _make_completed_job_id(tmp_path, "dry-run-tiktok-3")
+    _isolate(monkeypatch, tmp_path)
+
+    exit_code = cli_main.main(["publish-job", job_id, "--provider", "tiktok", "--dry-run"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["requires_user_confirmation"] is True
+    assert payload["platform_options_confirmed"] is False
+    assert exit_code == 1
+
+    exit_code_confirmed = cli_main.main([
+        "publish-job", job_id, "--provider", "tiktok", "--confirm-platform-options", "--dry-run",
+    ])
+    payload_confirmed = json.loads(capsys.readouterr().out)
+    assert payload_confirmed["platform_options_confirmed"] is True
+    # Still not "ready" overall (no credential), but the confirmation gate itself is satisfied.
+    assert exit_code_confirmed == 1
+    assert payload_confirmed["credential_configured"] is False
+
+
 def test_publish_job_real_run_creates_a_publication(monkeypatch, tmp_path, capsys) -> None:
     job_id = _make_completed_job_id(tmp_path, "real-run-1")
     _isolate(monkeypatch, tmp_path)

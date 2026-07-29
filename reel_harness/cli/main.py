@@ -288,13 +288,20 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
             ctx.settings.youtube_client_id and ctx.settings.youtube_client_secret.get_secret_value(),
         )
         credential_configured = client_ok and ctx.credential_backend().has_credential("youtube", args.account)
+    elif args.provider == "tiktok":
+        client_ok = bool(
+            ctx.settings.tiktok_client_key and ctx.settings.tiktok_client_secret.get_secret_value()
+            and ctx.settings.tiktok_redirect_uri,
+        )
+        credential_configured = client_ok and ctx.credential_backend().has_credential("tiktok", args.account)
 
-    # YouTube-shaped preview only for now ("fake" stands in for YouTube's
-    # shape throughout this project's tests) -- a provider whose metadata
-    # model doesn't match this shape (e.g. TikTok's post-text/options
-    # model) gets its own preview once that provider's dry-run support
-    # lands.
+    # YouTube-shaped preview ("fake" stands in for YouTube's shape
+    # throughout this project's tests); TikTok gets its own preview below,
+    # since its metadata model (post text + platform_options) doesn't
+    # match YouTube's title/description/tags/category shape.
     metadata_preview = None
+    tiktok_preview = None
+    upload_chunk_size_bytes = ctx.settings.youtube_upload_chunk_size
     if args.provider in ("youtube", "fake") and eligibility.manifest is not None:
         metadata = build_publication_metadata(
             eligibility.manifest, privacy_status=privacy_status,
@@ -307,6 +314,9 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
             "tags": metadata.tags, "tags_total_length": tags_total_length,
             "category_id": metadata.category_id, "made_for_kids": metadata.made_for_kids,
         }
+    elif args.provider == "tiktok" and eligibility.manifest is not None:
+        tiktok_preview = _tiktok_dry_run_preview(ctx, eligibility.manifest, privacy_status, credential_configured)
+        upload_chunk_size_bytes = ctx.settings.tiktok_upload_chunk_size
 
     video_file_size_bytes = None
     final_path = ctx.storage.job_dir(args.job_id) / "final" / "final.mp4"
@@ -319,6 +329,7 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
         or (args.confirm_public_upload and ctx.settings.allow_public_upload)
     )
     platform_options_confirmed = (not caps.requires_user_confirmation) or args.confirm_platform_options
+    post_text_valid = tiktok_preview is None or tiktok_preview.get("post_text_error") is None
 
     payload = {
         "job_id": args.job_id, "provider": args.provider, "account_reference": args.account,
@@ -331,15 +342,62 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
         "platform_options_confirmed": platform_options_confirmed,
         "credential_configured": credential_configured,
         "metadata_preview": metadata_preview,
+        "tiktok_preview": tiktok_preview,
         "video_file_size_bytes": video_file_size_bytes,
-        "upload_chunk_size_bytes": ctx.settings.youtube_upload_chunk_size,
+        "upload_chunk_size_bytes": upload_chunk_size_bytes,
     }
     print(json.dumps(payload, indent=2))
     ready = (
         eligibility.eligible and privacy_valid and credential_configured
-        and public_upload_allowed and platform_options_confirmed
+        and public_upload_allowed and platform_options_confirmed and post_text_valid
     )
     return 0 if ready else 1
+
+
+def _tiktok_dry_run_preview(ctx: AppContext, manifest, privacy_status: str, credential_configured: bool) -> dict:
+    """Entirely local/network-free, mirroring every other dry-run check in
+    this project (`publish-job --dry-run` never even calls TikTok's
+    creator_info query, let alone publish/init -- see `publisher-doctor
+    tiktok --check-remote` for a live check). Reports what CAN be
+    determined without a network call: the post text that would be sent
+    (validated against TikTok's own length/forbidden-marker rules), the
+    default platform_options, the FILE_UPLOAD chunk plan, and an explicit
+    note that creator-info/app-review status require a live check."""
+    from reel_harness.pipeline.publish_metadata import build_title
+    from reel_harness.providers.registry import default_platform_options
+    from reel_harness.providers.tiktok_publisher import build_post_text
+
+    title = build_title(manifest.topic, manifest.script_title)
+    post_text_error = None
+    try:
+        build_post_text(title)
+    except Exception as exc:  # noqa: BLE001 - reported as a field, never raised through dry-run
+        post_text_error = str(exc)
+
+    video_file_size_bytes = None
+    final_path = ctx.storage.job_dir(manifest.job_id) / "final" / "final.mp4"
+    if final_path.is_file():
+        video_file_size_bytes = final_path.stat().st_size
+    chunk_size = ctx.settings.tiktok_upload_chunk_size
+    total_chunk_count = None
+    if video_file_size_bytes is not None and chunk_size > 0:
+        total_chunk_count = max(1, -(-video_file_size_bytes // chunk_size))  # ceil division
+
+    return {
+        "post_text": title, "post_text_length_utf16_units": len(title.encode("utf-16-le")) // 2,
+        "post_text_error": post_text_error,
+        "platform_options": default_platform_options("tiktok"),
+        "expected_api_mode": "FILE_UPLOAD",
+        "chunk_size_bytes": chunk_size, "total_chunk_count": total_chunk_count,
+        "creator_info": (
+            "not fetched -- dry-run never contacts the network; run "
+            "`publisher-doctor tiktok --check-remote` for a live creator_info/app-review check"
+        ),
+        "app_review_status": (
+            "unknown -- not checked (see creator_info note above)" if credential_configured
+            else "unknown -- no credential configured"
+        ),
+    }
 
 
 def _resolve_publisher_lanes(args: argparse.Namespace) -> tuple[bool, bool]:
@@ -972,17 +1030,27 @@ def _cmd_publisher_auth_tiktok(args: argparse.Namespace, ctx: AppContext) -> int
     return 0
 
 
-_DOCTOR_STATUS_RANK = {"PASS": 0, "WARN": 1, "NOT_CONFIGURED": 2, "FAIL": 3}
-_DOCTOR_EXIT_CODE = {"PASS": 0, "WARN": 0, "NOT_CONFIGURED": 2, "FAIL": 1}
+_DOCTOR_STATUS_RANK = {"PASS": 0, "WARN": 1, "NOT_CONFIGURED": 2, "APP_REVIEW_REQUIRED": 2, "FAIL": 3}
+_DOCTOR_EXIT_CODE = {"PASS": 0, "WARN": 0, "NOT_CONFIGURED": 2, "APP_REVIEW_REQUIRED": 2, "FAIL": 1}
 
 
 def cmd_publisher_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
-    """Local-first readiness report for YouTube publishing: DB/storage/
-    credential-store/ffmpeg reachability and one account's token state, all
-    without any network call by default. --check-remote additionally
-    attempts a real token refresh and a read-only channel-identity fetch.
-    Never prints a secret or token -- only booleans, timestamps, and
-    redacted error summaries."""
+    """Local-first readiness report for publisher accounts. Dispatches to
+    the provider-specific check list below."""
+    if args.provider == "youtube":
+        return _cmd_publisher_doctor_youtube(args, ctx)
+    if args.provider == "tiktok":
+        return _cmd_publisher_doctor_tiktok(args, ctx)
+    print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)  # pragma: no cover
+    return 2
+
+
+def _cmd_publisher_doctor_youtube(args: argparse.Namespace, ctx: AppContext) -> int:
+    """DB/storage/credential-store/ffmpeg reachability and one account's
+    token state, all without any network call by default. --check-remote
+    additionally attempts a real token refresh and a read-only
+    channel-identity fetch. Never prints a secret or token -- only
+    booleans, timestamps, and redacted error summaries."""
     import os as os_module
     from datetime import UTC, datetime, timedelta
 
@@ -992,10 +1060,6 @@ def cmd_publisher_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
     from reel_harness.db.schema import SCHEMA_VERSION
     from reel_harness.observability import redact
     from reel_harness.publisher.secret_store import SecretStoreError
-
-    if args.provider != "youtube":  # pragma: no cover - argparse already restricts choices
-        print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)
-        return 2
 
     account = args.account or "default"
     checks: list[dict] = []
@@ -1147,6 +1211,205 @@ def cmd_publisher_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
                            "checks": checks}, indent=2))
     else:
         print(f"YouTube publisher doctor -- account={account!r} -- overall: {overall}")
+        for c in checks:
+            detail = f" -- {c['detail']}" if c.get("detail") else ""
+            print(f"  [{c['status']:^13}] {c['name']}{detail}")
+
+    return _DOCTOR_EXIT_CODE[overall]
+
+
+def _cmd_publisher_doctor_tiktok(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Local-first readiness report for TikTok publishing -- mirrors the
+    YouTube doctor's shape. --check-remote additionally attempts a real
+    token refresh and a read-only creator_info query, which also reveals
+    whether the app has passed TikTok's review (surfaced as the distinct
+    `app_review_status` check, never hidden inside a generic failure --
+    see docs/PUBLISHING.md). Never prints a secret or token."""
+    import os as os_module
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text as sa_text
+
+    from reel_harness.config import ProviderConfigurationError, validate_tiktok_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.db.schema import SCHEMA_VERSION
+    from reel_harness.observability import redact
+    from reel_harness.publisher.secret_store import SecretStoreError
+
+    account = args.account or "default"
+    checks: list[dict] = []
+
+    def add(name: str, status: str, detail: str | None = None) -> None:
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    try:
+        with ctx.session_factory() as session:
+            session.execute(sa_text("SELECT 1"))
+            version = session.execute(sa_text("SELECT version FROM schema_migrations")).scalar_one()
+        add("database", "PASS")
+        add(
+            "schema_version", "PASS" if version == SCHEMA_VERSION else "FAIL",
+            f"v{version} (expected v{SCHEMA_VERSION})",
+        )
+    except Exception as exc:  # noqa: BLE001 - doctor must report, never raise
+        detail = (redact(str(exc)) or "")[:200]
+        add("database", "FAIL", f"{type(exc).__name__}: {detail}")
+        add("schema_version", "FAIL", "unknown -- database unreachable")
+
+    root = ctx.storage.root_dir
+    if root.is_dir() and os_module.access(root, os_module.W_OK):
+        add("storage", "PASS")
+    else:
+        add("storage", "FAIL", "storage root missing or not writable")
+
+    try:
+        from reel_harness.providers.tiktok_publisher import TikTokPublisher  # noqa: F401
+
+        add("publisher_registry", "PASS", "tiktok adapter importable")
+    except Exception as exc:  # noqa: BLE001
+        add("publisher_registry", "FAIL", type(exc).__name__)
+
+    chunk_size = ctx.settings.tiktok_upload_chunk_size
+    add("upload_chunk_size", "PASS" if chunk_size > 0 else "FAIL", str(chunk_size))
+
+    try:
+        validate_tiktok_credentials_configured(ctx.settings)
+        add("oauth_client_config", "PASS")
+    except ProviderConfigurationError as exc:
+        add("oauth_client_config", "NOT_CONFIGURED", str(exc))
+
+    backend = None
+    try:
+        backend = ctx.credential_backend()
+        add(
+            "credential_backend", "PASS",
+            f"{backend.__class__.__name__} rooted outside the repository (repo-internal paths are rejected "
+            "at construction)",
+        )
+    except SecretStoreError as exc:
+        add("credential_backend", "FAIL", str(exc))
+
+    cred = backend.get_credential("tiktok", account) if backend is not None else None
+    if backend is None:
+        pass
+    elif cred is None:
+        add(
+            "account_credential", "NOT_CONFIGURED",
+            f"no saved credential for account {account!r} -- run publisher-auth tiktok",
+        )
+    else:
+        add("account_credential", "PASS", f"account={account!r}")
+        add(
+            "refresh_token_present", "PASS" if cred.refresh_token else "WARN",
+            "present" if cred.refresh_token else "missing -- re-auth required once the access token expires",
+        )
+        add(
+            "required_scope_granted", "PASS" if "video.publish" in (cred.scope or "") else "WARN",
+            cred.scope or "no scope recorded",
+        )
+        if cred.invalid:
+            add(
+                "credential_valid", "FAIL",
+                f"marked invalid after a failed refresh: {cred.last_refresh_error or 'unknown reason'}",
+            )
+        elif cred.expires_at is None:
+            add("token_expiry", "WARN", "no expiry recorded")
+        else:
+            now = datetime.now(UTC)
+            if cred.expires_at > now + timedelta(minutes=2):
+                add("token_expiry", "PASS", f"valid until {cred.expires_at.isoformat()}")
+            elif cred.refresh_token:
+                add("token_expiry", "WARN", "access token expired/near-expiry but refreshable")
+            else:
+                add("token_expiry", "FAIL", "access token expired and no refresh token")
+        if cred.refresh_expires_at is not None:
+            if cred.refresh_expires_at > datetime.now(UTC):
+                add("refresh_token_expiry", "PASS", f"valid until {cred.refresh_expires_at.isoformat()}")
+            else:
+                add("refresh_token_expiry", "FAIL", "refresh token expired -- re-run publisher-auth tiktok")
+
+    deps = check_ffmpeg_available()
+    add("ffmpeg", "PASS" if deps.ffmpeg_available else "FAIL")
+    add("ffprobe", "PASS" if deps.ffprobe_available else "FAIL")
+
+    add(
+        "publication_worker_config", "PASS",
+        f"lease_timeout={ctx.settings.lease_timeout_seconds}s "
+        f"poll_interval={ctx.settings.worker_poll_interval_seconds}s",
+    )
+
+    client_configured = bool(
+        ctx.settings.tiktok_client_key and ctx.settings.tiktok_client_secret.get_secret_value()
+        and ctx.settings.tiktok_redirect_uri
+    )
+    if not args.check_remote:
+        add("remote_token_refresh", "PASS", "not requested (pass --check-remote)")
+        add("remote_creator_info", "PASS", "not requested (pass --check-remote)")
+        add("app_review_status", "PASS", "not requested (pass --check-remote)")
+    elif not client_configured or cred is None:
+        add("remote_token_refresh", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+        add("remote_creator_info", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+        add("app_review_status", "NOT_CONFIGURED", "NOT RUN — credentials not configured")
+    else:
+        from reel_harness.providers.registry import _resolve_fresh_tiktok_access_token
+        from reel_harness.providers.tiktok_publisher import TikTokPublisher
+
+        token: str | None = None
+        try:
+            token = _resolve_fresh_tiktok_access_token(ctx.settings, backend, account)
+            add("remote_token_refresh", "PASS")
+        except (ProviderAuthError, TransientProviderError) as exc:
+            add("remote_token_refresh", "FAIL", (redact(str(exc)) or "")[:200])
+
+        if token is None:
+            add("remote_creator_info", "FAIL", "skipped -- token refresh failed above")
+            add("app_review_status", "FAIL", "skipped -- token refresh failed above")
+        else:
+            publisher = TikTokPublisher(
+                access_token_provider=lambda: token, base_url=ctx.settings.tiktok_base_url,
+                connect_timeout=ctx.settings.tiktok_connect_timeout_seconds,
+                read_timeout=ctx.settings.tiktok_read_timeout_seconds,
+            )
+            try:
+                creator_info = publisher.get_creator_info()
+                if creator_info is None:
+                    add("remote_creator_info", "FAIL", "no creator_info returned")
+                    add("app_review_status", "FAIL", "cannot determine -- creator_info unavailable")
+                else:
+                    add(
+                        "remote_creator_info", "PASS",
+                        f"account={creator_info.account_identifier!r}",
+                    )
+                    if creator_info.allowed_privacy_values == frozenset({"SELF_ONLY"}):
+                        add(
+                            "app_review_status", "APP_REVIEW_REQUIRED",
+                            "creator_info reports only SELF_ONLY as allowed -- this app has not passed "
+                            "TikTok's review (see docs/PUBLISHING.md)",
+                        )
+                    else:
+                        add(
+                            "app_review_status", "PASS",
+                            f"allowed privacy levels: {sorted(creator_info.allowed_privacy_values)}",
+                        )
+                    add("account_privacy_options", "PASS", f"{sorted(creator_info.allowed_privacy_values)}")
+                    max_duration = creator_info.max_post_duration_sec
+                    add(
+                        "max_video_length", "PASS" if max_duration else "WARN",
+                        f"{max_duration}s" if max_duration else "not reported",
+                    )
+            except (ProviderAuthError, TransientProviderError) as exc:
+                add("remote_creator_info", "FAIL", (redact(str(exc)) or "")[:200])
+                add("app_review_status", "FAIL", "skipped -- creator_info query failed above")
+            finally:
+                publisher.close()
+
+    overall = max((c["status"] for c in checks), key=lambda s: _DOCTOR_STATUS_RANK[s])
+
+    if args.json:
+        print(json.dumps({"provider": "tiktok", "account_reference": account, "overall": overall,
+                           "checks": checks}, indent=2))
+    else:
+        print(f"TikTok publisher doctor -- account={account!r} -- overall: {overall}")
         for c in checks:
             detail = f" -- {c['detail']}" if c.get("detail") else ""
             print(f"  [{c['status']:^13}] {c['name']}{detail}")
@@ -1655,7 +1918,7 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_doctor = sub.add_parser(
         "publisher-doctor", help="Local-first readiness report for a publisher (no network by default)",
     )
-    publisher_doctor.add_argument("provider", choices=["youtube"])
+    publisher_doctor.add_argument("provider", choices=["youtube", "tiktok"])
     publisher_doctor.add_argument("--account", default=None, help="Account alias (default: 'default')")
     publisher_doctor.add_argument(
         "--check-remote", action="store_true",
@@ -1665,19 +1928,19 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_doctor.set_defaults(func=cmd_publisher_doctor)
 
     account_list = sub.add_parser("publisher-account-list", help="List saved publisher account aliases")
-    account_list.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_list.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
     account_list.set_defaults(func=cmd_publisher_account_list)
 
     account_show = sub.add_parser("publisher-account-show", help="Show one saved account's safe metadata")
     account_show.add_argument("alias")
-    account_show.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_show.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
     account_show.set_defaults(func=cmd_publisher_account_show)
 
     account_remove = sub.add_parser(
         "publisher-account-remove", help="Delete a LOCAL saved credential (does not revoke remote authorization)",
     )
     account_remove.add_argument("alias")
-    account_remove.add_argument("--provider", default="youtube", choices=["youtube"])
+    account_remove.add_argument("--provider", default="youtube", choices=["youtube", "tiktok"])
     account_remove.add_argument("--confirm", action="store_true")
     account_remove.set_defaults(func=cmd_publisher_account_remove)
 

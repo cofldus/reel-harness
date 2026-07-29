@@ -60,7 +60,7 @@ def _audit(session, publication_id: str, event: str, detail: dict | None = None)
 
 def _chunk_size_for(publication: Publication) -> int:
     config = publication.publisher_config or {}
-    size = config.get("youtube_chunk_size")
+    size = config.get("youtube_chunk_size") or config.get("tiktok_chunk_size")
     return int(size) if isinstance(size, int) and size > 0 else _DEFAULT_CHUNK_SIZE
 
 
@@ -150,6 +150,8 @@ def _create_session_stage(
     session, publication: Publication, job, storage, bundle: PublishBundle,
     channel_niche: str | None, total_bytes: int, lease_token: str | None,
 ) -> None:
+    from reel_harness.providers.registry import default_platform_options
+
     manifest = _load_manifest(storage, job.id)
     config = publication.publisher_config or {}
     metadata = build_publication_metadata(
@@ -158,6 +160,7 @@ def _create_session_stage(
         category_id=config.get("youtube_category_id", "22"),
         made_for_kids=bool(config.get("youtube_made_for_kids", False)),
         channel_niche=channel_niche,
+        platform_options=default_platform_options(publication.provider),
     )
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
@@ -170,7 +173,10 @@ def _create_session_stage(
         account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
         event="upload_session_created", timestamp=_now(),
         safe_session_hash=safe_session_reference_hash(handle.session_reference),
-        detail={"total_bytes": total_bytes, "metadata_fingerprint": fingerprint},
+        detail={
+            "total_bytes": total_bytes, "metadata_fingerprint": fingerprint,
+            "provider_reference": handle.provider_reference,
+        },
     )
 
     if not assert_publication_lease(session, publication.id, lease_token):
@@ -178,6 +184,13 @@ def _create_session_stage(
     publication.total_bytes = total_bytes
     publication.metadata_snapshot = _metadata_to_dict(metadata)
     publication.metadata_fingerprint = fingerprint
+    if handle.provider_reference:
+        # A durable identifier known immediately at session-creation time
+        # (TikTok's publish_id) -- persisted right away rather than only
+        # at upload-completion time (YouTube's provider_video_id), closing
+        # an even earlier crash-recovery gap for providers structured this
+        # way. See providers.base.UploadSessionHandle's docstring.
+        publication.provider_video_id = handle.provider_reference
     apply_publication_transition(
         publication, PublicationStatus.UPLOAD_SESSION_CREATED, upload_session_reference=publication.id,
     )
@@ -238,8 +251,10 @@ def _start_new_session(
         account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
         event="upload_session_created", timestamp=_now(),
         safe_session_hash=safe_session_reference_hash(handle.session_reference),
-        detail={"total_bytes": total_bytes, "resumed": True},
+        detail={"total_bytes": total_bytes, "resumed": True, "provider_reference": handle.provider_reference},
     )
+    if handle.provider_reference:
+        publication.provider_video_id = handle.provider_reference
     publication.bytes_uploaded = 0
     _audit(session, publication.id, "upload_session_created", {"total_bytes": total_bytes, "resumed": True})
     return handle
