@@ -69,6 +69,52 @@ def cmd_doctor(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_preflight(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Single operator-facing readiness check before running this process
+    for real -- see docs/OPERATIONS.md. `--profile production` escalates a
+    fixed set of operationally-risky findings (placeholder secrets, an
+    unwritable storage root, an unsafe heartbeat/lease ratio, ...) from WARN
+    to FAIL; `--profile fake` (default) is the permissive local-dev bar.
+    Local checks only unless `--check-remote` is also passed."""
+    from reel_harness.ops.preflight import PreflightCheck, run_preflight, run_remote_checks
+
+    report = run_preflight(ctx.settings, ctx.session_factory, profile=args.profile)
+    remote_checks: list[PreflightCheck] = []
+    if args.check_remote:
+        requested_publishers = tuple(args.publisher) if args.publisher else ("youtube", "tiktok", "instagram")
+        remote_checks = run_remote_checks(ctx.settings, ctx.credential_backend(), publishers=requested_publishers)
+        for name in args.provider or ():
+            remote_checks.append(PreflightCheck(
+                f"remote_{name}", "NOT_CONFIGURED",
+                f"live check not performed by preflight -- use `reel-harness provider-smoke {name}`",
+            ))
+    else:
+        for name in (args.publisher or ()) :
+            remote_checks.append(PreflightCheck(f"remote_{name}", "PASS", "not requested (pass --check-remote)"))
+        for name in (args.provider or ()):
+            remote_checks.append(PreflightCheck(f"remote_{name}", "PASS", "not requested (pass --check-remote)"))
+
+    payload = report.to_dict()
+    payload["checks"].extend(c.to_dict() for c in remote_checks)
+    overall_rank = {"PASS": 0, "NOT_CONFIGURED": 1, "WARN": 2, "FAIL": 3}
+    payload["overall"] = max(payload["checks"], key=lambda c: overall_rank[c["status"]])["status"] \
+        if payload["checks"] else "PASS"
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Preflight ({payload['profile']} profile) -- overall: {payload['overall']}")
+        for check in payload["checks"]:
+            detail = f" -- {check['detail']}" if check.get("detail") else ""
+            print(f"  [{check['status']:^13}] {check['name']}{detail}")
+
+    if payload["overall"] == "FAIL":
+        return 1
+    if payload["overall"] == "NOT_CONFIGURED":
+        return 2
+    return 0
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2489,10 +2535,32 @@ def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from reel_harness._version import __version__
+
     parser = argparse.ArgumentParser(prog="reel-harness")
+    # argparse's "version" action prints and exits inside parse_args() itself,
+    # before main() ever constructs an AppContext -- so --version never needs
+    # a working DB/storage/provider config.
+    parser.add_argument("--version", action="version", version=f"reel-harness {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+
+    preflight = sub.add_parser("preflight", help="Single operator readiness check before running for real")
+    preflight.add_argument("--profile", choices=["fake", "production"], default="fake")
+    preflight.add_argument(
+        "--provider", action="append", choices=["llm", "tts", "asset"],
+        help="Repeatable; scopes --check-remote to specific pipeline providers (llm/tts/asset)",
+    )
+    preflight.add_argument(
+        "--publisher", action="append", choices=["youtube", "tiktok", "instagram"],
+        help="Repeatable; scopes --check-remote to specific publishers (default: all three)",
+    )
+    preflight.add_argument(
+        "--check-remote", action="store_true", help="Also attempt real, read-only remote checks",
+    )
+    preflight.add_argument("--json", action="store_true")
+    preflight.set_defaults(func=cmd_preflight)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 
 _LOGGER_NAME = "reel_harness"
 _logger = logging.getLogger(_LOGGER_NAME)
@@ -77,14 +78,27 @@ class _RedactingFilter(logging.Filter):
 
 
 def configure_logging(level: str = "INFO") -> None:
-    """Idempotent: safe to call every time an AppContext is created."""
+    """Idempotent: safe to call every time an AppContext is created. The
+    handler's target stream is re-bound to the CURRENT sys.stderr on every
+    call rather than only at the handler's original construction time --
+    `logging.StreamHandler()` otherwise pins whatever `sys.stderr` object
+    was live when the handler was first created, which breaks the moment
+    that stream is later replaced (pytest's capsys fixture replaces
+    sys.stderr around every test; a real process could rebind it too) --
+    every subsequent log call fails, and Python's own logging module
+    reports that failure by printing "--- Logging error ---" plus a
+    traceback to the (again, current) sys.stderr, corrupting whatever
+    output a caller expected on stderr instead of just the intended log
+    lines."""
     _logger.setLevel(level)
     if not any(isinstance(f, _RedactingFilter) for f in _logger.filters):
         _logger.addFilter(_RedactingFilter())
-    if not _logger.handlers:
+    handler = next((h for h in _logger.handlers if isinstance(h, logging.StreamHandler)), None)
+    if handler is None:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("%(message)s"))
         _logger.addHandler(handler)
+    handler.stream = sys.stderr
 
 
 def log_worker_event(*, event: str, worker_id: str, **fields: object) -> None:
