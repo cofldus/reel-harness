@@ -817,6 +817,8 @@ def cmd_publisher_auth(args: argparse.Namespace, ctx: AppContext) -> int:
         return _cmd_publisher_auth_youtube(args, ctx)
     if args.provider == "tiktok":
         return _cmd_publisher_auth_tiktok(args, ctx)
+    if args.provider == "instagram":
+        return _cmd_publisher_auth_instagram(args, ctx)
     print(f"unsupported publisher provider: {args.provider}", file=sys.stderr)  # pragma: no cover
     return 2
 
@@ -1026,6 +1028,131 @@ def _cmd_publisher_auth_tiktok(args: argparse.Namespace, ctx: AppContext) -> int
         "account_reference": account,
         "open_id": tokens.open_id or None,
         "has_refresh_token": tokens.refresh_token is not None,
+    }, indent=2))
+    return 0
+
+
+def _cmd_publisher_auth_instagram(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Never runs without a configured OAuth client and a registered
+    redirect_uri (REEL_HARNESS_INSTAGRAM_APP_ID/_SECRET/_REDIRECT_URI);
+    never prints an access token, client secret, authorization code, or
+    PKCE verifier -- only the resulting account identity.
+
+    Meta's docs don't document a loopback-port exception either (same
+    situation as TikTok's), so this reuses the exact same dual
+    loopback-or-manual-paste flow. After the authorization-code exchange,
+    this additionally exchanges the short-lived token for a long-lived
+    one (~60 days) -- Instagram Login for Business's own two-step token
+    model, distinct from YouTube's/TikTok's single-exchange flow -- and
+    fetches the connected account's identity (never a Facebook Page
+    lookup, since this project uses Instagram Login for Business only;
+    see docs/PUBLISHING.md)."""
+    from datetime import UTC, datetime, timedelta
+    from urllib.parse import parse_qs, urlsplit
+
+    from reel_harness.config import ProviderConfigurationError, validate_instagram_credentials_configured
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+    from reel_harness.observability import redact
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_common import LoopbackCallbackServer, OAuthCallbackError
+    from reel_harness.publisher.oauth_instagram import (
+        SCOPES,
+        InstagramOAuthClient,
+        build_authorization_url,
+        generate_pkce,
+        generate_state,
+    )
+
+    try:
+        validate_instagram_credentials_configured(ctx.settings)
+    except ProviderConfigurationError as exc:
+        print(f"provider configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    account = args.account or "default"
+    pkce = generate_pkce()
+    state = generate_state()
+    redirect_uri = ctx.settings.instagram_redirect_uri
+    auth_url = build_authorization_url(
+        ctx.settings.instagram_app_id, redirect_uri, state, pkce, ctx.settings.instagram_auth_url,
+    )
+
+    parsed_redirect = urlsplit(redirect_uri)
+    use_loopback = parsed_redirect.scheme == "http" and parsed_redirect.hostname in ("127.0.0.1", "localhost")
+
+    print("Open this URL in a browser to authorize Reel Harness:", file=sys.stderr)
+    print(auth_url, file=sys.stderr)
+    try:
+        import webbrowser
+
+        webbrowser.open(auth_url)
+    except Exception:  # noqa: BLE001 - best-effort only; the printed URL above is the real fallback
+        pass
+
+    if use_loopback:
+        server = LoopbackCallbackServer(
+            expected_state=state, timeout_seconds=args.timeout, port=parsed_redirect.port or 80,
+        )
+        try:
+            code = server.wait_for_code()
+        except OAuthCallbackError as exc:
+            print(f"oauth callback failed: {exc}", file=sys.stderr)
+            return 3
+    else:
+        print(
+            "After authorizing, paste the full URL your browser was redirected to below "
+            "(never just the bare code -- the full URL lets this command verify `state`):",
+            file=sys.stderr,
+        )
+        pasted = input("Redirect URL: ").strip()
+        pasted_params = parse_qs(urlsplit(pasted).query)
+        if pasted_params.get("error"):
+            print(f"oauth callback failed: {pasted_params['error'][0]}", file=sys.stderr)
+            return 3
+        if pasted_params.get("state", [None])[0] != state:
+            print("oauth callback failed: state_mismatch", file=sys.stderr)
+            return 3
+        code_values = pasted_params.get("code")
+        if not code_values:
+            print("oauth callback failed: missing_code", file=sys.stderr)
+            return 3
+        code = code_values[0]
+
+    client = InstagramOAuthClient(
+        ctx.settings.instagram_app_id, ctx.settings.instagram_app_secret.get_secret_value(),
+        ctx.settings.instagram_token_url, ctx.settings.instagram_graph_url,
+        connect_timeout=ctx.settings.instagram_connect_timeout_seconds,
+        read_timeout=ctx.settings.instagram_read_timeout_seconds,
+    )
+    try:
+        short_lived = client.exchange_code(code, pkce.verifier, redirect_uri)
+        long_lived = client.exchange_long_lived_token(short_lived.access_token)
+        identity = client.fetch_account_identity(long_lived.access_token)
+    except ProviderAuthError as exc:
+        print(f"auth error: {redact(str(exc))}", file=sys.stderr)
+        return 3
+    except TransientProviderError as exc:
+        print(f"transient error: {redact(str(exc))}", file=sys.stderr)
+        return 4
+    finally:
+        client.close()
+
+    now = datetime.now(UTC)
+    ctx.credential_backend().save_credential(OAuthCredential(
+        access_token=long_lived.access_token, refresh_token=None,  # see InstagramOAuthClient's docstring
+        expires_at=now + timedelta(seconds=long_lived.expires_in),
+        scope=",".join(SCOPES),
+        provider="instagram", account_reference=account,
+        channel_id=identity.account_id, channel_title=identity.username,
+        created_at=now, last_refreshed_at=now,
+    ))
+
+    print(json.dumps({
+        "provider": "instagram",
+        "account_reference": account,
+        "account_id": identity.account_id,
+        "username": identity.username,
+        "token_expires_in_days": round(long_lived.expires_in / 86400, 1),
     }, indent=2))
     return 0
 
@@ -2107,7 +2234,7 @@ def build_parser() -> argparse.ArgumentParser:
     publisher_auth = sub.add_parser(
         "publisher-auth", help="Connect a publisher account via OAuth (opt-in, requires a browser)",
     )
-    publisher_auth.add_argument("provider", choices=["youtube", "tiktok"])
+    publisher_auth.add_argument("provider", choices=["youtube", "tiktok", "instagram"])
     publisher_auth.add_argument("--account", default=None, help="Account alias (default: 'default')")
     publisher_auth.add_argument(
         "--timeout", type=float, default=300.0, help="Seconds to wait for the OAuth callback",

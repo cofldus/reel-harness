@@ -160,3 +160,135 @@ def test_publisher_auth_tiktok_manual_paste_reports_authorization_error(monkeypa
     )
     assert cli_main.main(["publisher-auth", "tiktok"]) == 3
     assert "access_denied" in capsys.readouterr().err
+
+
+FAKE_INSTAGRAM_APP_SECRET = "FAKE-INSTAGRAM-CLI-APP-SECRET-000000"
+
+
+def test_publisher_auth_instagram_refuses_without_client_credentials(monkeypatch, tmp_path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    assert cli_main.main(["publisher-auth", "instagram"]) == 2
+    err = capsys.readouterr().err
+    assert "provider configuration error" in err
+    assert "REEL_HARNESS_INSTAGRAM_APP_ID" in err
+    assert "REEL_HARNESS_INSTAGRAM_REDIRECT_URI" in err
+    assert "Traceback" not in err
+
+
+def test_publisher_auth_instagram_refuses_without_redirect_uri(monkeypatch, tmp_path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "app-id-1")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", FAKE_INSTAGRAM_APP_SECRET)
+    assert cli_main.main(["publisher-auth", "instagram"]) == 2
+    err = capsys.readouterr().err
+    assert "REEL_HARNESS_INSTAGRAM_REDIRECT_URI" in err
+
+
+def _isolate_instagram(monkeypatch, tmp_path) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_ID", "app-id-1")
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_APP_SECRET", FAKE_INSTAGRAM_APP_SECRET)
+    monkeypatch.setenv("REEL_HARNESS_INSTAGRAM_REDIRECT_URI", "https://example.invalid/callback")
+    monkeypatch.setattr("webbrowser.open", lambda url: False)
+    monkeypatch.setattr("reel_harness.publisher.oauth_instagram.generate_state", lambda: "fixed-state-1")
+
+
+class _FakeInstagramTokens:
+    def __init__(self, access_token) -> None:
+        self.access_token = access_token
+        self.user_id = "17841400"
+        self.expires_in = 5184000
+
+
+class _FakeInstagramIdentity:
+    account_id = "17841400"
+    username = "my_reel_account"
+
+
+class _FakeInstagramOAuthClient:
+    """Stands in for InstagramOAuthClient -- no real network, records the
+    call so the test can assert the pasted code/verifier were forwarded
+    correctly without ever touching httpx."""
+
+    calls: list = []
+
+    def __init__(self, app_id, app_secret, token_url, graph_url, transport=None, **kwargs) -> None:
+        assert app_secret == FAKE_INSTAGRAM_APP_SECRET
+
+    def exchange_code(self, code, code_verifier, redirect_uri):
+        _FakeInstagramOAuthClient.calls.append((code, code_verifier, redirect_uri))
+        return _FakeInstagramTokens("fake-short-lived-token-should-never-print")
+
+    def exchange_long_lived_token(self, short_lived_access_token):
+        assert short_lived_access_token == "fake-short-lived-token-should-never-print"
+        return _FakeInstagramTokens("fake-long-lived-token-should-never-print")
+
+    def fetch_account_identity(self, access_token):
+        assert access_token == "fake-long-lived-token-should-never-print"
+        return _FakeInstagramIdentity()
+
+    def close(self) -> None:
+        pass
+
+
+def test_publisher_auth_instagram_manual_paste_flow_saves_credential_and_never_leaks_secrets(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate_instagram(monkeypatch, tmp_path)
+    _FakeInstagramOAuthClient.calls = []
+    monkeypatch.setattr("reel_harness.publisher.oauth_instagram.InstagramOAuthClient", _FakeInstagramOAuthClient)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": "https://example.invalid/callback?state=fixed-state-1&code=pasted-auth-code",
+    )
+
+    assert cli_main.main(["publisher-auth", "instagram", "--account", "acct-1"]) == 0
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+
+    assert _FakeInstagramOAuthClient.calls == [
+        ("pasted-auth-code", _FakeInstagramOAuthClient.calls[0][1], "https://example.invalid/callback"),
+    ]
+
+    import json as _json
+    payload = _json.loads(out)
+    assert payload["provider"] == "instagram"
+    assert payload["account_reference"] == "acct-1"
+    assert payload["account_id"] == "17841400"
+    assert payload["username"] == "my_reel_account"
+
+    for leaked in (
+        "fake-short-lived-token-should-never-print", "fake-long-lived-token-should-never-print",
+        FAKE_INSTAGRAM_APP_SECRET, "pasted-auth-code",
+    ):
+        assert leaked not in out
+        assert leaked not in err
+
+    secret_dir = tmp_path.parent / f"{tmp_path.name}-secrets"
+    backend = FileCredentialBackend(FileSecretStore(secret_dir, repo_root=tmp_path))
+    saved = backend.get_credential("instagram", "acct-1")
+    assert saved is not None
+    assert saved.access_token == "fake-long-lived-token-should-never-print"
+    assert saved.refresh_token is None  # instagram refreshes the access token itself -- see oauth_instagram
+    assert saved.channel_id == "17841400"
+    assert saved.channel_title == "my_reel_account"
+
+
+def test_publisher_auth_instagram_manual_paste_rejects_state_mismatch(monkeypatch, tmp_path, capsys) -> None:
+    _isolate_instagram(monkeypatch, tmp_path)
+    monkeypatch.setattr("reel_harness.publisher.oauth_instagram.InstagramOAuthClient", _FakeInstagramOAuthClient)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": "https://example.invalid/callback?state=WRONG-STATE&code=pasted-auth-code",
+    )
+    assert cli_main.main(["publisher-auth", "instagram"]) == 3
+    assert "state_mismatch" in capsys.readouterr().err
+
+
+def test_publisher_auth_instagram_manual_paste_reports_authorization_error(monkeypatch, tmp_path, capsys) -> None:
+    _isolate_instagram(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "builtins.input", lambda prompt="": "https://example.invalid/callback?error=access_denied",
+    )
+    assert cli_main.main(["publisher-auth", "instagram"]) == 3
+    assert "access_denied" in capsys.readouterr().err
