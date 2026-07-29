@@ -463,6 +463,25 @@ these are hardcoded anywhere in `providers/tiktok_publisher.py`; the
 adapter classifies failures from the live error response instead of
 assuming a limit.
 
+Also not documented: any endpoint to query a resumable upload session's
+already-accepted byte offset, the way YouTube's protocol documents
+`PUT` + `Content-Range: bytes */TOTAL`. Rather than guess at an
+undocumented convention, `TikTokPublisher.query_upload_offset` always
+raises `UploadSessionExpiredError` — `worker.publish_runner` already
+treats that as "start a brand-new session from byte 0" for YouTube's own
+genuinely-expired-session case, so this reuses an existing, already-safe
+code path instead of risking a wrong guessed offset (re-sending bytes
+TikTok already has, or skipping bytes it doesn't). The cost is a
+full re-upload after any interruption, rather than a true resume; this
+is called out here so it's a known limitation, not a silent one.
+
+The status-fetch response also does not echo enough account info (e.g.
+the creator's TikTok handle) for this adapter to construct a public
+watch URL on its own — `get_processing_status` always returns
+`publication_url=None` for TikTok. The durable reference operators
+have is `provider_video_id` (TikTok's `publish_id`), already persisted
+on `Publication.provider_video_id`.
+
 ## Design decisions this research drove
 
 - **Only `FILE_UPLOAD` is implemented** — `PULL_FROM_URL` requires

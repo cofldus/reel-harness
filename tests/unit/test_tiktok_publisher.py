@@ -1,9 +1,10 @@
 """Contract tests for the TikTok Content Posting API adapter (MockTransport
 -- no sockets, coexists with the network-block fixture; NOT a live TikTok
-E2E). Covers creator_info + platform-options validation only -- chunked
-upload lands in a later commit. All tokens are obviously-fake
-placeholders."""
+E2E). Covers creator_info, chunked upload, processing status, and
+platform-options validation. All tokens are obviously-fake placeholders."""
 from __future__ import annotations
+
+import json
 
 import httpx
 import pytest
@@ -16,8 +17,10 @@ from reel_harness.core.errors import (
     PublisherPermissionDeniedError,
     PublisherPrivacyNotAllowedError,
     TransientProviderError,
+    UploadRejectedError,
+    UploadSessionExpiredError,
 )
-from reel_harness.providers.base import CreatorInfo
+from reel_harness.providers.base import CreatorInfo, PublicationMetadata, UploadSessionHandle
 from reel_harness.providers.tiktok_publisher import (
     CAPABILITIES,
     MAX_POST_TEXT_UTF16_UNITS,
@@ -196,16 +199,225 @@ def test_get_creator_info_500_then_success() -> None:
 
 # -- chunked-upload methods not yet implemented --------------------------
 
-def test_upload_methods_not_yet_implemented() -> None:
+def _metadata(**overrides) -> PublicationMetadata:
+    defaults: dict = dict(
+        title="A short-form video", description="", tags=[], category_id="",
+        privacy_status="SELF_ONLY", made_for_kids=False,
+        platform_options=TikTokPostOptions().as_platform_options(),
+    )
+    defaults.update(overrides)
+    return PublicationMetadata(**defaults)
+
+
+def _init_response(**overrides) -> dict:
+    data = dict(publish_id="publish-id-1", upload_url="https://upload.tiktokapis.com/video/xyz")
+    data.update(overrides)
+    return {"data": data, "error": {"code": "ok", "message": "", "log_id": "x"}}
+
+
+# -- create_upload_session -------------------------------------------------------
+
+def test_create_upload_session_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/post/publish/video/init/"
+        payload = json.loads(request.content)
+        assert payload["post_info"]["title"] == "A short-form video"
+        assert payload["post_info"]["privacy_level"] == "SELF_ONLY"
+        assert payload["source_info"]["source"] == "FILE_UPLOAD"
+        assert payload["source_info"]["video_size"] == 1_000_000
+        assert payload["source_info"]["chunk_size"] == 500_000
+        assert payload["source_info"]["total_chunk_count"] == 2
+        return httpx.Response(200, json=_init_response())
+
+    publisher = _publisher(handler, chunk_size=500_000)
+    handle = publisher.create_upload_session(_metadata(), 1_000_000, "video/mp4", "cid-1")
+    assert handle.session_reference == "https://upload.tiktokapis.com/video/xyz"
+    assert handle.total_bytes == 1_000_000
+    assert handle.chunk_size == 500_000
+    assert handle.provider_reference == "publish-id-1"
+    publisher.close()
+
+
+def test_create_upload_session_uses_build_post_text_validation() -> None:
+    """A post text violating length/forbidden-marker rules must never
+    reach the network -- create_upload_session raises before any request."""
+    publisher = _publisher(lambda r: (_ for _ in ()).throw(AssertionError("must not call the network")))
+    with pytest.raises(MetadataInvalidError, match="2200"):
+        publisher.create_upload_session(
+            _metadata(title="x" * (MAX_POST_TEXT_UTF16_UNITS + 1)), 100, "video/mp4", "cid",
+        )
+    publisher.close()
+
+
+def test_create_upload_session_missing_publish_id_is_transient() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"upload_url": "https://x"}, "error": {"code": "ok"},
+    }))
+    with pytest.raises(TransientProviderError):
+        publisher.create_upload_session(_metadata(), 100, "video/mp4", "cid")
+    publisher.close()
+
+
+def test_create_upload_session_embedded_error_maps_to_auth() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {}, "error": {"code": "access_token_invalid"},
+    }))
+    with pytest.raises(ProviderAuthError):
+        publisher.create_upload_session(_metadata(), 100, "video/mp4", "cid")
+    publisher.close()
+
+
+def test_create_upload_session_429_is_retried() -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "0"})
+        return httpx.Response(200, json=_init_response())
+
+    publisher = _publisher(handler, retry_backoff_seconds=0.0)
+    handle = publisher.create_upload_session(_metadata(), 100, "video/mp4", "cid")
+    assert handle.provider_reference == "publish-id-1"
+    assert len(calls) == 2
+    publisher.close()
+
+
+# -- upload_chunk -------------------------------------------------------
+
+def _session(**overrides) -> UploadSessionHandle:
+    defaults: dict = dict(
+        session_reference="https://upload.tiktokapis.com/video/xyz",
+        total_bytes=1000, chunk_size=500, provider_reference="publish-id-1",
+    )
+    defaults.update(overrides)
+    return UploadSessionHandle(**defaults)
+
+
+def test_upload_chunk_partial_is_not_completed_and_never_returns_a_video_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["content-range"] == "bytes 0-499/1000"
+        assert request.headers["content-type"] == "video/mp4"
+        return httpx.Response(200)
+
+    publisher = _publisher(handler)
+    result = publisher.upload_chunk(_session(), b"x" * 500, 0, 1000)
+    assert result.completed is False
+    assert result.bytes_uploaded == 500
+    assert result.provider_video_id is None
+    publisher.close()
+
+
+def test_upload_chunk_final_chunk_completes_and_returns_the_known_publish_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["content-range"] == "bytes 500-999/1000"
+        return httpx.Response(200)
+
+    publisher = _publisher(handler)
+    result = publisher.upload_chunk(_session(), b"x" * 500, 500, 1000)
+    assert result.completed is True
+    assert result.bytes_uploaded == 1000
+    assert result.provider_video_id == "publish-id-1"
+    publisher.close()
+
+
+def test_upload_chunk_404_is_session_expired() -> None:
+    publisher = _publisher(lambda r: httpx.Response(404))
+    with pytest.raises(UploadSessionExpiredError):
+        publisher.upload_chunk(_session(), b"x" * 500, 0, 1000)
+    publisher.close()
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+def test_upload_chunk_5xx_is_transient(status_code: int) -> None:
+    publisher = _publisher(lambda r: httpx.Response(status_code))
+    with pytest.raises(TransientProviderError):
+        publisher.upload_chunk(_session(), b"x" * 500, 0, 1000)
+    publisher.close()
+
+
+@pytest.mark.parametrize("status_code", [400, 403])
+def test_upload_chunk_rejected_content(status_code: int) -> None:
+    publisher = _publisher(lambda r: httpx.Response(status_code))
+    with pytest.raises(UploadRejectedError):
+        publisher.upload_chunk(_session(), b"x" * 500, 0, 1000)
+    publisher.close()
+
+
+def test_upload_chunk_does_not_retry_through_request_with_retry() -> None:
+    """upload_chunk PUTs directly against the session URI (a bearer-style
+    capability URL, never re-authorized with the adapter's own access
+    token) -- unlike _request_with_retry-based calls, it must not attach
+    an Authorization header."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in {k.lower() for k in request.headers}
+        return httpx.Response(200)
+
+    publisher = _publisher(handler)
+    publisher.upload_chunk(_session(), b"x" * 500, 0, 1000)
+    publisher.close()
+
+
+# -- query_upload_offset -------------------------------------------------------
+
+def test_query_upload_offset_always_raises_session_expired() -> None:
+    """No documented way to query TikTok's confirmed offset -- see
+    docs/PUBLISHING.md. This forces a fresh session rather than guessing."""
     publisher = _publisher(lambda r: httpx.Response(200))
-    with pytest.raises(NotImplementedError):
-        publisher.create_upload_session(None, 0, "video/mp4", "cid")
-    with pytest.raises(NotImplementedError):
-        publisher.upload_chunk(None, b"", 0, 0)
-    with pytest.raises(NotImplementedError):
-        publisher.query_upload_offset(None, 0)
-    with pytest.raises(NotImplementedError):
-        publisher.get_processing_status("id")
+    with pytest.raises(UploadSessionExpiredError):
+        publisher.query_upload_offset(_session(), 1000)
+    publisher.close()
+
+
+# -- get_processing_status -------------------------------------------------------
+
+def test_get_processing_status_succeeded() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"status": "PUBLISH_COMPLETE", "publicly_available_post_id": "post-1"},
+        "error": {"code": "ok"},
+    }))
+    status = publisher.get_processing_status("publish-id-1")
+    assert status.processing_status == "succeeded"
+    assert status.failure_reason is None
+    assert status.publication_url is None  # never fabricated -- see docs/PUBLISHING.md
+    publisher.close()
+
+
+def test_get_processing_status_still_processing() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"status": "PROCESSING_UPLOAD"}, "error": {"code": "ok"},
+    }))
+    status = publisher.get_processing_status("publish-id-1")
+    assert status.processing_status == "processing"
+    publisher.close()
+
+
+def test_get_processing_status_failed_reports_reason() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"status": "FAILED", "fail_reason": "duration_check_failed"}, "error": {"code": "ok"},
+    }))
+    status = publisher.get_processing_status("publish-id-1")
+    assert status.processing_status == "failed"
+    assert status.failure_reason == "duration_check_failed"
+    publisher.close()
+
+
+def test_get_processing_status_sent_to_inbox_is_failed_not_forever_processing() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"status": "SEND_TO_USER_INBOX"}, "error": {"code": "ok"},
+    }))
+    status = publisher.get_processing_status("publish-id-1")
+    assert status.processing_status == "failed"
+    assert status.failure_reason == "sent_to_inbox_not_published"
+    publisher.close()
+
+
+def test_get_processing_status_unknown_status_keeps_polling_never_succeeds() -> None:
+    publisher = _publisher(lambda r: httpx.Response(200, json={
+        "data": {"status": "SOME_FUTURE_STATUS_THIS_ADAPTER_DOES_NOT_KNOW"}, "error": {"code": "ok"},
+    }))
+    status = publisher.get_processing_status("publish-id-1")
+    assert status.processing_status == "processing"
     publisher.close()
 
 

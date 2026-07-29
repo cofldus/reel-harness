@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 import uuid
@@ -16,6 +17,8 @@ from reel_harness.core.errors import (
     PublisherPrivacyNotAllowedError,
     PublisherRateLimitedError,
     TransientProviderError,
+    UploadRejectedError,
+    UploadSessionExpiredError,
 )
 from reel_harness.providers.base import (
     CreatorInfo,
@@ -168,6 +171,52 @@ def validate_publish_options(creator_info: CreatorInfo, privacy_status: str, opt
         )
 
 
+# TikTok's post-status `status` values mapped to this project's generic
+# ProcessingStatusResult.processing_status vocabulary (see providers.base).
+# Any status not in this map -- including one this adapter doesn't yet know
+# about -- resolves to "processing" (keep polling), never "succeeded": only
+# an explicit, recognized PUBLISH_COMPLETE ever completes a publication.
+_PROCESSING_STATUS_MAP = {
+    "PROCESSING_UPLOAD": "processing",
+    "PROCESSING_DOWNLOAD": "processing",  # PULL_FROM_URL only -- unused (FILE_UPLOAD only)
+    "PUBLISH_COMPLETE": "succeeded",
+    "FAILED": "failed",
+    # TikTok routed the post to the user's TikTok inbox as a draft instead
+    # of actually publishing it (e.g. the account lacks Direct Post
+    # permission) -- a genuine terminal outcome for this project (an actual
+    # published post is always what's wanted, never a draft sitting in
+    # someone's inbox), so it's mapped to "failed" rather than polled
+    # forever waiting for a PUBLISH_COMPLETE that will never arrive.
+    "SEND_TO_USER_INBOX": "failed",
+}
+
+
+def _parse_envelope(response: Any, *, context: str) -> dict:
+    """TikTok's `{data, error}` response envelope can carry a failure even
+    on HTTP 200 -- `error.code != "ok"` (and != None, for endpoints that
+    omit it on success) is never treated as success. The specific
+    non-auth error-code vocabulary for the Content Posting API endpoints
+    is not confirmed against primary docs in this session, so anything
+    unrecognized is classified as TransientProviderError (retryable) --
+    the same conservative default providers.youtube_publisher uses for an
+    unrecognized YouTube error reason."""
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TransientProviderError(
+            f"{context}: response was not valid JSON (HTTP {response.status_code})"
+        ) from exc
+    error = payload.get("error") or {}
+    error_code = error.get("code")
+    if error_code not in (None, "ok"):
+        if error_code in ("access_token_invalid", "scope_not_authorized"):
+            raise ProviderAuthError(f"{context}: {error_code}")
+        raise TransientProviderError(f"{context}: {error_code}")
+    if response.status_code != 200:
+        raise TransientProviderError(f"{context}: unexpected HTTP {response.status_code}")
+    return payload
+
+
 class TikTokPublisher:
     """Adapter for TikTok's Content Posting API (Direct Post / FILE_UPLOAD
     only -- see docs/PUBLISHING.md for the full research this is built
@@ -180,10 +229,13 @@ class TikTokPublisher:
     and handing back a live token on each call; this class never reads a
     credential or refreshes a token itself.
 
-    Only get_creator_info is implemented so far -- create_upload_session/
-    upload_chunk/query_upload_offset/get_processing_status land with the
-    chunked-upload adapter in a later commit (see docs/PUBLISHING.md's
-    Phase 3C commit plan)."""
+    Unlike YouTube, the durable identifier (`publish_id`) is known
+    immediately from create_upload_session's response, surfaced via
+    UploadSessionHandle.provider_reference -- see its docstring in
+    providers.base. query_upload_offset always raises
+    UploadSessionExpiredError (no documented way to query a session's
+    confirmed offset -- see docs/PUBLISHING.md); a fresh session is
+    started instead of guessing."""
 
     provider_id = "tiktok"
     capabilities = CAPABILITIES
@@ -193,6 +245,7 @@ class TikTokPublisher:
         *,
         access_token_provider: Callable[[], str],
         base_url: str,
+        chunk_size: int = 10 * 1024 * 1024,
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
         max_retries: int = 3,
@@ -203,6 +256,7 @@ class TikTokPublisher:
 
         self._access_token_provider = access_token_provider
         self._base_url = base_url.rstrip("/")
+        self._chunk_size = chunk_size
         self._max_retries = max_retries
         self._retry_backoff_seconds = retry_backoff_seconds
         self._httpx = httpx
@@ -229,18 +283,7 @@ class TikTokPublisher:
         response = self._request_with_retry(
             "POST", f"{self._base_url}/v2/post/publish/creator_info/query/", json={},
         )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise TransientProviderError("creator info response was not valid JSON") from exc
-
-        error = payload.get("error") or {}
-        error_code = error.get("code")
-        if error_code not in (None, "ok"):
-            if error_code in ("access_token_invalid", "scope_not_authorized"):
-                raise ProviderAuthError(f"tiktok creator info rejected: {error_code}")
-            raise TransientProviderError(f"tiktok creator info query failed: {error_code}")
-
+        payload = _parse_envelope(response, context="creator info")
         data = payload.get("data")
         if not isinstance(data, dict):
             raise TransientProviderError("creator info response missing 'data'")
@@ -261,23 +304,132 @@ class TikTokPublisher:
         except (KeyError, TypeError, ValueError) as exc:
             raise TransientProviderError("creator info response missing required fields") from exc
 
-    # -- not yet implemented (chunked upload adapter -- a later commit) -----
+    # -- session creation -----------------------------------------------------
 
     def create_upload_session(
         self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,
     ) -> UploadSessionHandle:
-        raise NotImplementedError("tiktok chunked upload lands in a later Phase 3C commit")
+        post_text = build_post_text(metadata.title)
+        options = metadata.platform_options or {}
+        total_chunk_count = max(1, math.ceil(total_bytes / self._chunk_size))
+        body = {
+            "post_info": {
+                "title": post_text,
+                "privacy_level": metadata.privacy_status,
+                "disable_duet": bool(options.get("disable_duet", True)),
+                "disable_stitch": bool(options.get("disable_stitch", True)),
+                "disable_comment": bool(options.get("disable_comment", True)),
+                "video_cover_timestamp_ms": int(options.get("video_cover_timestamp_ms", 0)),
+                "brand_content_toggle": bool(options.get("brand_content_toggle", False)),
+                "brand_organic_toggle": bool(options.get("brand_organic_toggle", False)),
+                "is_aigc": bool(options.get("is_aigc", False)),
+            },
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": total_bytes,
+                "chunk_size": self._chunk_size,
+                "total_chunk_count": total_chunk_count,
+            },
+        }
+        response = self._request_with_retry(
+            "POST", f"{self._base_url}/v2/post/publish/video/init/", json=body,
+            headers={"X-Request-ID": correlation_id},
+        )
+        payload = _parse_envelope(response, context="upload session creation")
+        data = payload.get("data") or {}
+        publish_id = data.get("publish_id")
+        upload_url = data.get("upload_url")
+        if not publish_id or not upload_url:
+            raise TransientProviderError("upload session creation response missing publish_id/upload_url")
+        return UploadSessionHandle(
+            session_reference=upload_url, total_bytes=total_bytes, chunk_size=self._chunk_size,
+            provider_reference=publish_id,
+        )
+
+    # -- chunk upload ---------------------------------------------------------
 
     def upload_chunk(
         self, session: UploadSessionHandle, chunk: bytes, start_byte: int, total_bytes: int,
     ) -> UploadChunkResult:
-        raise NotImplementedError("tiktok chunked upload lands in a later Phase 3C commit")
+        end_byte = start_byte + len(chunk) - 1
+        headers = {
+            "Content-Type": "video/mp4",
+            "Content-Length": str(len(chunk)),
+            "Content-Range": f"bytes {start_byte}-{end_byte}/{total_bytes}",
+        }
+        try:
+            response = self._client.put(session.session_reference, content=chunk, headers=headers)
+        except self._httpx.TimeoutException as exc:
+            raise TransientProviderError(f"chunk upload timed out ({type(exc).__name__})") from exc
+        except self._httpx.HTTPError as exc:
+            raise TransientProviderError(f"chunk upload transport error ({type(exc).__name__})") from exc
+
+        # The official docs do not document a distinct per-chunk "partial"
+        # status code the way YouTube's protocol documents 308 (see
+        # docs/PUBLISHING.md's "not specified" section) -- completion is
+        # instead derived purely from client-side byte accounting against
+        # total_bytes, which this adapter already needs regardless since
+        # the durable publish_id (provider_video_id) is known upfront from
+        # create_upload_session, never from this response.
+        if 200 <= response.status_code < 300:
+            completed = (end_byte + 1) >= total_bytes
+            return UploadChunkResult(
+                bytes_uploaded=total_bytes if completed else end_byte + 1,
+                completed=completed,
+                provider_video_id=session.provider_reference if completed else None,
+            )
+        if response.status_code == 404:
+            raise UploadSessionExpiredError("tiktok upload session no longer valid")
+        if response.status_code in (500, 502, 503, 504):
+            raise TransientProviderError(f"chunk upload returned HTTP {response.status_code}, retryable")
+        if response.status_code in (400, 403):
+            raise UploadRejectedError(f"upload rejected by the provider (HTTP {response.status_code})")
+        raise TransientProviderError(f"chunk upload returned unexpected HTTP {response.status_code}")
 
     def query_upload_offset(self, session: UploadSessionHandle, total_bytes: int) -> int | None:
-        raise NotImplementedError("tiktok chunked upload lands in a later Phase 3C commit")
+        """TikTok's docs do not confirm a way to query a resumable upload
+        session's already-accepted byte offset (unlike YouTube's documented
+        `Content-Range: bytes */TOTAL` convention -- see docs/PUBLISHING.md's
+        "not specified" section). Treating every resume attempt as expired
+        is the safe, conservative choice: worker.publish_runner already
+        starts a brand-new session from byte 0 on UploadSessionExpiredError
+        (the same path YouTube's genuinely-expired sessions use), so this
+        never risks re-sending bytes at a guessed/wrong offset or silently
+        skipping bytes TikTok never actually received -- at the cost of a
+        full re-upload after any interruption rather than a true resume."""
+        raise UploadSessionExpiredError(
+            "tiktok upload sessions cannot be safely resumed (no documented offset-query endpoint) "
+            "-- starting a new session from byte 0"
+        )
+
+    # -- processing status ------------------------------------------------------
 
     def get_processing_status(self, provider_video_id: str) -> ProcessingStatusResult:
-        raise NotImplementedError("tiktok chunked upload lands in a later Phase 3C commit")
+        response = self._request_with_retry(
+            "POST", f"{self._base_url}/v2/post/publish/status/fetch/", json={"publish_id": provider_video_id},
+        )
+        payload = _parse_envelope(response, context="processing status")
+        data = payload.get("data") or {}
+        raw_status = str(data.get("status") or "")
+        resolved = _PROCESSING_STATUS_MAP.get(raw_status, "processing")  # unknown -> keep polling, never success
+
+        failure_reason = None
+        if resolved == "failed":
+            failure_reason = data.get("fail_reason") or (
+                "sent_to_inbox_not_published" if raw_status == "SEND_TO_USER_INBOX" else raw_status
+            )
+        return ProcessingStatusResult(
+            processing_status=resolved,
+            privacy_status=None,  # the status-fetch response does not echo privacy_level back
+            # Never fabricated: the response doesn't carry enough account
+            # info (e.g. the creator's handle) to build a public watch URL
+            # from this adapter alone -- see docs/PUBLISHING.md. The durable
+            # reference is provider_video_id (publish_id), already
+            # persisted on Publication.provider_video_id.
+            publication_url=None,
+            failure_reason=failure_reason,
+            request_id=response.headers.get("x-tt-logid"),
+        )
 
     # -- shared request plumbing --------------------------------------------
 
