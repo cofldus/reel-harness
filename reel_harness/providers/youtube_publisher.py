@@ -16,8 +16,10 @@ from reel_harness.core.errors import (
     UploadSessionExpiredError,
 )
 from reel_harness.providers.base import (
+    CreatorInfo,
     ProcessingStatusResult,
     PublicationMetadata,
+    PublisherCapabilities,
     UploadChunkResult,
     UploadSessionHandle,
 )
@@ -28,6 +30,26 @@ ADAPTER_VERSION = "youtube-data-api-v3-v1"
 UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/videos"
 VIDEOS_ENDPOINT = "https://www.googleapis.com/youtube/v3/videos"
 CHUNK_GRANULARITY_BYTES = 262144  # 256 KiB -- every chunk but the last must be a multiple of this
+
+# YouTube has no comment/duet/stitch-style controls in this API, no
+# upload-only (inbox-draft) mode, and no scheduled publish in this
+# adapter -- see docs/PUBLISHING.md's Phase 3C capability model.
+CAPABILITIES = PublisherCapabilities(
+    supports_direct_publish=True,
+    supports_upload_only=False,
+    supports_scheduled_publish=False,
+    supports_public_privacy=True,
+    supports_unlisted_privacy=True,
+    supports_comments_control=False,
+    supports_remix_control=False,
+    supports_processing_poll=True,
+    supports_remote_delete=False,
+    requires_creator_info=False,
+    requires_user_confirmation=False,
+    privacy_values=frozenset({"private", "unlisted", "public"}),
+    default_privacy="private",
+    public_privacy_values=frozenset({"public"}),
+)
 
 
 class YouTubePublisher:
@@ -55,6 +77,7 @@ class YouTubePublisher:
     """
 
     provider_id = "youtube"
+    capabilities = CAPABILITIES
 
     def __init__(
         self,
@@ -93,6 +116,9 @@ class YouTubePublisher:
 
     def validate_configuration(self) -> None:
         self.validate_configuration_static(self._chunk_size)
+
+    def get_creator_info(self) -> CreatorInfo | None:
+        return None
 
     # -- session creation -------------------------------------------------
 

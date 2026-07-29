@@ -9,6 +9,7 @@ import pytest
 from reel_harness.config import Settings
 from reel_harness.providers.registry import (
     _resolve_fresh_youtube_access_token,
+    provider_capabilities,
     publisher_snapshot,
     resolve_publisher,
 )
@@ -75,6 +76,32 @@ def test_youtube_publisher_snapshot_excludes_secrets() -> None:
     assert snap["publisher_account_reference"] == "acct-1"
     assert snap["youtube_category_id"] == settings.youtube_category_id
     assert FAKE_CLIENT_SECRET not in str(snap)
+
+
+def test_fake_provider_capabilities_are_credential_free() -> None:
+    caps = provider_capabilities("fake")
+    assert caps.default_privacy == "private"
+    assert caps.privacy_values == frozenset({"private", "unlisted", "public"})
+    assert caps.public_privacy_values == frozenset({"public"})
+    assert caps.requires_user_confirmation is False
+
+
+def test_youtube_provider_capabilities_match_fake_shape() -> None:
+    """No credentials, no Settings -- provider_capabilities must work before
+    any adapter instance can even be constructed (dry-run, pre-auth
+    validation)."""
+    caps = provider_capabilities("youtube")
+    assert caps.default_privacy == "private"
+    assert caps.privacy_values == frozenset({"private", "unlisted", "public"})
+    assert caps.public_privacy_values == frozenset({"public"})
+    assert caps.supports_comments_control is False
+    assert caps.supports_remix_control is False
+    assert caps.requires_creator_info is False
+
+
+def test_unregistered_provider_capabilities_raise_not_implemented() -> None:
+    with pytest.raises(NotImplementedError):
+        provider_capabilities("tiktok")
 
 
 def test_access_token_refresh_returns_cached_token_when_not_near_expiry() -> None:

@@ -9,10 +9,12 @@ from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSI
 from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
 from reel_harness.providers.base import (
     ChannelContext,
+    CreatorInfo,
     LLMProvider,
     ProcessingStatusResult,
     PublicationMetadata,
     Publisher,
+    PublisherCapabilities,
     StockMediaProvider,
     TTSProvider,
     UploadChunkResult,
@@ -396,17 +398,35 @@ def resolve_stock_media_provider(name: str, settings: Settings | None = None) ->
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
 
 
+# A neutral, maximally-restrictive placeholder -- _UnconfiguredPublisher is
+# never actually usable (every method raises), so these values are never
+# acted on; they exist only so the instance stays structurally valid for
+# any code that reads `.capabilities` before calling a method (e.g. a
+# capability-gate check that runs ahead of the actual publish attempt).
+_UNCONFIGURED_CAPABILITIES = PublisherCapabilities(
+    supports_direct_publish=False, supports_upload_only=False, supports_scheduled_publish=False,
+    supports_public_privacy=False, supports_unlisted_privacy=False, supports_comments_control=False,
+    supports_remix_control=False, supports_processing_poll=False, supports_remote_delete=False,
+    requires_creator_info=False, requires_user_confirmation=False,
+    privacy_values=frozenset(), default_privacy="", public_privacy_values=frozenset(),
+)
+
+
 class _UnconfiguredPublisher:
     """Publisher counterpart of _UnconfiguredLLMProvider: any use fails with
     an explicit PROVIDER_NOT_CONFIGURED -- never a silent fallback to a
     different account or provider."""
 
     provider_id = "unconfigured"
+    capabilities = _UNCONFIGURED_CAPABILITIES
 
     def __init__(self, reason: str) -> None:
         self._reason = reason
 
     def validate_configuration(self) -> None:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def get_creator_info(self) -> CreatorInfo | None:
         raise ProviderNotConfiguredError(self._reason)
 
     def create_upload_session(
@@ -458,6 +478,24 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
         "processing_poll_interval_seconds": poll_interval,
         "processing_max_duration_seconds": max_duration,
     }
+
+
+def provider_capabilities(provider: str) -> PublisherCapabilities:
+    """Static, credential-free capability lookup (see
+    providers.base.PublisherCapabilities and docs/PUBLISHING.md's Phase 3C
+    capability model) -- usable by CLI/service validation before any live
+    adapter instance can be constructed (e.g. before OAuth credentials
+    exist, or during --dry-run, which never touches credentials at all).
+    Domain code checks capabilities instead of branching on the provider
+    name directly."""
+    name = normalize_provider_name(provider)
+    if name == "fake":
+        return FakePublisher.capabilities
+    if name == "youtube":
+        from reel_harness.providers.youtube_publisher import CAPABILITIES as YOUTUBE_CAPABILITIES
+
+        return YOUTUBE_CAPABILITIES
+    raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
 
 
 def _resolve_fresh_youtube_access_token(

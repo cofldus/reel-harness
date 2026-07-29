@@ -189,7 +189,7 @@ def _metadata_to_dict(metadata: PublicationMetadata) -> dict:
     return {
         "title": metadata.title, "description": metadata.description, "tags": metadata.tags,
         "category_id": metadata.category_id, "privacy_status": metadata.privacy_status,
-        "made_for_kids": metadata.made_for_kids,
+        "made_for_kids": metadata.made_for_kids, "platform_options": metadata.platform_options,
     }
 
 
@@ -200,6 +200,7 @@ def _metadata_from_snapshot(publication: Publication) -> PublicationMetadata:
         tags=snapshot.get("tags", []), category_id=snapshot.get("category_id", "22"),
         privacy_status=snapshot.get("privacy_status", publication.privacy_status),
         made_for_kids=bool(snapshot.get("made_for_kids", False)),
+        platform_options=dict(snapshot.get("platform_options") or {}),
     )
 
 

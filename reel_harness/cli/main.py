@@ -247,6 +247,7 @@ def cmd_publish_job(args: argparse.Namespace, ctx: AppContext) -> int:
             publisher_snapshot=snapshot, privacy_status=args.privacy,
             confirm_public_upload=args.confirm_public_upload,
             public_upload_enabled=ctx.settings.allow_public_upload,
+            confirm_platform_options=args.confirm_platform_options,
         )
     except PublicationNotFoundError:
         print(f"job not found: {args.job_id}", file=sys.stderr)
@@ -264,12 +265,22 @@ def cmd_publish_job(args: argparse.Namespace, ctx: AppContext) -> int:
 def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
     from reel_harness.core.publish_service import PublicationNotFoundError
     from reel_harness.pipeline.publish_metadata import build_publication_metadata
+    from reel_harness.providers.registry import provider_capabilities
 
     try:
         eligibility = ctx.publications.check_eligibility(args.job_id)
     except PublicationNotFoundError:
         print(f"job not found: {args.job_id}", file=sys.stderr)
         return 1
+
+    try:
+        caps = provider_capabilities(args.provider)
+    except NotImplementedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    privacy_status = args.privacy if args.privacy is not None else caps.default_privacy
+
+    privacy_valid = privacy_status in caps.privacy_values
 
     credential_configured = True
     if args.provider == "youtube":
@@ -278,10 +289,15 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
         )
         credential_configured = client_ok and ctx.credential_backend().has_credential("youtube", args.account)
 
+    # YouTube-shaped preview only for now ("fake" stands in for YouTube's
+    # shape throughout this project's tests) -- a provider whose metadata
+    # model doesn't match this shape (e.g. TikTok's post-text/options
+    # model) gets its own preview once that provider's dry-run support
+    # lands.
     metadata_preview = None
-    if eligibility.manifest is not None:
+    if args.provider in ("youtube", "fake") and eligibility.manifest is not None:
         metadata = build_publication_metadata(
-            eligibility.manifest, privacy_status=args.privacy,
+            eligibility.manifest, privacy_status=privacy_status,
             category_id=ctx.settings.youtube_category_id, made_for_kids=ctx.settings.youtube_made_for_kids,
         )
         tags_total_length = sum(len(t) for t in metadata.tags) + max(len(metadata.tags) - 1, 0)
@@ -297,25 +313,32 @@ def _publish_job_dry_run(ctx: AppContext, args: argparse.Namespace) -> int:
     if final_path.is_file():
         video_file_size_bytes = final_path.stat().st_size
 
-    public_requested = args.privacy == "public"
+    public_requested = privacy_status in caps.public_privacy_values
     public_upload_allowed = (
         not public_requested
         or (args.confirm_public_upload and ctx.settings.allow_public_upload)
     )
+    platform_options_confirmed = (not caps.requires_user_confirmation) or args.confirm_platform_options
 
     payload = {
         "job_id": args.job_id, "provider": args.provider, "account_reference": args.account,
         "dry_run": True,
         "eligible": eligibility.eligible, "eligibility_reasons": eligibility.reasons,
-        "requested_privacy_status": args.privacy,
+        "requested_privacy_status": privacy_status,
+        "privacy_status_valid": privacy_valid,
         "public_upload_allowed": public_upload_allowed,
+        "requires_user_confirmation": caps.requires_user_confirmation,
+        "platform_options_confirmed": platform_options_confirmed,
         "credential_configured": credential_configured,
         "metadata_preview": metadata_preview,
         "video_file_size_bytes": video_file_size_bytes,
         "upload_chunk_size_bytes": ctx.settings.youtube_upload_chunk_size,
     }
     print(json.dumps(payload, indent=2))
-    ready = eligibility.eligible and credential_configured and public_upload_allowed
+    ready = (
+        eligibility.eligible and privacy_valid and credential_configured
+        and public_upload_allowed and platform_options_confirmed
+    )
     return 0 if ready else 1
 
 
@@ -1351,12 +1374,22 @@ def build_parser() -> argparse.ArgumentParser:
         "publish-job", help="Create a Publication for a COMPLETED job (upload happens asynchronously)",
     )
     publish_job.add_argument("job_id")
-    publish_job.add_argument("--provider", default="youtube", choices=["youtube", "fake"])
+    publish_job.add_argument("--provider", default="youtube", choices=["youtube", "tiktok", "fake"])
     publish_job.add_argument("--account", default="default", help="Account alias (default: 'default')")
-    publish_job.add_argument("--privacy", default="private", choices=["private", "unlisted", "public"])
+    publish_job.add_argument(
+        "--privacy", default=None,
+        help="Provider-specific privacy value; default is that provider's own most-restrictive option "
+             "(validated against the provider's actual PublisherCapabilities, not a fixed list)",
+    )
     publish_job.add_argument(
         "--confirm-public-upload", action="store_true",
-        help="Required alongside --privacy public (and the allow-public-upload feature flag)",
+        help="Required alongside a public-visibility --privacy value (and the allow-public-upload feature flag)",
+    )
+    publish_job.add_argument(
+        "--confirm-platform-options", action="store_true",
+        help="Required by providers whose PublisherCapabilities.requires_user_confirmation is true "
+             "(e.g. TikTok) -- confirms the platform-specific options (comments/remix/disclosure/etc.) "
+             "were reviewed",
     )
     publish_job.add_argument(
         "--dry-run", action="store_true",

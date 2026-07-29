@@ -247,8 +247,12 @@ def approve_job(job_id: str, ctx: AppContext = Depends(get_context)) -> JobRespo
 class CreatePublicationRequest(BaseModel):
     provider: str
     account_reference: str
-    privacy_status: str = "private"
+    # None -> the provider's own most-restrictive default (see
+    # providers.base.PublisherCapabilities.default_privacy); never a
+    # hardcoded YouTube-shaped default.
+    privacy_status: str | None = None
     confirm_public_upload: bool = False
+    confirm_platform_options: bool = False
     dry_run: bool = False
 
 
@@ -311,6 +315,7 @@ def create_publication(
             job_id, provider=request.provider, account_reference=request.account_reference,
             privacy_status=request.privacy_status, confirm_public_upload=request.confirm_public_upload,
             public_upload_enabled=ctx.settings.allow_public_upload,
+            confirm_platform_options=request.confirm_platform_options,
         )
     except PublicationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
