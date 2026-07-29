@@ -206,6 +206,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _actual_schema_version(db_path: Path) -> int | None:
+    """Reads the REAL schema_migrations.version from the given SQLite
+    file -- never assumes it matches this running code's SCHEMA_VERSION
+    constant. A backup of a database that hasn't been migrated yet must
+    honestly record its own (older) version, not silently claim to be
+    current -- otherwise db_restore's "refuse a backup newer than this
+    build supports" check would be meaningless, and the manifest itself
+    would just be wrong."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        )
+        if cursor.fetchone() is None:
+            return None
+        row = conn.execute("SELECT version FROM schema_migrations").fetchone()
+        return row[0] if row is not None else None
+    finally:
+        conn.close()
+
+
 def db_backup(database_url: str, dest_dir: Path, timestamp: datetime | None = None) -> dict:
     """Uses SQLite's own online backup API (`sqlite3.Connection.backup`,
     stdlib since Python 3.7) rather than a raw file copy, so a backup is
@@ -245,7 +266,7 @@ def db_backup(database_url: str, dest_dir: Path, timestamp: datetime | None = No
     checksum = _sha256_file(final_path)
     manifest = {
         "app_version": __version__,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": _actual_schema_version(final_path),
         "source_db_identifier": safe_db_identifier(database_url),
         "created_at": ts.isoformat(),
         "checksum_sha256": checksum,

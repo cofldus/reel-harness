@@ -241,3 +241,24 @@ def test_db_verify_detects_active_unlocked_job(db) -> None:
     result = db_verify(engine, session_factory)
     assert result.ok is False
     assert job_id in result.active_unlocked_jobs
+
+
+def test_db_backup_records_the_actual_source_schema_version_not_the_running_code_constant(tmp_path) -> None:
+    """A backup of a database that has NOT yet been migrated to the
+    current schema must honestly record its own (older) version in the
+    manifest -- not silently claim to be at this running code's
+    SCHEMA_VERSION, which would make db_restore's "refuse a backup newer
+    than supported" check meaningless and the manifest itself simply
+    wrong."""
+    from sqlalchemy import text
+
+    url = f"sqlite:///{tmp_path / 'old.db'}"
+    engine = create_engine_from_url(url)
+    init_db(engine)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE schema_migrations SET version = 3"))
+    engine.dispose()
+
+    result = db_backup(url, tmp_path / "backups")
+    assert result["schema_version"] == 3
+    assert result["schema_version"] != SCHEMA_VERSION
