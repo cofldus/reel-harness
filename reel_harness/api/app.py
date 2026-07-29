@@ -4,7 +4,7 @@ import os
 import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -258,6 +258,20 @@ def get_status(ctx: AppContext = Depends(get_context)) -> dict:
         "stale_publication_leases": stale_publication_leases,
         "supervisor": supervisor_status,
     }
+
+
+@app.get("/metrics")
+def get_metrics(ctx: AppContext = Depends(get_context)) -> PlainTextResponse:
+    """Prometheus text-exposition format, dependency-free (no
+    prometheus_client package) -- see ops.metrics for what each metric
+    means and why every value is derived fresh from DB state at scrape
+    time rather than an in-memory counter. No job topic/title/script text
+    is ever a metric value or label. No API key required, matching
+    /healthz /readyz /status."""
+    from reel_harness.ops.metrics import collect_metrics, render_prometheus_text
+
+    samples = collect_metrics(ctx.session_factory)
+    return PlainTextResponse(render_prometheus_text(samples), media_type="text/plain; version=0.0.4")
 
 
 @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_key)])

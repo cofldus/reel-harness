@@ -228,6 +228,18 @@ def cmd_backup_restore(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_incident_bundle(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.incident import IncidentBundleSecretDetectedError, build_incident_bundle
+
+    try:
+        result = build_incident_bundle(ctx, Path(args.dest_path))
+    except IncidentBundleSecretDetectedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2776,6 +2788,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-restore", action="store_true", help="Required -- this overwrites the destination",
     )
     backup_restore_p.set_defaults(func=cmd_backup_restore)
+
+    incident_bundle_p = sub.add_parser(
+        "incident-bundle", help="Diagnostics zip for offline incident analysis (secret-scanned before writing)",
+    )
+    incident_bundle_p.add_argument(
+        "--dest-path", required=True, help="Output archive path (outside the repository)",
+    )
+    incident_bundle_p.set_defaults(func=cmd_incident_bundle)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)

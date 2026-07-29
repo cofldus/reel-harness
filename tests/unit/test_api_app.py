@@ -254,3 +254,30 @@ def test_status_endpoint_no_api_key_required(tmp_path) -> None:
         assert response.status_code == 200
     finally:
         app.dependency_overrides.clear()
+
+
+def test_metrics_endpoint_returns_prometheus_text(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        assert "text/plain" in response.headers["content-type"]
+        assert "jobs_created_total 1.0" in response.text
+        assert "# TYPE jobs_created_total counter" in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_metrics_endpoint_no_api_key_required(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()

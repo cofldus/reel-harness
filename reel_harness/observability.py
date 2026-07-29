@@ -19,7 +19,12 @@ _MASK = "***REDACTED***"
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{4,}"), _MASK),
     (re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/=]{8,}"), _MASK),
-    (re.compile(r"(?i)\bauthorization\b[\"']?\s*[:=]\s*\S+"), f"authorization={_MASK}"),
+    # The value charset excludes quotes/JSON-delimiters (like the api-key
+    # pattern below) -- a bare \S+ here would greedily consume a trailing
+    # JSON closing quote when this text is itself embedded in a JSON
+    # string, corrupting the JSON on a second redact() pass over already-
+    # redacted output (e.g. ops.incident's self-secret-scan).
+    (re.compile(r"(?i)\bauthorization\b[\"']?\s*[:=]\s*[\"']?[^\s\"'&,;}{]+"), f"authorization={_MASK}"),
     # Header / query / JSON style key-value pairs. The value charset excludes
     # quotes and separators so only the secret itself is replaced; a minimum
     # value length avoids mauling short ordinary words.
