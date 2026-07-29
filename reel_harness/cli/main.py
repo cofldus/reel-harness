@@ -329,6 +329,23 @@ def cmd_release_manifest(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_release_check(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Everything that must pass before an RC tag is created. Never
+    creates a commit or tag itself -- see docs/OPERATIONS.md for the tag
+    step, which is always a separate, explicit, manual action."""
+    from reel_harness.ops.release_check import run_release_check
+
+    report = run_release_check(Path.cwd(), skip_slow=args.skip_slow, pytest_timeout=args.pytest_timeout)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(f"release-check -- overall: {report.overall} -- ready_to_tag: {report.ready_to_tag}")
+        for item in report.items:
+            detail = f" -- {item.detail}" if item.detail else ""
+            print(f"  [{item.status:^8}] {item.name}{detail}")
+    return 0 if report.ready_to_tag else 1
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2932,6 +2949,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Default 'not_run' -- pass a real status only after actually running live-verify",
     )
     release_manifest_p.set_defaults(func=cmd_release_manifest)
+
+    release_check_p = sub.add_parser(
+        "release-check", help="Pre-tag gate: git/version/lockfile/tests/mypy/ruff/secret-scan/artifact-scan",
+    )
+    release_check_p.add_argument(
+        "--skip-slow", action="store_true", help="Skip full_pytest/mypy/ruff -- fast iterative check only",
+    )
+    release_check_p.add_argument("--pytest-timeout", type=float, default=900.0)
+    release_check_p.add_argument("--json", action="store_true")
+    release_check_p.set_defaults(func=cmd_release_check)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
