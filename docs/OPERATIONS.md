@@ -1,4 +1,4 @@
-# Reel Harness — Operations (Phase 3B)
+# Reel Harness — Operations (Phase 3D)
 
 Runtime operations for the single-machine deployment: the worker daemon, real
 LLM/TTS/asset provider configuration, YouTube publishing (including
@@ -529,11 +529,12 @@ directly. This remains a deliberate scope boundary, not an oversight — see
 
 ### Out of scope for Phase 3B
 
-Instagram/Facebook Reels publishers, automatic public publishing,
-scheduled-publish automation, automatic remote delete, thumbnail/subtitle
-upload, analytics collection, auto-commenting, an OAuth account-management
-UI, a web dashboard, PostgreSQL, a cloud secret manager, and a cloud queue
-— none of these exist yet. TikTok publishing is covered below (Phase 3C).
+Facebook Reels publishers, automatic public publishing, scheduled-publish
+automation, automatic remote delete, thumbnail/subtitle upload, analytics
+collection, auto-commenting, an OAuth account-management UI, a web
+dashboard, PostgreSQL, a cloud secret manager, and a cloud queue — none of
+these exist yet. TikTok and Instagram publishing are covered below (Phase
+3C/3D).
 
 ## Publishing (TikTok)
 
@@ -731,6 +732,200 @@ toggle (comments/duet/stitch/disclosures currently default to the safest
 combination; per-post overrides are a natural future extension, not yet
 built).
 
+## Publishing (Instagram Reels)
+
+Design/API research lives in `docs/PUBLISHING.md` (official Meta for
+Developers docs checked 2026-07-29, Graph API `v25.0`). Everything generic
+about publishing above — the `Publication` state machine, the two-lane
+worker, the processing poller, `publication-list`/`-reconcile`/`-retry`,
+cancellation policy — applies to Instagram exactly as written for YouTube;
+this section covers only what's different.
+`providers.registry.provider_capabilities("instagram")` reports
+`privacy_values={"PUBLIC"}` — **every Instagram Reels publish is
+inherently public; there is no private/unlisted option in the official
+API**, so the double-confirmation gate (below) applies unconditionally,
+never just to an opt-in "public" choice like YouTube/TikTok.
+
+**Design decision — no public media-hosting server was built.** Instagram's
+Content Publishing API documents two ways to hand over video bytes:
+`video_url` (Meta's servers fetch a publicly reachable HTTPS URL you host)
+or `upload_type=resumable` (you `POST` the bytes directly to
+`rupload.facebook.com`, no public URL ever needed). This project
+implements **only** the resumable direct-upload path — the same
+`InstagramPublisher.create_upload_session`/`upload_chunk` shape every other
+adapter uses — deliberately declining to stand up a new public HTTPS
+listener for a local-first, single-user tool. `REEL_HARNESS_INSTAGRAM_MEDIA_URL_MODE=external_url`
+is a recognized config value that fails loudly with
+`ProviderConfigurationError` at startup (not implemented), rather than
+silently falling back to the resumable path.
+
+**No confirmed multi-chunk resume.** The official docs don't document a way
+to query a resumable session's already-confirmed byte offset (unlike
+YouTube's `Content-Range: bytes */TOTAL`), and the upload is always one
+whole-file request — `query_upload_offset` always raises
+`UploadSessionExpiredError`. In practice that path is never actually hit:
+`worker.publish_runner._upload_stage`'s `bytes_uploaded==0` shortcut means
+any interrupted attempt (nothing confirmed received yet) simply retries the
+**same** container's upload URL directly, rather than querying an offset
+that doesn't exist. Only a container the provider itself reports as no
+longer usable triggers a brand-new container.
+
+### 1. Configure the app and OAuth client
+
+```
+REEL_HARNESS_INSTAGRAM_APP_ID=...
+REEL_HARNESS_INSTAGRAM_APP_SECRET=...        # env/.env only; never persisted, always redacted
+REEL_HARNESS_INSTAGRAM_REDIRECT_URI=...      # must be registered with the Meta app; see step 2
+REEL_HARNESS_CREDENTIAL_DIR=...              # same repository-external directory YouTube/TikTok use
+REEL_HARNESS_INSTAGRAM_GRAPH_BASE_URL=https://graph.instagram.com   # default; override only for a fake server
+REEL_HARNESS_INSTAGRAM_GRAPH_API_VERSION=v25.0                      # default
+REEL_HARNESS_INSTAGRAM_MEDIA_URL_MODE=resumable   # the only implemented mode; "external_url" fails at startup
+REEL_HARNESS_INSTAGRAM_SHARE_TO_FEED=false        # default: Reels-only, not also shared to the main feed
+```
+
+### 2. Connect an account
+
+```
+uv run reel-harness publisher-auth instagram [--account ALIAS]
+```
+
+Uses **Instagram Login for Business** (not Facebook Login for Business —
+no linked Facebook Page or Business Manager dependency for this login
+method), requesting only `instagram_business_basic` +
+`instagram_business_content_publish`. Same dual loopback/manual-paste flow
+as TikTok's `publisher-auth`, plus one extra step Instagram requires: the
+short-lived token from the initial exchange is immediately exchanged for a
+**long-lived** token (~60 days). On success, prints the connected
+account's Instagram user id/username and the token's expiry — never the
+token itself.
+
+**Instagram has no separate `refresh_token` grant.** Unlike YouTube/TikTok,
+`OAuthCredential.refresh_token` always stays `None` for Instagram; the
+long-lived access token refreshes **itself** by presenting its own current
+value to Meta's `refresh_access_token` endpoint, tracked via
+`OAuthCredential.expires_at`/`last_refreshed_at`/`last_refresh_error` the
+same as any other provider.
+
+### 2.5. Check readiness in one command
+
+```
+uv run reel-harness publisher-doctor instagram [--account ALIAS] [--check-remote] [--json]
+```
+
+Same shape as YouTube's/TikTok's doctor. Since there's no refresh token to
+check, the local pass instead reports `token_expiry` (warns as the
+long-lived token nears its ~60-day expiry, noting self-refresh will be
+attempted on next use). `--check-remote` additionally attempts the
+self-refresh, a real account-identity fetch, and an `account_eligibility_status`
+check (`PASS`/`WARN` on approaching the publishing-limit quota/`FAIL` if
+the account type isn't Reels-eligible/`NOT_CONFIGURED`). Without
+credentials, every remote check prints `NOT RUN — credentials not
+configured` and makes no request.
+
+### 3. Check readiness without uploading anything
+
+```
+uv run reel-harness publish-job <job_id> --provider instagram --dry-run [--account ALIAS]
+```
+
+**Makes no external request.** Reports an `instagram_preview` block: the
+caption that would be sent (validated against Instagram's 2200-character
+limit and internal-marker rules, `caption_error` on a violation), local
+video-limit validation (duration 3s–15min, file size ≤300MB —
+`video_limits_error` on a violation, both genuinely confirmed via Meta's
+`ig-user/media` reference), the default `platform_options`
+(`share_to_feed=false`), and `expected_api_mode="FILE_UPLOAD_RESUMABLE"`.
+`account_info`/`account_eligibility_status` are explicitly reported as "not
+fetched" here, with a pointer to `publisher-doctor instagram
+--check-remote`, exactly like TikTok's `creator_info`.
+
+### 4. Create the publication
+
+```
+uv run reel-harness publish-job <job_id> --provider instagram [--account ALIAS] \
+    --confirm-public-upload --confirm-platform-options
+```
+
+Both flags are **required** — Instagram's capabilities set
+`requires_user_confirmation=True` and its only privacy value is `PUBLIC`,
+so `publish-job` refuses without both, every time, with no lower-friction
+option (there is no `--privacy private` equivalent to fall back to).
+`REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` is also required, same as
+YouTube's/TikTok's public path.
+
+### 5. Run the publisher worker
+
+Same `publisher-run`/`publisher-run-once` commands as YouTube/TikTok — one
+worker process handles all three providers together, fairly, with no
+separate Instagram-only daemon. Before creating the (irreversible)
+container, the worker fetches account info fresh and validates eligibility
+(account type, Page-linked business/creator requirements, publishing-limit
+quota) — never trusting an earlier snapshot. This check happens once, at
+container-creation time (mirroring TikTok's already-shipped
+`creator_info` check), not re-queried on a later resume that reuses the
+same still-live container, since no new irreversible action is being taken
+at that point.
+
+Instagram's `container_id` (this project's `provider_video_id`) is known
+immediately from the container-creation response, before any bytes are
+sent — the same early-closure pattern as TikTok's `publish_id`.
+
+### 6. Processing and publish are handled transparently
+
+Instagram's flow has one more explicit step than YouTube/TikTok: after
+upload completion, the container must reach provider status `FINISHED`
+before an explicit `media_publish` call returns the real media id — upload
+completing is **not** the same as being published. This project's
+processing poller handles that transparently: the first poll that observes
+`FINISHED` immediately calls `media_publish` and fetches the permalink
+inside the same `get_processing_status()` call; a later poll observing the
+container already `PUBLISHED` is recognized as already-done and never
+re-publishes. From the outside, `PROCESSING -> PUBLISHED` looks identical
+to YouTube's flow — the extra call is an internal adapter detail, not a
+new CLI step.
+
+### 7. Smoke-check the account
+
+```
+uv run reel-harness provider-smoke publisher instagram [--account ALIAS]
+uv run reel-harness provider-smoke publisher instagram \
+    --upload-public-test --confirm-test-upload --confirm-public-upload --confirm-platform-options [--account ALIAS]
+```
+
+Default: read-only — refreshes the token if needed and fetches account
+info (identity, account type, Page linkage, publishing-limit quota).
+**There is deliberately no `--upload-private-test` option for Instagram**
+— since the platform itself has no private-post feature, offering a
+flag named that way would misleadingly imply a privacy guarantee this
+adapter cannot make. The real-upload flag is named `--upload-public-test`
+and requires all three of `--confirm-test-upload --confirm-public-upload
+--confirm-platform-options` together before it uploads one small, real,
+clearly-captioned test Reel (`[reel-harness provider-smoke test upload]`)
+built from a local scratch file, then polls it through to completion.
+**Never auto-deletes the remote post** (Instagram Reels delete is not
+implemented — see below). Without credentials, prints three distinct `NOT
+RUN` lines (remote doctor / read-only smoke / public-upload smoke), each
+naming exactly what's missing (credentials vs. permission/account
+linkage).
+
+### Remote Reels delete — not implemented
+
+There is no `publication-delete`/`--delete-remote` command for Instagram
+(or any provider). Removing a published Reel is left to Instagram
+directly.
+
+### Out of scope for Phase 3D
+
+Facebook Reels Publisher, Facebook Login for Business, the `video_url`
+(`external_url`)-hosted upload path and any public media-hosting server it
+would require, automating Meta's own app-review process, automatic public
+publishing (public is Instagram's *only* mode, but still requires the
+explicit double-confirmation + feature flag above), scheduled-publish
+automation, automatic remote post delete, thumbnail-only upload, subtitle
+upload, analytics collection, comments management, a web dashboard,
+PostgreSQL, a cloud queue, a forced cloud-storage vendor, and arbitrary
+tunneling software.
+
 ## Cancelling a job
 
 `reel-harness job-cancel <id>` / `POST /v1/jobs/{id}/cancel` share one
@@ -753,18 +948,19 @@ refused once a job is `CANCELLED`.
   provider network call), ffmpeg/ffprobe resolved. 503 + named checks when
   not ready. No secrets in responses.
 
-## Not yet supported (Phase 3B scope ends here)
+## Not yet supported (Phase 3D scope ends here)
 
-YouTube publishing exists (see "Publishing (YouTube)" above), including
-production-reliability features: `publisher-doctor`, account management,
-durable crash-recovery reconciliation, manual retry, and a processing
-poller. TikTok and Instagram publishers do not. Also not yet supported:
-automatic public publishing (public always requires the explicit
-double-confirmation + feature flag above), scheduled-publish automation,
-automatic remote video delete, thumbnail/subtitle upload, analytics
-collection, an OAuth account-management UI, PostgreSQL, cloud storage/CDN,
-web UI, face-recognition smart crop, BGM mixing, subtitle burn-in,
-multi-language dubbing.
+YouTube, TikTok, and Instagram Reels publishing all exist (see the three
+"Publishing (...)" sections above), sharing production-reliability
+features: `publisher-doctor`, account management, durable crash-recovery
+reconciliation, manual retry, and a processing poller. Facebook Reels
+publishing does not exist. Also not yet supported: automatic public
+publishing (public always requires the explicit double-confirmation +
+feature flag above), scheduled-publish automation, automatic remote
+video/post delete, thumbnail/subtitle upload, analytics collection, an
+OAuth account-management UI, PostgreSQL, cloud storage/CDN (beyond
+Instagram's own resumable upload), web UI, face-recognition smart crop,
+BGM mixing, subtitle burn-in, multi-language dubbing.
 
 ## Troubleshooting
 
@@ -792,3 +988,6 @@ multi-language dubbing.
 | `publication-retry` refuses with "still active" | the publication is in an ACTIVE-looking status (`UPLOADING`/`PROCESSING`/etc.) | run `publication-reconcile <id>` first to confirm its real state, then retry if appropriate |
 | `publication-reconcile` reports `ambiguous_remote_state` | the provider says the upload session is complete but nothing local (durable journal, DB) can confirm which video that produced | check the channel's own recent uploads (YouTube Studio) manually before deciding whether to retry — reconciliation deliberately never guesses here |
 | `publish-job --privacy public` refused | missing one of the four required public-upload conditions | add `--confirm-public-upload`, ensure the job is approved, and set `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` |
+| `publish-job --provider instagram` refused | Instagram requires `--confirm-public-upload` AND `--confirm-platform-options` every time (no private option exists) | add both flags and set `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true` |
+| `publisher-doctor instagram --check-remote` reports `BUSINESS_ACCOUNT_REQUIRED`/`PAGE_CONNECTION_REQUIRED` | the connected Instagram account isn't a Business/Creator account eligible for Reels publishing | convert the account in the Instagram app, then re-run `publisher-auth instagram` |
+| `provider-smoke publisher instagram --upload-public-test` prints `NOT RUN — application permission not available` | the app hasn't been granted `instagram_business_content_publish`, or the publishing limit is exhausted | check Meta App Review status / wait for the rolling 24h publishing-limit window to reset |

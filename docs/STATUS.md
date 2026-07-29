@@ -1,10 +1,163 @@
 # Status
 
-Last updated: 2026-07-29 (Phase 3C tiktok-publisher session, on branch
-`phase3/tiktok-publisher`). Phase 2A through Phase 3B are merged into
+Last updated: 2026-07-29 (Phase 3D instagram-publisher session, on branch
+`phase3/instagram-publisher`). Phase 2A through Phase 3C are merged into
 `main`.
 
-## Phase 3C — TikTok publisher (this branch)
+## Phase 3D — Instagram Reels publisher (this branch)
+
+Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
+`docs/PUBLISHING.md` for the official-doc research this is built from,
+checked 2026-07-29, Graph API `v25.0`):
+
+- **Official Meta for Developers docs researched and recorded**: Instagram
+  Content Publishing API (`developers.facebook.com/docs/instagram-platform/
+  content-publishing/`), the `ig-user/media` reference, and Instagram Login
+  for Business/Business Login docs. `docs/PUBLISHING.md` records what's
+  confirmed (account/permission model, container→publish flow, video specs,
+  publishing limit) and, honestly, what the docs do **not** clearly specify
+  (a complete error-code table, true multi-chunk resumability) — nothing
+  guessed at and presented as confirmed.
+- **Architectural finding that changed scope**: Instagram's Content
+  Publishing API supports `upload_type=resumable` — a direct binary POST to
+  `rupload.facebook.com`, no public URL needed — as an alternative to the
+  `video_url`-hosted path the original plan assumed was required. This
+  project implements **only** the resumable path, explicitly declining to
+  stand up a new public HTTPS media-hosting listener for a local-first,
+  single-user tool. `REEL_HARNESS_INSTAGRAM_MEDIA_URL_MODE=external_url` is
+  a recognized-but-not-implemented config value that fails loudly at
+  startup rather than silently falling back.
+- **Instagram OAuth** (`publisher/oauth_instagram.py`,
+  `publisher-auth instagram`): Instagram Login for Business (no Facebook
+  Page/Business Manager dependency for this login method), PKCE + `state`,
+  the same dual loopback/manual-paste flow as TikTok's, plus one extra step
+  Instagram requires — a short-lived token exchanged for a long-lived
+  (~60 day) token. **No separate `refresh_token` grant**: unlike
+  YouTube/TikTok, `OAuthCredential.refresh_token` always stays `None` for
+  Instagram; the long-lived token refreshes **itself** by presenting its
+  own current value to Meta's `refresh_access_token` endpoint — a genuine,
+  deliberate divergence from the established refresh pattern, documented
+  and tested explicitly (including a test confirming the refresh call
+  presents `access_token`, never a separate `refresh_token`, as the query
+  param).
+- **`InstagramPublisher` adapter** (`providers/instagram_publisher.py`):
+  container creation (`media_type=REELS`, `upload_type=resumable`,
+  `caption`, `share_to_feed`, cover/thumb-offset options) →
+  single-whole-file resumable upload → processing-status poll →
+  transparent `media_publish` the first time `FINISHED` is observed
+  (never re-published on a later poll that finds `PUBLISHED`) → permalink
+  fetch. `query_upload_offset` always raises `UploadSessionExpiredError`
+  (no documented offset-query mechanism) but is never actually reached in
+  practice: `worker.publish_runner._upload_stage`'s `bytes_uploaded==0`
+  shortcut retries the **same** container directly on any interrupted
+  attempt, since nothing was ever confirmed received. `build_caption`
+  validates length (2200 chars) and rejects internal markers
+  (job id/local path/secret/signed-URL fragments), mirroring TikTok's
+  `build_post_text`. Local video-limit validation
+  (`providers/instagram_media.py`): duration 3s–15min, file size ≤300MB,
+  both genuinely confirmed via Meta's `ig-user/media` reference (unlike
+  TikTok's unconfirmed limits).
+- **Capability model**: `privacy_values={"PUBLIC"}`,
+  `default_privacy="PUBLIC"` — every Instagram publish is inherently
+  public, so the double-confirmation gate
+  (`--confirm-public-upload --confirm-platform-options` +
+  `REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true`) applies unconditionally, with no
+  lower-friction private option to fall back to.
+- **`publisher-doctor instagram [--check-remote] [--json]`**: mirrors
+  TikTok's doctor shape; since there's no refresh token, the local check
+  reports `token_expiry` (warns as the ~60-day long-lived token nears
+  expiry) instead; `--check-remote` adds a real self-refresh, account-
+  identity fetch, and `account_eligibility_status`
+  (`PASS`/`WARN`/`FAIL`/`NOT_CONFIGURED`).
+- **`publish-job --provider instagram --dry-run`**: an Instagram-shaped
+  preview (caption + validation, local video-limit checks,
+  `expected_api_mode="FILE_UPLOAD_RESUMABLE"`) entirely local — never
+  calls account-info, let alone container creation; `account_info`/
+  `account_eligibility_status` explicitly reported as "not fetched."
+  `--confirm-platform-options` is required (`requires_user_confirmation`).
+- **`provider-smoke publisher instagram`**: read-only by default
+  (credential/token-refresh/account-info/Page-linkage/publishing-limit);
+  the opt-in test-Reel upload uses `--upload-public-test` (**deliberately
+  not** a misleadingly-named `--upload-private-test` — Instagram has no
+  private-post feature) requiring all three of `--upload-public-test
+  --confirm-test-upload --confirm-public-upload --confirm-platform-options`.
+  Distinct `NOT RUN` wording for missing credentials vs. missing
+  application permission/account linkage.
+- **Instagram reconciliation and idempotency**, reusing the existing
+  provider-generic `core.publish_reconciliation`/durable-journal framework:
+  one genuinely new outcome, `publishing_limit_reached`, proactively
+  surfaced via `_check_instagram_eligibility_block` (mirroring TikTok's
+  `_check_tiktok_app_review_block`) before any upload starts.
+- **Registry wiring**: `resolve_publisher`/`provider_capabilities`/
+  `publisher_snapshot` all recognize `"instagram"` — the existing
+  provider-generic worker, API, and `bundle_for_publication` wiring needed
+  zero Instagram-specific code beyond the adapter and registry entry.
+- **Instagram contract E2E** (`tests/e2e/test_instagram_publisher_e2e.py`):
+  a real ffmpeg-built `final.mp4` driven through the full publish state
+  machine against the real `InstagramPublisher` adapter and a stateful
+  fake Meta server (account-info/publishing-limit/container/upload/status/
+  media_publish/permalink, validating the real resumable-upload wire
+  contract — `Authorization: OAuth`/`offset`/`file_size` headers, not just
+  returning canned responses). Covers idempotent publication creation, a
+  transient upload failure that retries the SAME container (never a
+  duplicate), the early `provider_video_id` closure, processing-poll →
+  transparent `media_publish` → `PUBLISHED` with the real permalink, the
+  full audit trail, the durable journal, and that no secret/token/local
+  path ever reaches the DB, the journal, or the caption actually sent.
+- **A real cross-cutting bug found and fixed by this E2E test**, in shared
+  worker code used by every provider: `worker.publish_runner.
+  _resolve_session_handle()` (and its duplicate in
+  `core.publish_reconciliation.py`) reconstructed `UploadSessionHandle`
+  **without** `provider_reference`, silently blanking
+  `Publication.provider_video_id` back to `None` the next time an upload
+  completed after a session was reused. Invisible for TikTok (whose
+  `query_upload_offset` always raises, forcing a brand-new session on
+  every resume, which always carries a fresh `provider_reference`) but
+  real for Instagram, whose single-shot whole-file upload leaves
+  `bytes_uploaded` at 0 through any failed attempt, reaching the
+  same-session-reuse path for the first time. Fixed by carrying forward
+  `provider_reference=publication.provider_video_id` on the reconstructed
+  handle. Also fixed a related, previously-latent issue in the same
+  function: `_chunk_size_for()` fell back to an arbitrary ~2MB default
+  when no provider-specific chunk-size config existed — harmless for
+  YouTube/TikTok (both always set an explicit chunk-size key) but would
+  have corrupted a real Instagram upload over 2MB by splitting a
+  single-shot-only upload into wrongly-sized chunk requests. Fixed by
+  falling back to the actual total file size instead. Verified safe for
+  YouTube/TikTok too, not just beneficial to Instagram: 184 targeted
+  YouTube/TikTok tests (144 in dedicated provider test files, 40 in
+  cross-provider CLI/worker tests) plus the full suite all pass unchanged.
+- **YouTube/TikTok regression explicitly re-verified** after all of the
+  above: 184 targeted tests (144 dedicated, 40 cross-provider), full suite
+  793 passed / 1 skipped, mypy clean, production-smoke clean.
+
+Explicitly out of scope this phase (see `docs/OPERATIONS.md`): Facebook
+Reels Publisher, Facebook Login for Business, the `video_url`
+(`external_url`)-hosted upload path and any public media-hosting server it
+would require, automating Meta's own app-review process, automatic public
+publishing, scheduled-publish automation, automatic remote post delete,
+thumbnail-only upload, subtitle upload, analytics collection, comments
+management, a web dashboard, PostgreSQL, a cloud queue, a forced
+cloud-storage vendor, and arbitrary tunneling software.
+
+Suite after Phase 3D: **793 passed, 0 failed, 1 skipped** (664 → 794
+collected, 130 new tests). The one skip is the same pre-existing,
+unrelated one from Phase 3A/3B/3C (`test_secret_store.py`'s
+symlink-rejection test — this Windows machine doesn't permit symlink
+creation without elevated privileges). mypy clean (71 source files). ruff
+clean (`reel_harness` + `tests`).
+
+Live smoke: `NOT RUN — credentials not configured` (no
+`REEL_HARNESS_INSTAGRAM_APP_ID`/`_APP_SECRET`/`_REDIRECT_URI` set on this
+machine). `publisher-doctor instagram --check-remote` and
+`provider-smoke publisher instagram [--upload-public-test --confirm-test-upload
+--confirm-public-upload --confirm-platform-options]` are the documented
+paths to run them once credentials, Business/Creator account linkage, and
+Meta app permissions exist. **Live Instagram publishing remains unverified
+because credentials, permissions, account linkage, media delivery, or
+explicit public-upload confirmation were not configured.**
+
+## Phase 3C — TikTok publisher (merged to `main`)
 
 Implemented and tested this session (see `docs/OPERATIONS.md` for usage,
 `docs/PUBLISHING.md` for the official-doc research this is built from,
