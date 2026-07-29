@@ -4,6 +4,36 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [0.1.0] — 2026-07-29 — First stable release (local-first)
+
+This release ships as a **local-first release with explicitly documented
+limitations** (see below), not as a release with real-platform publishing
+verified end to end. No YouTube, TikTok, or Instagram credentials are
+configured on the machine this release was built and tested on.
+
+### Live publisher verification status
+
+- **YouTube**: unverified — no saved credential (`NOT_CONFIGURED`).
+- **TikTok**: unverified — no saved credential (`NOT_CONFIGURED`).
+- **Instagram**: unverified — no saved credential (`NOT_CONFIGURED`).
+
+Publisher features (YouTube/TikTok/Instagram upload) are implemented and
+covered by contract E2E tests against each platform's documented API
+behavior, but should be treated as **preview / credential-required**
+until exercised against a real account with real credentials. The exact
+phrase "production live publishing verified" does not apply to this
+release. See `reel-harness live-verify` and the release manifest's
+`live_verification` field to check this status yourself, and re-run
+`reel-harness live-verify --upload-tests ...` once real credentials are
+configured to obtain a real verification result.
+
+### Everything else
+
+All content generation, review, and local pipeline functionality
+(Phase 0–4A scope) is unchanged from `0.1.0rc2` — see that entry below
+for the full feature list. All contract E2E tests, the full unit/
+integration/e2e suite, mypy, and ruff pass on this release.
+
 ## [0.1.0rc2] — 2026-07-29 — Second release candidate
 
 ### Fixed

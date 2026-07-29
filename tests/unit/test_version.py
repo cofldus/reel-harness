@@ -9,10 +9,10 @@ import reel_harness
 from reel_harness._version import __version__ as version_module_value
 
 
-def test_version_is_pep440_release_candidate() -> None:
-    # "0.1.0rc2", not "0.1.0-rc.2" or "0.1.0.rc2" -- exactly one format used
+def test_version_is_pep440_final_release() -> None:
+    # "0.1.0", not "0.1.0.0" or "v0.1.0" -- exactly one format used
     # consistently everywhere a version string appears (see docs/STATUS.md).
-    assert version_module_value == "0.1.0rc2"
+    assert version_module_value == "0.1.0"
 
 
 def test_package_version_matches_version_module() -> None:
