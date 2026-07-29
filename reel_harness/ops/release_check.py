@@ -139,11 +139,12 @@ def _check_ruff(repo_root: Path) -> ReleaseCheckItem:
 
 def _check_secret_scan(repo_root: Path) -> ReleaseCheckItem:
     # tests/ is excluded: redaction/forbidden-substring tests deliberately
-    # embed fake secret-SHAPED values (e.g. test_publish_journal.py's
-    # "Bearer ya29.fake-leaked-token" fixture) to prove rejection/
-    # redaction logic works -- the opposite of a real leak, not something
-    # to flag. Mirrors .github/workflows/ci.yml's own Secret/token grep
-    # step exactly.
+    # embed fake Google-OAuth-token-shaped fixture values (see
+    # test_publish_journal.py) to prove rejection/redaction logic works --
+    # the opposite of a real leak, not something to flag. Mirrors
+    # .github/workflows/ci.yml's own Secret/token grep step exactly.
+    # (Deliberately not spelling out the fixture's literal value here --
+    # doing so would itself match the pattern below and self-trigger.)
     code, output = _run(
         ["git", "grep", "-nIE", r"AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,}", "--", "*.py", ":!tests"],
         repo_root, 30,
