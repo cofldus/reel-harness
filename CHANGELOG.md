@@ -4,6 +4,30 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [0.1.0rc2] — 2026-07-29 — Second release candidate
+
+### Fixed
+
+- `storage-verify` falsely flagged healthy jobs still in `CREATED` /
+  `QUEUED` / `TOPIC_GENERATING` / `SCRIPT_GENERATING` / `POLICY_CHECKING`
+  as `missing_directory` — those stages legitimately have not written a
+  file to disk yet. Found via an operational soak test (concurrent fake
+  jobs through a real `serve` subprocess); `storage-verify` could FAIL on
+  any normal system with jobs still waiting in queue. Jobs in those
+  statuses are no longer flagged; a genuinely missing directory past
+  `ASSET_FETCHING` is still correctly reported.
+- A subprocess-output-decoding mismatch (parent decoding a UTF-8-forced
+  child's stdout with the platform's default locale encoding instead of
+  UTF-8 explicitly) could crash under high non-ASCII log volume; fixed in
+  the affected E2E test's subprocess capture.
+
+### Note
+
+- `v0.1.0rc1` is unaffected by these fixes (its own tag and history are
+  unchanged) — this candidate exists because real product code changed
+  after `v0.1.0rc1` was tagged, so `v0.1.0rc1`'s own verification cannot
+  be reused as the basis for the final release as-is.
+
 ## [0.1.0rc1] — 2026-07-29 — First release candidate
 
 ### Added
