@@ -18,6 +18,7 @@ from reel_harness.manifest.writer import write_manifest
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_publisher import FakePublisher
+from reel_harness.publisher.journal import PublishJournal
 from reel_harness.publisher.secret_store import FileSecretStore
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_runner import PublishBundle, run_publication
@@ -97,7 +98,10 @@ def _make_ready_publication(
 @pytest.fixture
 def bundle(tmp_path) -> PublishBundle:
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
-    return PublishBundle(publisher=FakePublisher(), session_store=UploadSessionStore(store))
+    return PublishBundle(
+        publisher=FakePublisher(), session_store=UploadSessionStore(store),
+        journal=PublishJournal(store.root_dir / "publish_journal"),
+    )
 
 
 def test_full_upload_reaches_published(job_service, channel, session_factory, storage, tmp_path, bundle) -> None:
@@ -176,7 +180,10 @@ def test_transient_error_routes_to_retry_wait_with_backoff(
             raise TransientProviderError("simulated transient failure")
 
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
-    flaky_bundle = PublishBundle(publisher=_FlakyPublisher(), session_store=UploadSessionStore(store))
+    flaky_bundle = PublishBundle(
+        publisher=_FlakyPublisher(), session_store=UploadSessionStore(store),
+        journal=PublishJournal(store.root_dir / "publish_journal"),
+    )
     pub = _make_ready_publication(job_service, channel, session_factory, storage, tmp_path, "run-4")
 
     with session_factory() as session:
@@ -194,6 +201,7 @@ def test_processing_failure_reaches_failed_with_reason(
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     failing_bundle = PublishBundle(
         publisher=FakePublisher(mode="fail_processing"), session_store=UploadSessionStore(store),
+        journal=PublishJournal(store.root_dir / "publish_journal"),
     )
     pub = _make_ready_publication(job_service, channel, session_factory, storage, tmp_path, "run-5")
 
@@ -215,6 +223,7 @@ def test_resume_after_interruption_continues_from_confirmed_offset(
     crash."""
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     session_store = UploadSessionStore(store)
+    journal = PublishJournal(store.root_dir / "publish_journal")
     publisher = FakePublisher()
     pub = _make_ready_publication(
         job_service, channel, session_factory, storage, tmp_path, "run-6", size_multiplier=2,
@@ -231,13 +240,16 @@ def test_resume_after_interruption_continues_from_confirmed_offset(
         from reel_harness.worker.publish_runner import _create_session_stage
 
         _create_session_stage(session, db_pub, session.get(Job, db_pub.job_id), storage,
-                               PublishBundle(publisher=publisher, session_store=session_store), None,
-                               db_pub.total_bytes or 0, None)
+                               PublishBundle(publisher=publisher, session_store=session_store, journal=journal),
+                               None, db_pub.total_bytes or 0, None)
         assert db_pub.status == PublicationStatus.UPLOAD_SESSION_CREATED.value
 
     # Second "worker" (fresh call): resumes from UPLOAD_SESSION_CREATED and
     # completes the whole upload using the SAME publisher/session_store state.
     with session_factory() as session:
         db_pub = session.get(Publication, pub.id)
-        run_publication(session, db_pub, storage, PublishBundle(publisher=publisher, session_store=session_store))
+        run_publication(
+            session, db_pub, storage,
+            PublishBundle(publisher=publisher, session_store=session_store, journal=journal),
+        )
         assert db_pub.status == PublicationStatus.PUBLISHED.value

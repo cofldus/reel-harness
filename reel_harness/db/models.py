@@ -226,6 +226,12 @@ class Publication(Base):
     # Deterministic upload metadata actually sent (title/description/tags/
     # category/privacy/madeForKids) -- see providers.base.PublicationMetadata.
     metadata_snapshot: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # Deterministic hash of (provider, account, job, checksum, metadata_snapshot)
+    # -- see pipeline.publish_metadata.metadata_fingerprint. Lets
+    # core.publish_reconciliation confirm a recovered/retried upload still
+    # matches the intended one, without ever embedding an internal id in the
+    # user-visible title/description.
+    metadata_fingerprint: Mapped[str | None] = mapped_column(default=None)
 
     upload_session_reference: Mapped[str | None] = mapped_column(default=None)
     bytes_uploaded: Mapped[int] = mapped_column(default=0)
@@ -249,6 +255,16 @@ class Publication(Base):
     published_at: Mapped[datetime | None] = mapped_column(default=None)
     processing_completed_at: Mapped[datetime | None] = mapped_column(default=None)
 
+    # Processing poller bookkeeping (Phase 3B, schema v7) -- see
+    # worker.publish_lease.lease_next_processing_publication and
+    # worker.publish_runner._processing_stage. processing_started_at anchors
+    # the max-processing-duration local timeout; next_poll_at is when the
+    # poller may next check this publication (backoff between polls, not a
+    # retry-on-error mechanism -- errors use the ordinary RETRY_WAIT path).
+    processing_started_at: Mapped[datetime | None] = mapped_column(default=None)
+    next_poll_at: Mapped[datetime | None] = mapped_column(default=None)
+    processing_poll_count: Mapped[int] = mapped_column(default=0)
+
     job: Mapped[Job] = relationship()
     audit_events: Mapped[list[PublicationAuditEvent]] = relationship(back_populates="publication")
 
@@ -258,7 +274,9 @@ class PublicationAuditEvent(Base):
     publication_created, auth_refreshed, upload_session_created,
     chunk_uploaded, upload_resumed, upload_completed, processing_started,
     processing_completed, publication_failed, publication_cancelled,
-    privacy_selected -- see worker.publish_runner). `detail` carries only
+    privacy_selected, publication_reconciled, publication_retried -- see
+    worker.publish_runner, core.publish_reconciliation, and
+    core.publish_retry). `detail` carries only
     safe structured fields (byte ranges, safe session-reference prefixes,
     status codes) -- never a full URL, request/response body, or secret;
     callers are responsible for redacting before constructing it, the same

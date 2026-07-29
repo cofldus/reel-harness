@@ -125,6 +125,75 @@ def readyz(ctx: AppContext = Depends(get_context)) -> JSONResponse:
     )
 
 
+@app.get("/readyz/publisher")
+def readyz_publisher(account: str = "default", ctx: AppContext = Depends(get_context)) -> JSONResponse:
+    """Publisher-specific readiness: publication schema, credential-backend
+    reachability, the selected account's token state, publisher registry,
+    worker config, and the media toolchain -- all checked locally. Never
+    makes a real YouTube API call (that's `publisher-doctor --check-remote`
+    or `provider-smoke publisher youtube`); never exposes a secret, token,
+    or local credential path."""
+    checks: dict[str, str] = {}
+    ready = True
+
+    try:
+        with ctx.session_factory() as session:
+            session.execute(text("SELECT 1 FROM publications LIMIT 1"))
+            session.execute(text("SELECT 1 FROM publication_audit_events LIMIT 1"))
+        checks["publication_schema"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - readiness must report, not raise
+        checks["publication_schema"] = f"error: {type(exc).__name__}"
+        ready = False
+
+    from reel_harness.publisher.secret_store import SecretStoreError
+
+    backend = None
+    try:
+        backend = ctx.credential_backend()
+        checks["credential_backend"] = "ok"
+    except SecretStoreError as exc:
+        checks["credential_backend"] = f"error: {exc}"
+        ready = False
+
+    if backend is not None:
+        cred = backend.get_credential("youtube", account)
+        if cred is None:
+            checks["account_credential"] = f"not configured (account={account!r})"
+        elif cred.invalid:
+            checks["account_credential"] = "invalid -- last refresh failed, re-run publisher-auth"
+            ready = False
+        else:
+            checks["account_credential"] = "ok"
+            checks["refresh_token"] = "present" if cred.refresh_token else "missing"
+
+    try:
+        from reel_harness.providers.youtube_publisher import UPLOAD_ENDPOINT  # noqa: F401
+
+        checks["publisher_registry"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        checks["publisher_registry"] = f"error: {type(exc).__name__}"
+        ready = False
+
+    chunk_size = ctx.settings.youtube_upload_chunk_size
+    checks["publication_worker_config"] = (
+        "ok" if chunk_size > 0 and chunk_size % 262144 == 0 else "invalid upload chunk size"
+    )
+    if checks["publication_worker_config"] != "ok":
+        ready = False
+    checks["public_upload_feature_flag"] = str(ctx.settings.allow_public_upload)
+
+    deps = check_ffmpeg_available()
+    checks["ffmpeg"] = "ok" if deps.ffmpeg_available else "not found"
+    checks["ffprobe"] = "ok" if deps.ffprobe_available else "not found"
+    if not deps.all_available:
+        ready = False
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"ready": ready, "checks": checks},
+    )
+
+
 @app.post("/v1/jobs", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_api_key)])
 def create_job(request: CreateJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
     job, replay = ctx.jobs.create_job(request.channel_id, request.idempotency_key, request.topic)
@@ -308,3 +377,55 @@ def refresh_publication(publication_id: str, ctx: AppContext = Depends(get_conte
             if callable(close):
                 close()
     return _to_publication_response(pub)
+
+
+@app.post("/v1/publications/{publication_id}/reconcile", dependencies=[Depends(require_api_key)])
+def reconcile_publication_endpoint(publication_id: str, ctx: AppContext = Depends(get_context)) -> dict:
+    """Confirms a publication's local state against the provider (recovering
+    a provider_video_id the DB never committed, distinguishing an expired
+    upload session from an incomplete one, etc.) via a read-only call --
+    never starts a new upload. See core.publish_reconciliation for the full
+    outcome list. Response contains only the outcome, safe reasons, and a
+    provider_video_id -- no secret, token, or local path."""
+    from reel_harness.core.publish_reconciliation import reconcile_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        bundle = ctx.bundle_for_publication(pub)
+        try:
+            result = reconcile_publication(session, pub, bundle)
+        finally:
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    return result.to_dict()
+
+
+class RetryPublicationRequest(BaseModel):
+    from_stage: str | None = None
+
+
+@app.post("/v1/publications/{publication_id}/retry", dependencies=[Depends(require_api_key)])
+def retry_publication_endpoint(
+    publication_id: str, request: RetryPublicationRequest | None = None, ctx: AppContext = Depends(get_context),
+) -> dict:
+    """Manually retries a stuck publication (see core.publish_retry for the
+    full policy -- eligibility and metadata-fingerprint are always re-
+    verified first). Never uploads anything itself; a 409 with structured
+    reasons means the retry was refused, not that anything failed."""
+    from reel_harness.core.publish_retry import PublicationRetryError, retry_publication
+    from reel_harness.db.models import Publication
+
+    from_stage = request.from_stage if request is not None else None
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        try:
+            result = retry_publication(session, pub, ctx.storage, from_stage=from_stage)
+        except PublicationRetryError as exc:
+            raise HTTPException(status_code=409, detail={"reasons": exc.reasons}) from exc
+    return {"retried": True, **result.to_dict()}

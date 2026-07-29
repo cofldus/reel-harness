@@ -433,11 +433,15 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
     Mirrors llm_provider_snapshot/tts_provider_snapshot/
     asset_provider_snapshot's role for jobs."""
     name = normalize_provider_name(provider)
+    poll_interval = settings.publisher_processing_poll_interval_seconds if settings else 30.0
+    max_duration = settings.publisher_processing_max_duration_seconds if settings else 3600.0
     if name == "fake":
         return {
             "publisher_provider": "fake",
             "publisher_adapter_version": "fake-publisher-v1",
             "publisher_account_reference": account_reference,
+            "processing_poll_interval_seconds": poll_interval,
+            "processing_max_duration_seconds": max_duration,
         }
     if name != "youtube":
         raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
@@ -451,6 +455,8 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
         "youtube_category_id": settings.youtube_category_id,
         "youtube_made_for_kids": settings.youtube_made_for_kids,
         "youtube_chunk_size": settings.youtube_upload_chunk_size,
+        "processing_poll_interval_seconds": poll_interval,
+        "processing_max_duration_seconds": max_duration,
     }
 
 
@@ -467,12 +473,18 @@ def _resolve_fresh_youtube_access_token(
     from datetime import UTC, datetime, timedelta
 
     from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.observability import redact
     from reel_harness.publisher.credentials import OAuthCredential
     from reel_harness.publisher.oauth_youtube import YouTubeOAuthClient
 
     cred = credential_backend.get_credential("youtube", account_reference)
     if cred is None:
         raise ProviderNotConfiguredError(f"no youtube credential saved for account {account_reference!r}")
+    if cred.invalid:
+        raise ProviderAuthError(
+            f"youtube credential for {account_reference!r} is marked invalid after a failed refresh "
+            "-- re-run publisher-auth youtube"
+        )
     if cred.expires_at is None or cred.expires_at > datetime.now(UTC) + timedelta(minutes=2):
         return cred.access_token
     if not cred.refresh_token:
@@ -483,7 +495,17 @@ def _resolve_fresh_youtube_access_token(
         transport=oauth_transport,
     )
     try:
-        tokens = client.refresh(cred.refresh_token)
+        try:
+            tokens = client.refresh(cred.refresh_token)
+        except ProviderAuthError as exc:
+            # The refresh token itself is dead (revoked/expired) -- record
+            # this on the credential (never delete it) so publisher-doctor
+            # and publisher-account-show can surface it without a network
+            # call, then let the caller's own AUTH_REQUIRED handling apply.
+            cred.last_refresh_error = (redact(str(exc)) or "")[:300]
+            cred.invalid = True
+            credential_backend.save_credential(cred)
+            raise
     finally:
         client.close()
     refreshed = OAuthCredential(
@@ -491,6 +513,8 @@ def _resolve_fresh_youtube_access_token(
         expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in), scope=tokens.scope,
         provider="youtube", account_reference=account_reference,
         channel_id=cred.channel_id, channel_title=cred.channel_title,
+        created_at=cred.created_at, last_refreshed_at=datetime.now(UTC),
+        last_refresh_error=None, invalid=False,
     )
     credential_backend.save_credential(refreshed)
     return refreshed.access_token

@@ -132,3 +132,80 @@ def test_access_token_refresh_no_credential_raises_not_configured() -> None:
     backend = InMemoryCredentialBackend()
     with pytest.raises(ProviderNotConfiguredError):
         _resolve_fresh_youtube_access_token(settings, backend, "default")
+
+
+def test_refresh_failure_marks_the_credential_invalid_and_records_the_error(monkeypatch) -> None:
+    """Crash-recovery scenario E: an expired access token whose refresh
+    token Google has revoked. The failure is recorded on the credential
+    (never deleted) so publisher-doctor/publisher-account-show can surface
+    it without a network call, and the caller still gets ProviderAuthError
+    so run_publication's ordinary AUTH_REQUIRED handling applies -- upload
+    is never silently retried against a token we know is dead."""
+    from reel_harness.core.errors import ProviderAuthError
+
+    settings = _settings()
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="stale", refresh_token="revoked-refresh-token",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1), scope="s",
+        provider="youtube", account_reference="default",
+    ))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    with pytest.raises(ProviderAuthError):
+        _resolve_fresh_youtube_access_token(
+            settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
+        )
+
+    broken = backend.get_credential("youtube", "default")
+    assert broken.invalid is True
+    assert broken.last_refresh_error is not None
+    assert broken.refresh_token == "revoked-refresh-token"  # preserved for the record, not erased
+    assert "revoked-refresh-token" not in broken.last_refresh_error
+
+
+def test_an_invalid_credential_refuses_further_attempts_without_a_new_network_call() -> None:
+    """Once marked invalid, a second attempt must not even try to refresh
+    again (no upload retry should ever re-hit a token endpoint we already
+    know rejects this credential) -- it must fail immediately."""
+    from reel_harness.core.errors import ProviderAuthError
+
+    settings = _settings()
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="stale", refresh_token="dead", expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        scope="s", provider="youtube", account_reference="default", invalid=True,
+        last_refresh_error="invalid_grant",
+    ))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not contact the token endpoint for an already-invalid credential")
+
+    with pytest.raises(ProviderAuthError, match="invalid"):
+        _resolve_fresh_youtube_access_token(
+            settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
+        )
+
+
+def test_recovery_after_reauth_clears_the_invalid_marker() -> None:
+    """Simulates the operator fixing the problem by re-running
+    publisher-auth: a brand-new credential (invalid=False, a fresh access
+    token) is saved for the same account, and the next resolution succeeds
+    normally -- crash-recovery scenario E's "credential 복구 후 retry 가능"."""
+    settings = _settings()
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="stale", refresh_token="dead", expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        scope="s", provider="youtube", account_reference="default", invalid=True,
+        last_refresh_error="invalid_grant",
+    ))
+    backend.save_credential(OAuthCredential(
+        access_token="brand-new-token", refresh_token="brand-new-refresh",
+        expires_at=datetime.now(UTC) + timedelta(hours=1), scope="s",
+        provider="youtube", account_reference="default", invalid=False,
+    ))
+
+    token = _resolve_fresh_youtube_access_token(settings, backend, "default")
+    assert token == "brand-new-token"

@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No real credentials are configured anywhere in this workflow -- every
+# real-provider test suite stays skipped/refused/NOT-CONFIGURED as it does
+# locally without them (see docs/OPERATIONS.md / docs/PUBLISHING.md). Live
+# provider smoke checks are never run in CI; only the fake-provider E2E and
+# the httpx.MockTransport-based YouTube contract E2E are exercised here.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg/ffprobe (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Install ffmpeg/ffprobe (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg -y
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Verify the lockfile matches pyproject.toml
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Import check
+        run: uv run python -c "import reel_harness; import reel_harness.api.app; import reel_harness.cli.main"
+
+      - name: mypy
+        run: uv run mypy reel_harness
+
+      - name: ruff
+        run: uv run ruff check reel_harness tests
+
+      - name: pytest
+        run: uv run pytest -v
+
+      # A repo-internal credential-directory or OAuth-token-shaped literal
+      # in tracked source is a defect regardless of which commit introduced
+      # it -- checked on every CI run, not only when publisher code changes.
+      - name: Secret/token grep
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git grep -nIE "AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,}" -- '*.py'; then
+            echo "::error::possible real API key/token literal found in tracked .py files"
+            exit 1
+          fi
+          echo "no real-looking secret literals found"
+
+      - name: Tracked artifact check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git status --porcelain | grep -E '^\?\? (jobs/|.*\.db$)'; then
+            echo "::error::a job artifact or database file would be tracked -- check .gitignore"
+            exit 1
+          fi
+          echo "no stray job artifacts or database files"
+
+  production-smoke:
+    name: production-smoke (Ubuntu, real ffmpeg, 1080x1920)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg/ffprobe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: production-smoke (real ffmpeg, full pipeline, no fake shortcuts)
+        run: uv run pytest tests/e2e/test_production_smoke.py -v
+
+  package-smoke:
+    name: package-smoke (build wheel, install into a clean venv, run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: "3.11"
+
+      - name: Build wheel and sdist
+        run: uv build --out-dir dist
+
+      - name: Install the built wheel into a clean venv (not the source tree)
+        run: |
+          uv venv /tmp/clean-venv
+          uv pip install --python /tmp/clean-venv/bin/python dist/*.whl
+
+      - name: Import + CLI entry point smoke (installed package only)
+        working-directory: /tmp
+        run: |
+          /tmp/clean-venv/bin/python -c "
+          import reel_harness, reel_harness.api.app, reel_harness.cli.main
+          import reel_harness.providers.youtube_publisher, reel_harness.publisher.oauth_youtube
+          assert 'site-packages' in reel_harness.__file__, 'imported from source tree, not the installed wheel'
+          print('installed-package imports OK:', reel_harness.__file__)
+          "
+          /tmp/clean-venv/bin/reel-harness --help
+
+      - name: Fake-provider bootstrap + migration init (installed package only)
+        working-directory: /tmp
+        env:
+          DATABASE_URL: "sqlite:////tmp/package-smoke.db"
+          JOBS_DIR: "/tmp/package-smoke-jobs"
+        run: |
+          /tmp/clean-venv/bin/reel-harness doctor
+          /tmp/clean-venv/bin/reel-harness channel-create --name smoke --niche cooking --language en

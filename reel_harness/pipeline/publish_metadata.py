@@ -137,3 +137,30 @@ def build_publication_metadata(
         tags=build_tags(manifest.script_title, manifest.topic, channel_niche),
         category_id=category_id, privacy_status=privacy_status, made_for_kids=made_for_kids,
     )
+
+
+def metadata_fingerprint(
+    provider: str, account_reference: str, job_id: str, final_video_checksum: str,
+    metadata: PublicationMetadata,
+) -> str:
+    """A deterministic, safe reconciliation marker: a hash over exactly the
+    facts that together uniquely identify "this specific upload attempt"
+    (provider + account + job + final video bytes + the exact metadata that
+    would be/was sent) -- never persisted anywhere visible to YouTube (it is
+    NOT embedded in the description; see docs/PUBLISHING.md for why: an
+    internal id in user-visible text has no upside and a real, if small,
+    downside -- it leaks internal identifiers to anyone who reads the
+    description). Recomputing this before a retry and comparing it against
+    the value stored at upload-session-creation time confirms the retry is
+    for the exact same intended upload, not a stale/changed one."""
+    import hashlib
+    import json
+
+    payload = json.dumps({
+        "provider": provider, "account_reference": account_reference,
+        "job_id": job_id, "final_video_checksum": final_video_checksum,
+        "title": metadata.title, "description": metadata.description,
+        "tags": list(metadata.tags), "category_id": metadata.category_id,
+        "privacy_status": metadata.privacy_status, "made_for_kids": metadata.made_for_kids,
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -18,8 +18,9 @@ from reel_harness.core.state_machine import (
 )
 from reel_harness.db.models import Job, Publication, PublicationAuditEvent
 from reel_harness.observability import redact
-from reel_harness.pipeline.publish_metadata import build_publication_metadata
+from reel_harness.pipeline.publish_metadata import build_publication_metadata, metadata_fingerprint
 from reel_harness.providers.base import PublicationMetadata, Publisher, UploadSessionHandle
+from reel_harness.publisher.journal import PublishJournal, safe_session_reference_hash
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_lease import PUBLICATION_RETRY_POLICY, assert_publication_lease
 
@@ -42,6 +43,7 @@ class _SessionNotResumable(Exception):
 class PublishBundle:
     publisher: Publisher
     session_store: UploadSessionStore
+    journal: PublishJournal
 
 
 def _persisted_error_text(text: object, limit: int) -> str:
@@ -108,6 +110,8 @@ def _run_publication_impl(
             else {}
         )
         apply_publication_transition(publication, target, **extra_fields)
+        if target == PublicationStatus.PROCESSING and publication.processing_started_at is None:
+            publication.processing_started_at = _now()
         session.commit()
 
     job = session.get(Job, publication.job_id)
@@ -134,6 +138,7 @@ def _run_publication_impl(
         if not assert_publication_lease(session, publication.id, lease_token):
             raise PublicationLeaseLostSignal
         apply_publication_transition(publication, PublicationStatus.PROCESSING)
+        publication.processing_started_at = _now()
         _audit(session, publication.id, "processing_started")
         session.commit()
 
@@ -156,11 +161,23 @@ def _create_session_stage(
     )
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
+    fingerprint = metadata_fingerprint(
+        publication.provider, publication.account_reference, publication.job_id,
+        publication.final_video_checksum, metadata,
+    )
+    bundle.journal.append(
+        publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+        account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+        event="upload_session_created", timestamp=_now(),
+        safe_session_hash=safe_session_reference_hash(handle.session_reference),
+        detail={"total_bytes": total_bytes, "metadata_fingerprint": fingerprint},
+    )
 
     if not assert_publication_lease(session, publication.id, lease_token):
         raise PublicationLeaseLostSignal
     publication.total_bytes = total_bytes
     publication.metadata_snapshot = _metadata_to_dict(metadata)
+    publication.metadata_fingerprint = fingerprint
     apply_publication_transition(
         publication, PublicationStatus.UPLOAD_SESSION_CREATED, upload_session_reference=publication.id,
     )
@@ -215,6 +232,13 @@ def _start_new_session(
     metadata = _metadata_from_snapshot(publication)
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
+    bundle.journal.append(
+        publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+        account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+        event="upload_session_created", timestamp=_now(),
+        safe_session_hash=safe_session_reference_hash(handle.session_reference),
+        detail={"total_bytes": total_bytes, "resumed": True},
+    )
     publication.bytes_uploaded = 0
     _audit(session, publication.id, "upload_session_created", {"total_bytes": total_bytes, "resumed": True})
     return handle
@@ -266,6 +290,19 @@ def _upload_stage(
             })
 
             if result.completed:
+                # Durable journal write FIRST, before any DB mutation: this
+                # is the exact instant a real crash (process killed right
+                # here) could otherwise lose the fact that the provider
+                # already has the finished video, causing a naive resume to
+                # re-upload it as a duplicate. A journal write that returns
+                # successfully is fsync'd -- see publisher.journal.
+                bundle.journal.append(
+                    publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+                    account_reference=publication.account_reference,
+                    final_video_checksum=publication.final_video_checksum,
+                    event="upload_completed", timestamp=_now(),
+                    provider_video_id=result.provider_video_id, provider_request_id=result.request_id,
+                )
                 publication.provider_video_id = result.provider_video_id
                 publication.publication_url = result.publication_url
                 apply_publication_transition(publication, PublicationStatus.UPLOAD_COMPLETED)
@@ -278,26 +315,62 @@ def _upload_stage(
             session.commit()  # persist progress after every chunk -- a crash resumes near where it left off
 
 
+def _processing_poll_config(publication: Publication) -> tuple[float, float]:
+    config = publication.publisher_config or {}
+    interval = config.get("processing_poll_interval_seconds", 30.0)
+    max_duration = config.get("processing_max_duration_seconds", 3600.0)
+    return float(interval), float(max_duration)
+
+
 def _processing_stage(session, publication: Publication, bundle: PublishBundle, lease_token: str | None) -> None:
     assert publication.provider_video_id is not None  # guaranteed by UPLOAD_COMPLETED's precondition
+    poll_interval, max_duration = _processing_poll_config(publication)
+
+    if publication.processing_started_at is not None:
+        elapsed = (_now() - publication.processing_started_at).total_seconds()
+        if elapsed > max_duration:
+            # A local timeout, never a provider-reported failure -- no
+            # request is made. The video may still finish processing on
+            # YouTube's side; publication-reconcile can confirm that later.
+            apply_publication_transition(
+                publication, PublicationStatus.FAILED,
+                failure_code="PROCESSING_TIMEOUT",
+                failure_summary=f"processing exceeded the local max duration ({max_duration:.0f}s)",
+            )
+            _audit(session, publication.id, "publication_failed", {"reason": "PROCESSING_TIMEOUT"})
+            session.commit()
+            return
+
     status = bundle.publisher.get_processing_status(publication.provider_video_id)
 
     if not assert_publication_lease(session, publication.id, lease_token):
         raise PublicationLeaseLostSignal
+    publication.processing_poll_count += 1
 
     if status.processing_status == "succeeded":
+        bundle.journal.append(
+            publication_id=publication.id, job_id=publication.job_id, provider=publication.provider,
+            account_reference=publication.account_reference, final_video_checksum=publication.final_video_checksum,
+            event="processing_completed", timestamp=_now(),
+            provider_video_id=publication.provider_video_id, detail={"outcome": "succeeded"},
+        )
         publication.publication_url = status.publication_url or publication.publication_url
         publication.processing_completed_at = _now()
+        publication.next_poll_at = None
         apply_publication_transition(publication, PublicationStatus.PUBLISHED, published_at=_now())
         _audit(session, publication.id, "processing_completed", {"outcome": "succeeded"})
     elif status.processing_status in ("failed", "terminated"):
+        publication.next_poll_at = None
         apply_publication_transition(
             publication, PublicationStatus.FAILED,
             failure_code="PROCESSING_FAILED",
             failure_summary=_persisted_error_text(status.failure_reason or status.processing_status, 500),
         )
         _audit(session, publication.id, "publication_failed", {"reason": status.failure_reason})
-    # else "processing": leave as-is; a later publication-refresh re-polls.
+    else:
+        # Still processing -- don't poll again until the interval elapses,
+        # so a busy processing poller doesn't hammer the provider.
+        publication.next_poll_at = _now() + timedelta(seconds=poll_interval)
     session.commit()
 
 

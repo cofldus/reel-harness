@@ -217,11 +217,23 @@ ALLOWED_PUBLICATION_TRANSITIONS: dict[PublicationStatus, set[PublicationStatus]]
     },
     PublicationStatus.PROCESSING: {
         PublicationStatus.PUBLISHED, PublicationStatus.FAILED, PublicationStatus.CANCELLED,
+        # A transient/auth/quota error while POLLING processing status is
+        # not the same fact as the video's own processing having failed --
+        # without these, any hiccup calling get_processing_status (a
+        # dropped connection, an expired token, a rate limit) landed
+        # straight in FAILED on the first occurrence, with no soft retry at
+        # all (Phase 3B fix; mirrors UPLOADING's error handling).
+        PublicationStatus.AUTH_REQUIRED, PublicationStatus.QUOTA_BLOCKED, PublicationStatus.RETRY_WAIT,
     },
     PublicationStatus.PUBLISHED: set(),
     PublicationStatus.RETRY_WAIT: {
         PublicationStatus.ELIGIBILITY_CHECKING, PublicationStatus.READY_TO_UPLOAD,
         PublicationStatus.UPLOAD_SESSION_CREATED, PublicationStatus.UPLOADING,
+        # PROCESSING: a publication-retry --from-stage PROCESSING resume --
+        # the upload already completed (a provider_video_id is known) and
+        # only the processing-status poll needs to happen again, e.g. after
+        # a quota/auth error specifically during that poll (Phase 3B).
+        PublicationStatus.PROCESSING,
         PublicationStatus.FAILED, PublicationStatus.CANCELLED,
     },
     PublicationStatus.AUTH_REQUIRED: {

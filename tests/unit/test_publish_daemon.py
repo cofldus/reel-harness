@@ -15,6 +15,7 @@ from reel_harness.manifest.writer import write_manifest
 from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_publisher import FakePublisher
+from reel_harness.publisher.journal import PublishJournal
 from reel_harness.publisher.secret_store import FileSecretStore
 from reel_harness.publisher.session_store import UploadSessionStore
 from reel_harness.worker.publish_daemon import PublisherDaemon, PublisherDaemonConfig
@@ -93,7 +94,10 @@ def _daemon(session_factory, storage, tmp_path, **config_overrides) -> Publisher
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
 
     def bundle_for_publication(_pub):
-        return PublishBundle(publisher=FakePublisher(), session_store=UploadSessionStore(store))
+        return PublishBundle(
+            publisher=FakePublisher(), session_store=UploadSessionStore(store),
+            journal=PublishJournal(store.root_dir / "publish_journal"),
+        )
 
     def channel_niche_for_job(_job):
         return "cooking"
@@ -157,6 +161,7 @@ def test_stop_on_error_exits_fatal_after_first_failed_publication(
     def bundle_for_publication(_pub):
         return PublishBundle(
             publisher=FakePublisher(mode="fail_processing"), session_store=UploadSessionStore(store),
+            journal=PublishJournal(store.root_dir / "publish_journal"),
         )
 
     config = PublisherDaemonConfig(
@@ -171,3 +176,42 @@ def test_stop_on_error_exits_fatal_after_first_failed_publication(
     with session_factory() as session:
         db_pub = session.get(Publication, pub.id)
         assert db_pub.status == PublicationStatus.FAILED.value
+
+
+def test_process_upload_false_never_touches_an_upload_lane_publication(
+    job_service, channel, session_factory, storage, tmp_path,
+) -> None:
+    _make_ready_publication(job_service, channel, session_factory, storage, tmp_path, "daemon-role-1")
+    daemon = _daemon(
+        session_factory, storage, tmp_path, idle_exit_after_seconds=0.1,
+        process_upload=False, process_status=True,
+    )
+    exit_code = daemon.run()
+    assert exit_code == 0
+    assert daemon.stop_reason == "idle_exit"
+    assert daemon.publications_processed == 0
+
+
+def test_process_status_true_alone_advances_a_processing_publication(
+    job_service, channel, session_factory, storage, tmp_path,
+) -> None:
+    from reel_harness.db.models import Publication
+
+    pub = _make_ready_publication(job_service, channel, session_factory, storage, tmp_path, "daemon-role-2")
+    with session_factory() as session:
+        db_pub = session.get(Publication, pub.id)
+        db_pub.status = PublicationStatus.PROCESSING.value
+        db_pub.provider_video_id = "fake-precomputed-video"
+        db_pub.processing_started_at = datetime.now(UTC)
+        session.commit()
+
+    daemon = _daemon(
+        session_factory, storage, tmp_path, idle_exit_after_seconds=0.1,
+        process_upload=False, process_status=True,
+    )
+    exit_code = daemon.run()
+    assert exit_code == 0
+    assert daemon.publications_processed == 1
+    with session_factory() as session:
+        db_pub = session.get(Publication, pub.id)
+        assert db_pub.status == PublicationStatus.PUBLISHED.value

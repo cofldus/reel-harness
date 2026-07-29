@@ -141,13 +141,31 @@ class PublicationService:
             session.expunge(pub)
             return pub
 
-    def list_publications(self, job_id: str | None = None, status: str | None = None) -> list[Publication]:
+    def list_publications(
+        self, job_id: str | None = None, status: str | None = None, *,
+        provider: str | None = None, account_reference: str | None = None,
+        statuses: list[str] | None = None,
+        created_after: object = None, created_before: object = None,
+    ) -> list[Publication]:
+        """`status` filters to exactly one status; `statuses` (used by e.g.
+        `publication-list --failed-only`) filters to any of a set -- passing
+        both is redundant, `status` wins if both are given."""
         with self._session_factory() as session:
             stmt = select(Publication)
             if job_id:
                 stmt = stmt.where(Publication.job_id == job_id)
             if status:
                 stmt = stmt.where(Publication.status == status)
+            elif statuses:
+                stmt = stmt.where(Publication.status.in_(statuses))
+            if provider:
+                stmt = stmt.where(Publication.provider == provider)
+            if account_reference:
+                stmt = stmt.where(Publication.account_reference == account_reference)
+            if created_after is not None:
+                stmt = stmt.where(Publication.created_at >= created_after)
+            if created_before is not None:
+                stmt = stmt.where(Publication.created_at <= created_before)
             rows = list(session.execute(stmt.order_by(Publication.created_at.desc())).scalars().all())
             for row in rows:
                 session.expunge(row)

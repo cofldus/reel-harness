@@ -136,3 +136,188 @@ error response instead.
   something the API itself requires.
 - **`selfDeclaredMadeForKids` is always sent explicitly** (never omitted)
   because YouTube's own policy requires every upload to declare it.
+
+## Phase 3B re-verification (checked 2026-07-28)
+
+Re-fetched directly from `developers.google.com` before extending the
+adapter for production reliability (reconciliation, retry, doctor). Findings
+that changed or added to the Phase 3A research above:
+
+- **Chunk-upload completion is `201 Created`**, not `200` — this adapter
+  already accepted both (`response.status_code in (200, 201)` in
+  `upload_chunk`), so no code change was needed, but it's now confirmed
+  against the primary source rather than assumed.
+- **Session expiry has no documented fixed TTL.** The guide states only
+  that "each resumable session URI has a finite lifetime and eventually
+  expires," surfaced as `404 Not Found` on the next request. The adapter
+  already treats any `404` as `UploadSessionExpiredError` rather than
+  assuming a specific lifetime — confirmed as the correct approach; there is
+  no TTL value to add.
+- **`videos.list` cannot list a channel's own uploads** — it only accepts
+  `id`/`chart`/`myRating` filters (1 unit/call). Discovering an *unknown*
+  video id for reconciliation therefore cannot use `videos.list` alone.
+  Enumerating a channel's own recent uploads without `search.list`'s
+  quota cost uses `channels.list(mine=true, part=contentDetails)` →
+  `relatedPlaylists.uploads` (the auto-created uploads playlist id) →
+  `playlistItems.list(playlistId=...)`. This is the mechanism
+  `publication-reconcile`'s ambiguous-state fallback path uses (see below);
+  it is a best-effort title/recency match, not an exact-identifier lookup,
+  and is documented as such rather than treated as authoritative.
+- **`status.publishAt`** (scheduled publishing) only applies when
+  `privacyStatus=private` and only before a video has ever been published;
+  a past timestamp publishes immediately. Confirmed but **not used** —
+  scheduled publishing remains explicitly out of scope (see
+  `docs/OPERATIONS.md`).
+- **OAuth**: loopback redirect (`http://127.0.0.1:{port}`) is confirmed as
+  the current recommended pattern for desktop apps (custom URI schemes are
+  now explicitly documented as unsupported "due to the risk of app
+  impersonation" — this project never used one). PKCE `S256` and `state`
+  remain as implemented. Google's docs now also mention an optional DPoP
+  (Demonstration of Proof-of-Possession) token-binding enhancement; this is
+  optional, adds meaningful complexity (a bound signing key, nonce
+  handling), and is **not implemented this phase** — recorded here as a
+  possible future hardening, not a regression.
+- **Programmatic token revocation** exists at
+  `https://oauth2.googleapis.com/revoke` (`POST`, `token` param) and revokes
+  every token issued under the project for that user, not just one
+  account's. This is why `publisher-account-remove` only ever deletes the
+  *local* saved credential — a project-wide remote revoke is a much larger
+  blast radius than removing one local account alias, so it is exposed (if
+  at all) as a separate, explicitly-confirmed action, never bundled into
+  ordinary account removal.
+- **Error reasons**: `videos.insert`'s documented 400 reasons expand the
+  Phase 3A table with `invalidPublishAt`, `invalidPublishScheduleForVideo`,
+  `invalidVideoGameRating`, `invalidRecordingDetails`,
+  `defaultLanguageNotSet`; 403 adds `forbiddenLicenseSetting`,
+  `forbiddenPrivacySetting`, `forbiddenEmbedSetting` (update-only). None of
+  these are reachable by this adapter's metadata (no localizations,
+  recording details, game rating, or license/embed changes are ever sent),
+  so no new error classification branch was needed — recorded for
+  completeness.
+- **Retry-After on `308`**: one summarized source suggested a `Retry-After`
+  header can appear on `308 Resume Incomplete` responses. This is **not**
+  independently confirmed against the primary resumable-upload guide's own
+  text in this session (a `308` is a normal "keep going from here" signal,
+  not a rate-limit/backoff signal) — the adapter does not act on it, and
+  this gap is recorded rather than guessed at.
+
+Quota-cost specifics (see the Phase 3A quota note above) remain
+unconfirmed against a primary per-method table and are still not
+hardcoded anywhere in this codebase.
+
+## Phase 3B: production reliability design
+
+Phase 3A shipped a working upload/processing pipeline; Phase 3B closes the
+gaps that matter once it runs unattended for real: what happens when a
+worker process crashes at each of the riskiest moments, and how an operator
+diagnoses and recovers from that without ever risking a duplicate upload.
+
+### The core risk: a crash between provider success and DB commit
+
+A chunk upload can succeed at YouTube (a `provider_video_id` is minted) in
+the exact instant a worker process dies, before the DB transaction that
+would record that fact ever commits. Naively resuming afterward risks
+re-uploading the same video as a duplicate. Two mechanisms close this:
+
+- **`publisher.journal.PublishJournal`**: an append-only, `fsync`'d,
+  per-publication log. The `upload_completed` event is written the instant
+  `upload_chunk`'s response reports `completed=True` — *before* any DB
+  mutation (see `worker.publish_runner._upload_stage`). A crash immediately
+  after a successful journal append still leaves the fact durably
+  recoverable. Every record carries an integrity checksum (a corrupted or
+  tampered line is skipped, never trusted) and never stores a token, the
+  real upload session URI (only a one-way hash via
+  `safe_session_reference_hash`), an Authorization header, or a full
+  provider response body.
+- **`core.publish_reconciliation.reconcile_publication`**: reads the
+  journal back, and — critically — never trusts it blindly. A
+  journal-recovered `provider_video_id` is always confirmed via a real,
+  read-only `get_processing_status` call before the DB row is repaired.
+  Eight possible outcomes (`already_consistent`, `recovered_remote_video`,
+  `upload_incomplete`, `upload_session_expired`, `remote_video_missing`,
+  `credentials_unavailable`, `manual_review_required`,
+  `ambiguous_remote_state`); anything this function cannot positively
+  confirm lands in one of the last two rather than ever guessing or
+  auto-starting a new upload. `ambiguous_remote_state` is the genuinely
+  irreducible case: the provider reports the session complete, but there is
+  neither a journal record nor a known video id (e.g. the process died so
+  early that even the journal write never happened, or a completion
+  response was lost in transit after the provider had already committed
+  server-side). The mechanism to resolve *that* residually via the official
+  API — `channels.list(mine=true, part=contentDetails)` →
+  `relatedPlaylists.uploads` → `playlistItems.list` — is documented above
+  but deliberately not automated: it is a title/recency heuristic, not an
+  exact-identifier lookup, and this project's policy is to surface it for a
+  human to check rather than trust a heuristic match to repair state
+  automatically.
+
+### Metadata fingerprint
+
+`pipeline.publish_metadata.metadata_fingerprint` is a deterministic hash
+over (provider, account, job id, final video checksum, the exact metadata
+that would be/was sent). It is stored on `Publication.metadata_fingerprint`
+(schema v6) and re-checked before any `publication-retry` — a mismatch
+refuses the retry and asks for a new publication instead. It is
+deliberately **not** embedded in the video's own title/description: an
+internal identifier in user-visible text has no upside and a real, if
+small, downside (it leaks internal identifiers to anyone who reads the
+description).
+
+### Retry policy
+
+`core.publish_retry.retry_publication` only ever repositions a publication
+for the next worker cycle to actually resume it — it never uploads
+anything itself. `AUTH_REQUIRED`/`QUOTA_BLOCKED` are allowed to retry
+immediately on the operator's say-so rather than the function trying to
+verify the credential/quota is actually fixed (neither can be confirmed
+without a real network call, which retrying itself must not make); if it
+isn't actually fixed, the next attempt just lands back in the same status.
+An ACTIVE-looking status is refused with a pointer to
+`publication-reconcile` first, never blindly retried.
+
+### State-graph fixes found while building this
+
+Two real gaps in the Phase 3A `PublicationStatus` transition graph were
+found and fixed while implementing retry/reconciliation, both because a
+resume-from-PROCESSING path didn't exist yet: `RETRY_WAIT` could not
+resolve to `PROCESSING` (so a processing-only retry would fail validation
+the moment a worker tried to apply it), and `PROCESSING` itself could not
+transition to `AUTH_REQUIRED`/`QUOTA_BLOCKED`/`RETRY_WAIT` at all — meaning
+*any* error while polling processing status, even a dropped connection,
+previously landed straight in `FAILED` with no soft retry, unlike every
+other stage. Both are fixed in `core.state_machine`.
+
+### Processing poller
+
+`Publication.next_poll_at`/`processing_started_at`/`processing_poll_count`
+(schema v7) let the processing lane pace itself
+(`REEL_HARNESS_PUBLISHER_PROCESSING_POLL_INTERVAL`) and enforce a local
+max-duration timeout (`REEL_HARNESS_PUBLISHER_PROCESSING_MAX_DURATION`)
+that fails a publication `PROCESSING_TIMEOUT` **without ever calling the
+provider** once exceeded — the video may still finish on YouTube's side.
+Both are pinned onto each publication's `publisher_config` at creation, not
+read live from settings mid-flight.
+
+### Lease-lane separation
+
+Before Phase 3B, `PROCESSING` publications only ever advanced via an
+operator manually calling `publication-refresh` one at a time — there was
+no automatic poller. `worker.publish_lease.lease_next_processing_publication`
+is now `PROCESSING`'s own lease, entirely separate from
+`lease_next_publication` (the upload lane), so `--process-upload` and
+`--process-status` workers (or a single daemon doing both, alternating
+fairly each cycle) can never contend for the same row.
+
+### A security gap found while reviewing test skip honesty
+
+Auditing whether the Windows symlink-rejection test (`FileSecretStore`)
+honestly reflected a platform constraint surfaced a real, previously
+undetected gap: NTFS junctions are a *different* Windows reparse-point
+mechanism from symlinks, and — unlike symlinks — can be created without
+Developer Mode or administrator privileges. `Path.is_symlink()` does not
+detect a junction (confirmed empirically while building the fix), so the
+symlink-only check could be bypassed by an attacker-planted junction
+redirecting a credential namespace directory elsewhere. Fixed by also
+checking Windows' `FILE_ATTRIBUTE_REPARSE_POINT`
+(`publisher.secret_store._is_reparse_point`) at the namespace, file, and
+secret-root level.
