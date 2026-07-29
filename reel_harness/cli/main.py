@@ -182,6 +182,52 @@ def cmd_db_verify(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_storage_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.storage_tools import storage_verify
+
+    result = storage_verify(ctx.storage, ctx.session_factory, repair_safe=args.repair_safe)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0 if result.ok else 1
+
+
+def cmd_backup_create(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import backup_create
+
+    result = backup_create(
+        ctx.settings.database_url, ctx.storage.root_dir, ctx.publish_journal().root_dir,
+        ctx.config_fingerprint(), Path(args.dest_path),
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_backup_inspect(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import BackupBundleError, backup_inspect
+
+    try:
+        result = backup_inspect(Path(args.bundle_path))
+    except BackupBundleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_backup_restore(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.backup_bundle import BackupBundleError, backup_restore
+
+    try:
+        result = backup_restore(
+            Path(args.bundle_path), ctx.storage.root_dir, ctx.settings.database_url,
+            ctx.publish_journal().root_dir, confirm_restore=args.confirm_restore,
+        )
+    except BackupBundleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
     channel = ctx.jobs.create_channel(name=args.name, niche=args.niche, language=args.language)
     print(json.dumps({"channel_id": channel.id, "name": channel.name}, indent=2))
@@ -2662,6 +2708,34 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "db-verify", help="Integrity check, foreign keys, orphan rows, forbidden ACTIVE+unlocked rows",
     ).set_defaults(func=cmd_db_verify)
+
+    storage_verify_p = sub.add_parser(
+        "storage-verify", help="Cross-check job storage against the DB (checksums, manifests, orphans)",
+    )
+    storage_verify_p.add_argument(
+        "--repair-safe", action="store_true",
+        help="Also delete stale (>1h) leaked temp files -- never touches final.mp4/manifests/Publication status",
+    )
+    storage_verify_p.set_defaults(func=cmd_storage_verify)
+
+    backup_create_p = sub.add_parser("backup-create", help="Portable archive of DB + jobs storage + journal")
+    backup_create_p.add_argument(
+        "--dest-path", required=True, help="Output archive path (outside the repository)",
+    )
+    backup_create_p.set_defaults(func=cmd_backup_create)
+
+    backup_inspect_p = sub.add_parser(
+        "backup-inspect", help="Read-only: validate and summarize a backup-create bundle",
+    )
+    backup_inspect_p.add_argument("bundle_path")
+    backup_inspect_p.set_defaults(func=cmd_backup_inspect)
+
+    backup_restore_p = sub.add_parser("backup-restore", help="Restore a backup-create bundle (destructive)")
+    backup_restore_p.add_argument("bundle_path")
+    backup_restore_p.add_argument(
+        "--confirm-restore", action="store_true", help="Required -- this overwrites the destination",
+    )
+    backup_restore_p.set_defaults(func=cmd_backup_restore)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
