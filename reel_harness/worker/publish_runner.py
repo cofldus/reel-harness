@@ -146,6 +146,34 @@ def _run_publication_impl(
         _processing_stage(session, publication, bundle, lease_token)
 
 
+def _verify_platform_options(
+    bundle: PublishBundle, publication: Publication, metadata: PublicationMetadata,
+) -> None:
+    """Every publish attempt for a provider whose capabilities require it
+    (TikTok) re-fetches creator_info fresh and validates the requested
+    privacy/options against it, immediately before creating an upload
+    session -- never trusting an earlier snapshot, and never silently
+    falling back to a different option (see
+    providers.tiktok_publisher.validate_publish_options). A no-op for a
+    provider that doesn't require this (YouTube). Any rejection here
+    (PublisherAppReviewRequiredError/PublisherPrivacyNotAllowedError/
+    MetadataInvalidError/PublisherCreatorNotEligibleError, or an auth/
+    transient error from get_creator_info itself) is a PipelineError,
+    handled by run_publication's existing generic exception handling
+    exactly like any other stage failure."""
+    from reel_harness.providers.registry import provider_capabilities, validate_platform_options
+
+    caps = provider_capabilities(publication.provider)
+    if not caps.requires_creator_info:
+        return
+    creator_info = bundle.publisher.get_creator_info()
+    if creator_info is None:
+        return
+    validate_platform_options(
+        publication.provider, creator_info, metadata.privacy_status, metadata.platform_options,
+    )
+
+
 def _create_session_stage(
     session, publication: Publication, job, storage, bundle: PublishBundle,
     channel_niche: str | None, total_bytes: int, lease_token: str | None,
@@ -162,6 +190,7 @@ def _create_session_stage(
         channel_niche=channel_niche,
         platform_options=default_platform_options(publication.provider),
     )
+    _verify_platform_options(bundle, publication, metadata)
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
     fingerprint = metadata_fingerprint(
@@ -244,6 +273,7 @@ def _start_new_session(
     one run_publication call rather than bouncing through RETRY_WAIT for
     something this recoverable."""
     metadata = _metadata_from_snapshot(publication)
+    _verify_platform_options(bundle, publication, metadata)
     handle = bundle.publisher.create_upload_session(metadata, total_bytes, "video/mp4", str(uuid.uuid4()))
     bundle.session_store.set(publication.id, handle.session_reference)
     bundle.journal.append(
@@ -265,15 +295,33 @@ def _upload_stage(
     total_bytes: int, lease_token: str | None,
 ) -> None:
     handle: UploadSessionHandle | None
-    try:
-        handle = _resolve_session_handle(publication, bundle, total_bytes)
-        offset = bundle.publisher.query_upload_offset(handle, total_bytes)
-        start_byte = total_bytes if offset is None else offset
-        if offset is not None and offset > 0:
-            _audit(session, publication.id, "upload_resumed", {"start_byte": offset})
-    except (_SessionNotResumable, UploadSessionExpiredError):
-        handle = None
+    if publication.bytes_uploaded == 0:
+        # Nothing has been sent yet (this is either the very first attempt
+        # right after _create_session_stage in this same call, or a resume
+        # where the prior run never got past byte 0) -- there is nothing to
+        # confirm, so start_byte=0 is always correct regardless of what the
+        # provider might report. Skips a pointless (and, for a provider
+        # like TikTok whose query_upload_offset always raises
+        # UploadSessionExpiredError -- see providers.tiktok_publisher --
+        # actively harmful) offset query on a session that was just
+        # created a moment ago. If the session reference turns out to be
+        # stale/invalid, the first real chunk PUT below will surface that
+        # itself (caught the same way as any other resume).
+        try:
+            handle = _resolve_session_handle(publication, bundle, total_bytes)
+        except _SessionNotResumable:
+            handle = None
         start_byte = 0
+    else:
+        try:
+            handle = _resolve_session_handle(publication, bundle, total_bytes)
+            offset = bundle.publisher.query_upload_offset(handle, total_bytes)
+            start_byte = total_bytes if offset is None else offset
+            if offset is not None and offset > 0:
+                _audit(session, publication.id, "upload_resumed", {"start_byte": offset})
+        except (_SessionNotResumable, UploadSessionExpiredError):
+            handle = None
+            start_byte = 0
 
     with open(final_path, "rb") as file_handle:
         while start_byte < total_bytes:

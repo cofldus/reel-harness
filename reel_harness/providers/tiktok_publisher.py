@@ -126,6 +126,24 @@ class TikTokPostOptions:
         }
 
 
+def platform_options_from_dict(options: dict) -> TikTokPostOptions:
+    """The inverse of TikTokPostOptions.as_platform_options -- reconstructs
+    the typed dataclass from the generic platform_options dict (see
+    providers.base.PublicationMetadata.platform_options). Shared by every
+    caller that needs to go from the persisted/generic dict shape back to
+    the typed dataclass (worker.publish_runner, core.publish_reconciliation)
+    rather than each re-implementing this mapping."""
+    return TikTokPostOptions(
+        disable_comment=bool(options.get("disable_comment", True)),
+        disable_duet=bool(options.get("disable_duet", True)),
+        disable_stitch=bool(options.get("disable_stitch", True)),
+        video_cover_timestamp_ms=int(options.get("video_cover_timestamp_ms", 0)),
+        is_branded_content=bool(options.get("brand_content_toggle", False)),
+        is_own_brand_content=bool(options.get("brand_organic_toggle", False)),
+        is_ai_generated=bool(options.get("is_aigc", False)),
+    )
+
+
 def validate_publish_options(creator_info: CreatorInfo, privacy_status: str, options: TikTokPostOptions) -> None:
     """Called immediately before every publish attempt with a FRESHLY
     fetched CreatorInfo (never a cached/earlier one -- see

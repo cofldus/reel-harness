@@ -247,19 +247,10 @@ def _repair_from_confirmed_video(session, publication: Publication, video_id: st
 
 
 def _tiktok_options_from_snapshot(publication: Publication):
-    from reel_harness.providers.tiktok_publisher import TikTokPostOptions
+    from reel_harness.providers.tiktok_publisher import platform_options_from_dict
 
     snapshot = publication.metadata_snapshot or {}
-    options = snapshot.get("platform_options") or {}
-    return TikTokPostOptions(
-        disable_comment=bool(options.get("disable_comment", True)),
-        disable_duet=bool(options.get("disable_duet", True)),
-        disable_stitch=bool(options.get("disable_stitch", True)),
-        video_cover_timestamp_ms=int(options.get("video_cover_timestamp_ms", 0)),
-        is_branded_content=bool(options.get("brand_content_toggle", False)),
-        is_own_brand_content=bool(options.get("brand_organic_toggle", False)),
-        is_ai_generated=bool(options.get("is_aigc", False)),
-    )
+    return platform_options_from_dict(snapshot.get("platform_options") or {})
 
 
 def _check_tiktok_app_review_block(publication: Publication, bundle) -> ReconciliationResult | None:

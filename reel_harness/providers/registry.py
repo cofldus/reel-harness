@@ -507,6 +507,20 @@ def default_platform_options(provider: str) -> dict:
     return {}
 
 
+def validate_platform_options(provider: str, creator_info, privacy_status: str, platform_options: dict) -> None:
+    """Dispatches to the provider-specific platform-options validator
+    (TikTok's providers.tiktok_publisher.validate_publish_options) -- a
+    no-op for a provider without one (YouTube, whose capabilities has
+    requires_creator_info=False so callers never even reach this with a
+    real creator_info). Keeps worker.publish_runner free of a hardcoded
+    vendor name; see docs/PUBLISHING.md's capability model."""
+    name = normalize_provider_name(provider)
+    if name == "tiktok":
+        from reel_harness.providers.tiktok_publisher import platform_options_from_dict, validate_publish_options
+
+        validate_publish_options(creator_info, privacy_status, platform_options_from_dict(platform_options))
+
+
 def provider_capabilities(provider: str) -> PublisherCapabilities:
     """Static, credential-free capability lookup (see
     providers.base.PublisherCapabilities and docs/PUBLISHING.md's Phase 3C
