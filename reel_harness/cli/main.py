@@ -5,6 +5,7 @@ import json
 import signal
 import sys
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from reel_harness.bootstrap import AppContext
@@ -113,6 +114,72 @@ def cmd_preflight(args: argparse.Namespace, ctx: AppContext) -> int:
     if payload["overall"] == "NOT_CONFIGURED":
         return 2
     return 0
+
+
+def cmd_db_status(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import db_status
+
+    status = db_status(ctx.engine, ctx.settings.database_url)
+    print(json.dumps(status.to_dict(), indent=2))
+    return 0 if not status.pending_migrations and status.integrity_status == "ok" else 1
+
+
+def cmd_db_migrate(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import MigrationLockedError, db_migrate
+
+    backup_dir = Path(args.backup_dir) if args.backup_dir else None
+    if not args.dry_run and not args.no_backup and backup_dir is None:
+        print(
+            "db-migrate requires --backup-dir (or --no-backup to explicitly skip the safety backup)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = db_migrate(
+            ctx.engine, ctx.settings.database_url, dry_run=args.dry_run,
+            backup_dir=None if args.no_backup else backup_dir,
+        )
+    except MigrationLockedError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_backup(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import DbToolsError, db_backup
+
+    try:
+        result = db_backup(ctx.settings.database_url, Path(args.dest_dir))
+    except DbToolsError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_restore(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import DbToolsError, RestoreRefusedError, db_restore
+
+    try:
+        result = db_restore(
+            ctx.settings.database_url, Path(args.backup_path), confirm_restore=args.confirm_restore,
+            session_factory=ctx.session_factory, lease_timeout_seconds=ctx.settings.lease_timeout_seconds,
+            pre_restore_backup_dir=Path(args.pre_restore_backup_dir), engine=ctx.engine,
+        )
+    except (RestoreRefusedError, DbToolsError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_db_verify(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.ops.db_tools import db_verify
+
+    result = db_verify(ctx.engine, ctx.session_factory)
+    print(json.dumps(result.to_dict(), indent=2))
+    return 0 if result.ok else 1
 
 
 def cmd_channel_create(args: argparse.Namespace, ctx: AppContext) -> int:
@@ -2561,6 +2628,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preflight.add_argument("--json", action="store_true")
     preflight.set_defaults(func=cmd_preflight)
+
+    sub.add_parser("db-status", help="Schema/migration/integrity summary").set_defaults(func=cmd_db_status)
+
+    db_migrate_p = sub.add_parser("db-migrate", help="Apply pending schema migrations")
+    db_migrate_p.add_argument("--dry-run", action="store_true", help="Report the plan; touch nothing")
+    db_migrate_p.add_argument(
+        "--backup-dir", default=None,
+        help="Directory for the pre-migration safety backup (required unless --no-backup)",
+    )
+    db_migrate_p.add_argument(
+        "--no-backup", action="store_true", help="Skip the pre-migration safety backup (not recommended)",
+    )
+    db_migrate_p.set_defaults(func=cmd_db_migrate)
+
+    db_backup_p = sub.add_parser("db-backup", help="SQLite online backup with checksum manifest")
+    db_backup_p.add_argument(
+        "--dest-dir", required=True, help="Directory to write the backup into (outside the repository)",
+    )
+    db_backup_p.set_defaults(func=cmd_db_backup)
+
+    db_restore_p = sub.add_parser("db-restore", help="Restore the database from a db-backup archive")
+    db_restore_p.add_argument("backup_path", help="Path to a *.sqlite3.bak file produced by db-backup")
+    db_restore_p.add_argument(
+        "--confirm-restore", action="store_true", help="Required -- this replaces the live database",
+    )
+    db_restore_p.add_argument(
+        "--pre-restore-backup-dir", required=True,
+        help="Directory for the automatic backup of the CURRENT database taken before restoring",
+    )
+    db_restore_p.set_defaults(func=cmd_db_restore)
+
+    sub.add_parser(
+        "db-verify", help="Integrity check, foreign keys, orphan rows, forbidden ACTIVE+unlocked rows",
+    ).set_defaults(func=cmd_db_verify)
 
     channel_create = sub.add_parser("channel-create")
     channel_create.add_argument("--name", required=True)
