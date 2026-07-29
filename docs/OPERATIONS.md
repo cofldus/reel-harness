@@ -529,11 +529,207 @@ directly. This remains a deliberate scope boundary, not an oversight — see
 
 ### Out of scope for Phase 3B
 
-TikTok/Instagram publishers, automatic public publishing, scheduled-publish
-automation, automatic remote delete, thumbnail/subtitle upload, analytics
-collection, auto-commenting, an OAuth account-management UI, a web
-dashboard, PostgreSQL, a cloud secret manager, and a cloud queue — none of
-these exist yet.
+Instagram/Facebook Reels publishers, automatic public publishing,
+scheduled-publish automation, automatic remote delete, thumbnail/subtitle
+upload, analytics collection, auto-commenting, an OAuth account-management
+UI, a web dashboard, PostgreSQL, a cloud secret manager, and a cloud queue
+— none of these exist yet. TikTok publishing is covered below (Phase 3C).
+
+## Publishing (TikTok)
+
+Design/API research lives in `docs/PUBLISHING.md` (official docs checked
+2026-07-29). Everything generic about publishing above — the `Publication`
+state machine, the two-lane worker, the processing poller,
+`publication-list`/`-reconcile`/`-retry`, cancellation policy — applies to
+TikTok exactly as written for YouTube; this section covers only what's
+different. A publisher's actual capabilities (allowed privacy values,
+whether comments/duet/stitch are configurable, whether a confirmation step
+is required before every publish) are never hardcoded per vendor in the
+CLI/API/service layers — they come from
+`providers.registry.provider_capabilities("tiktok")`
+(`providers.base.PublisherCapabilities`), the same mechanism YouTube uses.
+
+**The single biggest real-world constraint**: TikTok forces every post from
+an app that hasn't passed its review/audit process to `SELF_ONLY`
+visibility, regardless of what privacy level was requested. This project
+surfaces that explicitly wherever it's relevant (`publisher-doctor tiktok
+--check-remote`'s `app_review_status` check,
+`core.publish_reconciliation`'s `app_review_required` outcome, the
+`APP_REVIEW_REQUIRED` error) — never as a confusing generic rejection.
+
+### 1. Configure the OAuth client
+
+```
+REEL_HARNESS_TIKTOK_CLIENT_KEY=...
+REEL_HARNESS_TIKTOK_CLIENT_SECRET=...        # env/.env only; never persisted, always redacted
+REEL_HARNESS_TIKTOK_REDIRECT_URI=...         # must be registered with the TikTok app; see step 2
+REEL_HARNESS_CREDENTIAL_DIR=...              # same repository-external directory YouTube uses
+REEL_HARNESS_TIKTOK_UPLOAD_CHUNK_SIZE=10485760   # default 10 MiB; the official docs do not specify a
+                                                  # min/max chunk size (see docs/PUBLISHING.md) -- fully
+                                                  # operator-configurable, not a hardcoded protocol limit
+REEL_HARNESS_TIKTOK_DEFAULT_PRIVACY=SELF_ONLY    # always the most restrictive option; rarely needs changing
+# REEL_HARNESS_TIKTOK_BASE_URL / _AUTH_URL / _TOKEN_URL default to the real TikTok endpoints --
+# only override for a contract-test fake server.
+```
+
+### 2. Connect an account
+
+```
+uv run reel-harness publisher-auth tiktok [--account ALIAS]
+```
+
+Opens a system browser to TikTok's consent screen (PKCE + `state`,
+requesting only the `video.publish` scope). Unlike YouTube, TikTok's docs
+require an HTTPS redirect_uri with no documented "any loopback port"
+exception the way Google's installed-app flow has — so this command
+supports two flows depending on what `REEL_HARNESS_TIKTOK_REDIRECT_URI` is:
+
+- **A loopback address you registered yourself**
+  (`http://127.0.0.1:PORT`/`http://localhost:PORT`, at your own risk): the
+  callback is captured automatically, bound to that exact registered port
+  (TikTok redirects to exactly what was registered — unlike Google, there's
+  no "any ephemeral port accepted" behavior to rely on).
+- **Anything else** (the documented case — an `https://` URL you control):
+  the command prints the authorization URL, and after you authorize in the
+  browser, you paste back the full URL your browser landed on; `state` is
+  validated against it exactly like the automated flow, and the code is
+  used exactly once.
+
+On success, prints the connected account's TikTok `open_id` and whether a
+refresh token was issued — never the token itself. TikTok's refresh token
+is itself valid ~365 days (tracked as `refresh_expires_at`, surfaced by
+`publisher-doctor tiktok`) and a refresh call may return a *new* refresh
+token, which always replaces the stored one — a real behavioral difference
+from YouTube's refresh token, which never rotates.
+
+### 2.5. Check readiness in one command
+
+```
+uv run reel-harness publisher-doctor tiktok [--account ALIAS] [--check-remote] [--json]
+```
+
+Same shape as YouTube's doctor, plus TikTok-specific checks: granted
+scope, refresh-token expiry. `--check-remote` additionally attempts a real
+token refresh and a read-only `creator_info` query, which reveals the
+account's actual allowed privacy levels, comment/duet/stitch
+configurability, and max post duration — and, most importantly, whether
+this app has passed TikTok's review (`app_review_status`:
+`PASS`/`APP_REVIEW_REQUIRED`/`FAIL`/`NOT_CONFIGURED`). Without credentials,
+every remote check prints `NOT RUN — credentials not configured` and makes
+no request.
+
+### 3. Check readiness without uploading anything
+
+```
+uv run reel-harness publish-job <job_id> --provider tiktok --dry-run [--account ALIAS] \
+    [--privacy SELF_ONLY|PUBLIC_TO_EVERYONE|MUTUAL_FOLLOW_FRIENDS|FOLLOWER_OF_CREATOR]
+```
+
+**Makes no external request** — never even calls TikTok's `creator_info`
+query, let alone the publish-init endpoint (`publisher-doctor tiktok
+--check-remote` is the live-check path). Reports a `tiktok_preview` block:
+the post text that would be sent (validated against TikTok's length/
+forbidden-marker rules, `post_text_error` on a violation), the default
+platform_options (comments/duet/stitch all disabled, no disclosure toggles
+set, until a future CLI flag exposes them individually), the expected API
+mode (`FILE_UPLOAD` — `PULL_FROM_URL` is never used, see below), and the
+chunk plan. `creator_info`/`app_review_status` are explicitly reported as
+"not fetched" here, with a pointer to the live-check command, rather than
+silently omitted.
+
+### 4. Create the publication
+
+```
+uv run reel-harness publish-job <job_id> --provider tiktok [--account ALIAS] \
+    --privacy SELF_ONLY --confirm-platform-options
+```
+
+`--confirm-platform-options` is **required** for TikTok (`publish-job`
+refuses without it) — TikTok's capabilities set
+`requires_user_confirmation=True`, since a direct TikTok post carries more
+consequential per-post choices (comments/duet/stitch, commercial/branded-
+content disclosure) than YouTube's upload does. `--privacy` defaults to
+`SELF_ONLY` (the provider's own most restrictive option) if omitted;
+`PUBLIC_TO_EVERYONE` additionally requires `--confirm-public-upload` and
+`REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true`, exactly like YouTube's `public` —
+even then, an unaudited app is forced back to `SELF_ONLY` by TikTok itself.
+
+### 5. Run the publisher worker
+
+Same `publisher-run`/`publisher-run-once` commands as YouTube — a
+publication's own `publisher_config` snapshot (captured at creation, via
+`providers.registry.publisher_snapshot`) determines which adapter it
+resolves to, so one worker process handles YouTube and TikTok publications
+together, fairly, with no separate TikTok-only daemon. Before creating (or
+re-creating, after a fresh-session self-heal) an upload session, the
+worker always re-fetches `creator_info` and re-validates the requested
+privacy/platform-options against it — never trusting an earlier snapshot,
+and never silently substituting a different option if something's changed
+(an app losing review status, an account-level comment/duet/stitch
+setting changing) since the publication was created.
+
+**TikTok upload sessions cannot be resumed** — the official docs don't
+document a way to query a session's already-confirmed byte offset (unlike
+YouTube's `Content-Range: bytes */TOTAL` convention). Every interruption
+(a transient error, a worker crash, a `RETRY_WAIT` cycle) is handled by
+starting a **brand-new** session and re-uploading the entire file from
+byte 0, rather than guessing at an offset — the previous session's
+`publish_id` is simply abandoned (TikTok never auto-expires or auto-
+deletes it; nothing in this project does either). This is a real
+efficiency cost compared to YouTube's true resume, traded for never
+risking a wrong-offset re-upload against an unconfirmed guess.
+
+TikTok's `publish_id` (this project's `provider_video_id`) is known
+immediately from the upload-session-creation response, before any bytes
+are sent — unlike YouTube's, which is only known once the upload
+completes. It's persisted the moment it's known, closing an even earlier
+crash-recovery gap than YouTube's for providers structured this way.
+
+### 6. Processing completion is polled automatically
+
+Same processing poller as YouTube. TikTok's post-status values map to the
+common `processing`/`succeeded`/`failed` vocabulary; `SEND_TO_USER_INBOX`
+(TikTok routed the post to the account's inbox as a draft instead of
+actually publishing it — e.g. the account lacks Direct Post permission) is
+treated as `failed`, not left polling forever for a `PUBLISH_COMPLETE`
+that will never arrive. `publication_url` stays unset for TikTok — the
+status-fetch response doesn't carry enough account info (the creator's
+handle) to build a public watch URL from this adapter alone; the durable
+reference is `provider_video_id` (the `publish_id`).
+
+### 7. Smoke-check the account
+
+```
+uv run reel-harness provider-smoke publisher tiktok [--account ALIAS]
+uv run reel-harness provider-smoke publisher tiktok \
+    --upload-private-test --confirm-test-upload --confirm-platform-options [--account ALIAS]
+```
+
+Default: read-only — refreshes the token if needed and fetches
+`creator_info` (account identity, allowed privacy levels, app-review
+status, comment/duet/stitch configurability, max post duration). With all
+three of `--upload-private-test --confirm-test-upload
+--confirm-platform-options`: additionally uploads one small, real, always-
+`SELF_ONLY`, clearly-titled test clip with comments/duet/stitch all
+disabled, built from a local scratch file (never a real job's video), and
+cleans up the local scratch directory. If `creator_info` reports no
+allowed privacy levels at all (a deeper permission problem than the
+ordinary unaudited-app restriction), prints the distinct `TikTok private
+upload smoke: NOT RUN — application permission not available` rather than
+attempting an upload that would just fail. **Never auto-deletes the remote
+post.** Without a configured OAuth client or a saved credential, prints
+`NOT RUN — credentials not configured` and makes no request.
+
+### Out of scope for Phase 3C
+
+`PULL_FROM_URL`/`URL_PULL_FROM_SERVER` upload (no cloud hosting available
+— `FILE_UPLOAD` only), automating TikTok's own app-review process,
+scheduled publish, thumbnail/cover-image upload beyond the default
+`video_cover_timestamp_ms`, subtitle upload, analytics, remote post
+delete, and a rich CLI surface for every individual platform_options
+toggle (comments/duet/stitch/disclosures currently default to the safest
+combination; per-post overrides are a natural future extension, not yet
+built).
 
 ## Cancelling a job
 

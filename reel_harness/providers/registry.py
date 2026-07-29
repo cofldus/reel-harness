@@ -9,10 +9,12 @@ from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSI
 from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
 from reel_harness.providers.base import (
     ChannelContext,
+    CreatorInfo,
     LLMProvider,
     ProcessingStatusResult,
     PublicationMetadata,
     Publisher,
+    PublisherCapabilities,
     StockMediaProvider,
     TTSProvider,
     UploadChunkResult,
@@ -396,17 +398,35 @@ def resolve_stock_media_provider(name: str, settings: Settings | None = None) ->
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
 
 
+# A neutral, maximally-restrictive placeholder -- _UnconfiguredPublisher is
+# never actually usable (every method raises), so these values are never
+# acted on; they exist only so the instance stays structurally valid for
+# any code that reads `.capabilities` before calling a method (e.g. a
+# capability-gate check that runs ahead of the actual publish attempt).
+_UNCONFIGURED_CAPABILITIES = PublisherCapabilities(
+    supports_direct_publish=False, supports_upload_only=False, supports_scheduled_publish=False,
+    supports_public_privacy=False, supports_unlisted_privacy=False, supports_comments_control=False,
+    supports_remix_control=False, supports_processing_poll=False, supports_remote_delete=False,
+    requires_creator_info=False, requires_user_confirmation=False,
+    privacy_values=frozenset(), default_privacy="", public_privacy_values=frozenset(),
+)
+
+
 class _UnconfiguredPublisher:
     """Publisher counterpart of _UnconfiguredLLMProvider: any use fails with
     an explicit PROVIDER_NOT_CONFIGURED -- never a silent fallback to a
     different account or provider."""
 
     provider_id = "unconfigured"
+    capabilities = _UNCONFIGURED_CAPABILITIES
 
     def __init__(self, reason: str) -> None:
         self._reason = reason
 
     def validate_configuration(self) -> None:
+        raise ProviderNotConfiguredError(self._reason)
+
+    def get_creator_info(self) -> CreatorInfo | None:
         raise ProviderNotConfiguredError(self._reason)
 
     def create_upload_session(
@@ -443,6 +463,18 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
             "processing_poll_interval_seconds": poll_interval,
             "processing_max_duration_seconds": max_duration,
         }
+    if name == "tiktok":
+        from reel_harness.providers.tiktok_publisher import ADAPTER_VERSION as TIKTOK_ADAPTER_VERSION
+
+        assert settings is not None
+        return {
+            "publisher_provider": "tiktok",
+            "publisher_adapter_version": TIKTOK_ADAPTER_VERSION,
+            "publisher_account_reference": account_reference,
+            "tiktok_chunk_size": settings.tiktok_upload_chunk_size,
+            "processing_poll_interval_seconds": poll_interval,
+            "processing_max_duration_seconds": max_duration,
+        }
     if name != "youtube":
         raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
     from reel_harness.providers.youtube_publisher import ADAPTER_VERSION
@@ -458,6 +490,57 @@ def publisher_snapshot(settings: Settings | None, provider: str, account_referen
         "processing_poll_interval_seconds": poll_interval,
         "processing_max_duration_seconds": max_duration,
     }
+
+
+def default_platform_options(provider: str) -> dict:
+    """The safe, most-restrictive default `platform_options` for a
+    provider that has TikTok-style platform-specific fields; `{}` for a
+    provider that doesn't (YouTube). Used by worker.publish_runner to
+    build PublicationMetadata.platform_options without hardcoding a
+    vendor name there -- see providers.base.PublicationMetadata's
+    docstring and docs/PUBLISHING.md."""
+    name = normalize_provider_name(provider)
+    if name == "tiktok":
+        from reel_harness.providers.tiktok_publisher import TikTokPostOptions
+
+        return TikTokPostOptions().as_platform_options()
+    return {}
+
+
+def validate_platform_options(provider: str, creator_info, privacy_status: str, platform_options: dict) -> None:
+    """Dispatches to the provider-specific platform-options validator
+    (TikTok's providers.tiktok_publisher.validate_publish_options) -- a
+    no-op for a provider without one (YouTube, whose capabilities has
+    requires_creator_info=False so callers never even reach this with a
+    real creator_info). Keeps worker.publish_runner free of a hardcoded
+    vendor name; see docs/PUBLISHING.md's capability model."""
+    name = normalize_provider_name(provider)
+    if name == "tiktok":
+        from reel_harness.providers.tiktok_publisher import platform_options_from_dict, validate_publish_options
+
+        validate_publish_options(creator_info, privacy_status, platform_options_from_dict(platform_options))
+
+
+def provider_capabilities(provider: str) -> PublisherCapabilities:
+    """Static, credential-free capability lookup (see
+    providers.base.PublisherCapabilities and docs/PUBLISHING.md's Phase 3C
+    capability model) -- usable by CLI/service validation before any live
+    adapter instance can be constructed (e.g. before OAuth credentials
+    exist, or during --dry-run, which never touches credentials at all).
+    Domain code checks capabilities instead of branching on the provider
+    name directly."""
+    name = normalize_provider_name(provider)
+    if name == "fake":
+        return FakePublisher.capabilities
+    if name == "youtube":
+        from reel_harness.providers.youtube_publisher import CAPABILITIES as YOUTUBE_CAPABILITIES
+
+        return YOUTUBE_CAPABILITIES
+    if name == "tiktok":
+        from reel_harness.providers.tiktok_publisher import CAPABILITIES as TIKTOK_CAPABILITIES
+
+        return TIKTOK_CAPABILITIES
+    raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
 
 
 def _resolve_fresh_youtube_access_token(
@@ -520,6 +603,67 @@ def _resolve_fresh_youtube_access_token(
     return refreshed.access_token
 
 
+def _resolve_fresh_tiktok_access_token(
+    settings: Settings, credential_backend, account_reference: str, oauth_transport: object = None,
+) -> str:
+    """Mirrors _resolve_fresh_youtube_access_token, with one real behavioral
+    difference documented in docs/PUBLISHING.md: a TikTok refresh call MAY
+    return a *different* refresh_token than the one that was sent, which
+    must always replace the stored one (`tokens.refresh_token or
+    cred.refresh_token` below already handles both cases -- a rotated
+    token wins, a response that omits one falls back to the existing
+    one). `refresh_expires_at` is tracked too, since TikTok's refresh
+    tokens themselves expire (365 days) unlike Google's."""
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.core.errors import ProviderAuthError
+    from reel_harness.observability import redact
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_tiktok import TikTokOAuthClient
+
+    cred = credential_backend.get_credential("tiktok", account_reference)
+    if cred is None:
+        raise ProviderNotConfiguredError(f"no tiktok credential saved for account {account_reference!r}")
+    if cred.invalid:
+        raise ProviderAuthError(
+            f"tiktok credential for {account_reference!r} is marked invalid after a failed refresh "
+            "-- re-run publisher-auth tiktok"
+        )
+    if cred.expires_at is None or cred.expires_at > datetime.now(UTC) + timedelta(minutes=2):
+        return cred.access_token
+    if not cred.refresh_token:
+        raise ProviderAuthError(f"tiktok credential for {account_reference!r} expired and has no refresh token")
+
+    client = TikTokOAuthClient(
+        settings.tiktok_client_key, settings.tiktok_client_secret.get_secret_value(), settings.tiktok_token_url,
+        transport=oauth_transport,
+    )
+    try:
+        try:
+            tokens = client.refresh(cred.refresh_token)
+        except ProviderAuthError as exc:
+            cred.last_refresh_error = (redact(str(exc)) or "")[:300]
+            cred.invalid = True
+            credential_backend.save_credential(cred)
+            raise
+    finally:
+        client.close()
+    refreshed = OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token or cred.refresh_token,
+        expires_at=datetime.now(UTC) + timedelta(seconds=tokens.expires_in),
+        refresh_expires_at=(
+            datetime.now(UTC) + timedelta(seconds=tokens.refresh_expires_in)
+            if tokens.refresh_expires_in is not None else cred.refresh_expires_at
+        ),
+        scope=tokens.scope, provider="tiktok", account_reference=account_reference,
+        channel_id=tokens.open_id or cred.channel_id, channel_title=cred.channel_title,
+        created_at=cred.created_at, last_refreshed_at=datetime.now(UTC),
+        last_refresh_error=None, invalid=False,
+    )
+    credential_backend.save_credential(refreshed)
+    return refreshed.access_token
+
+
 def resolve_publisher(
     name: str, settings: Settings | None = None,
     credential_backend: CredentialBackend | None = None, account_reference: str = "default",
@@ -531,6 +675,8 @@ def resolve_publisher(
     normalized = normalize_provider_name(name)
     if normalized == "fake":
         return FakePublisher()
+    if normalized == "tiktok":
+        return _resolve_tiktok_publisher(settings, credential_backend, account_reference)
     if normalized != "youtube":
         return _UnconfiguredPublisher(f"publisher {name!r} is not registered")
     if settings is None or not settings.youtube_client_id or not settings.youtube_client_secret.get_secret_value():
@@ -550,4 +696,31 @@ def resolve_publisher(
         ),
         chunk_size=settings.youtube_upload_chunk_size,
         connect_timeout=10.0, read_timeout=60.0, max_retries=3, retry_backoff_seconds=2.0,
+    )
+
+
+def _resolve_tiktok_publisher(
+    settings: Settings | None, credential_backend: CredentialBackend | None, account_reference: str,
+) -> Publisher:
+    if (
+        settings is None or not settings.tiktok_client_key or not settings.tiktok_client_secret.get_secret_value()
+        or not settings.tiktok_redirect_uri
+    ):
+        return _UnconfiguredPublisher(
+            "tiktok publishing requires REEL_HARNESS_TIKTOK_CLIENT_KEY / REEL_HARNESS_TIKTOK_CLIENT_SECRET / "
+            "REEL_HARNESS_TIKTOK_REDIRECT_URI"
+        )
+    if credential_backend is None or not credential_backend.has_credential("tiktok", account_reference):
+        return _UnconfiguredPublisher(
+            f"no tiktok credential saved for account {account_reference!r} -- run publisher-auth tiktok"
+        )
+    from reel_harness.providers.tiktok_publisher import TikTokPublisher
+
+    return TikTokPublisher(
+        access_token_provider=lambda: _resolve_fresh_tiktok_access_token(
+            settings, credential_backend, account_reference,
+        ),
+        base_url=settings.tiktok_base_url, chunk_size=settings.tiktok_upload_chunk_size,
+        connect_timeout=settings.tiktok_connect_timeout_seconds, read_timeout=settings.tiktok_read_timeout_seconds,
+        max_retries=settings.tiktok_max_retries, retry_backoff_seconds=settings.tiktok_retry_backoff_seconds,
     )

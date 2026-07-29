@@ -180,6 +180,52 @@ class Settings(BaseSettings):
     youtube_made_for_kids: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_YOUTUBE_MADE_FOR_KIDS", "YOUTUBE_MADE_FOR_KIDS"))
 
+    # TikTok OAuth + Content Posting API (Phase 3C -- see docs/PUBLISHING.md
+    # for the official docs this was built from, checked 2026-07-29). Unlike
+    # YouTube's fixed Google endpoints, TikTok's auth/token/base URLs are
+    # exposed as settings (not hardcoded) because they're what a
+    # contract-test fake server, or a future regional API variant, needs to
+    # override. `tiktok_redirect_uri` has NO default -- it must be a URL the
+    # operator has actually registered with their TikTok app; there is no
+    # safe generic default the way `credential_dir` has one.
+    tiktok_client_key: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_KEY"))
+    tiktok_client_secret: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_CLIENT_SECRET", "TIKTOK_CLIENT_SECRET"))
+    tiktok_redirect_uri: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_REDIRECT_URI", "TIKTOK_REDIRECT_URI"))
+    tiktok_base_url: str = Field(
+        "https://open.tiktokapis.com",
+        validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_BASE_URL", "TIKTOK_BASE_URL"))
+    tiktok_auth_url: str = Field(
+        "https://www.tiktok.com/v2/auth/authorize/",
+        validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_AUTH_URL", "TIKTOK_AUTH_URL"))
+    tiktok_token_url: str = Field(
+        "https://open.tiktokapis.com/v2/oauth/token/",
+        validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_TOKEN_URL", "TIKTOK_TOKEN_URL"))
+    # The official Content Posting API docs do not specify a min/max chunk
+    # size for FILE_UPLOAD (see docs/PUBLISHING.md's "not specified" section)
+    # -- 10 MiB is a conservative, fully-operator-overridable default, not a
+    # documented requirement.
+    tiktok_upload_chunk_size: int = Field(
+        10 * 1024 * 1024,
+        validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_UPLOAD_CHUNK_SIZE", "TIKTOK_UPLOAD_CHUNK_SIZE"))
+    tiktok_connect_timeout_seconds: float = Field(
+        10.0, validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_CONNECT_TIMEOUT", "TIKTOK_CONNECT_TIMEOUT_SECONDS"))
+    tiktok_read_timeout_seconds: float = Field(
+        30.0, validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_READ_TIMEOUT", "TIKTOK_READ_TIMEOUT_SECONDS"))
+    tiktok_max_retries: int = Field(
+        3, validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_MAX_RETRIES", "TIKTOK_MAX_RETRIES"))
+    tiktok_retry_backoff_seconds: float = Field(
+        2.0, validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_RETRY_BACKOFF", "TIKTOK_RETRY_BACKOFF_SECONDS"))
+    # SELF_ONLY is TikTok's most restrictive privacy_level -- always the
+    # provider default per the capability model's "most restrictive by
+    # default" rule (see providers.base.PublisherCapabilities), independent
+    # of the unaudited-app restriction that forces private visibility
+    # regardless of what's requested anyway.
+    tiktok_default_privacy: str = Field(
+        "SELF_ONLY", validation_alias=_llm_alias("REEL_HARNESS_TIKTOK_DEFAULT_PRIVACY", "TIKTOK_DEFAULT_PRIVACY"))
+
     # Processing poller (Phase 3B, worker.publish_runner._processing_stage /
     # worker.publish_lease.lease_next_processing_publication). Pinned onto
     # each publication's publisher_config at session-creation time (like
@@ -309,6 +355,39 @@ def _validate_youtube_settings(settings: Settings) -> None:
         raise ProviderConfigurationError("publisher processing max duration must be positive")
 
 
+def _validate_tiktok_settings(settings: Settings) -> None:
+    if settings.tiktok_upload_chunk_size <= 0:
+        raise ProviderConfigurationError("tiktok upload chunk size must be positive")
+    if settings.tiktok_connect_timeout_seconds <= 0 or settings.tiktok_read_timeout_seconds <= 0:
+        raise ProviderConfigurationError("tiktok timeouts must be positive")
+    if settings.tiktok_max_retries < 0:
+        raise ProviderConfigurationError("tiktok retry count must not be negative")
+    _tiktok_redirect_prefixes = ("https://", "http://127.0.0.1", "http://localhost")
+    if settings.tiktok_redirect_uri and not settings.tiktok_redirect_uri.startswith(_tiktok_redirect_prefixes):
+        raise ProviderConfigurationError(
+            "tiktok redirect_uri must be an https:// URL registered with the TikTok app, or a "
+            "loopback http://127.0.0.1/http://localhost address (TikTok's docs require HTTPS "
+            "generally; loopback is offered as a convenience -- see docs/PUBLISHING.md)"
+        )
+
+
+def validate_tiktok_credentials_configured(settings: Settings) -> None:
+    """Called only when TikTok publishing is actually attempted
+    (publisher-auth tiktok, publish-job --provider tiktok, provider-smoke
+    publisher tiktok) -- mirrors validate_youtube_credentials_configured."""
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_TIKTOK_CLIENT_KEY", settings.tiktok_client_key),
+            ("REEL_HARNESS_TIKTOK_CLIENT_SECRET", settings.tiktok_client_secret.get_secret_value()),
+            ("REEL_HARNESS_TIKTOK_REDIRECT_URI", settings.tiktok_redirect_uri),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            "tiktok publishing requires an OAuth client: missing " + ", ".join(missing)
+        )
+
+
 def validate_youtube_credentials_configured(settings: Settings) -> None:
     """Called only when YouTube publishing is actually attempted (publisher-
     auth youtube, publish-job --provider youtube, provider-smoke publisher
@@ -335,6 +414,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_tts_settings(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
+    _validate_tiktok_settings(settings)
 
 
 def load_settings() -> Settings:

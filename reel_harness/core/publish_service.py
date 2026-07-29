@@ -7,8 +7,6 @@ from reel_harness.core.publish_eligibility import EligibilityResult, check_publi
 from reel_harness.core.state_machine import PublicationStatus, apply_publication_transition
 from reel_harness.db.models import Job, Publication, PublicationAuditEvent
 
-PRIVACY_STATUSES = frozenset({"private", "unlisted", "public"})
-
 # Statuses with no worker/poller actively attached, where a cancel can take
 # effect immediately (mirrors core.service.JobService.request_cancel's
 # `immediate` set). UPLOADING/UPLOAD_PAUSED are excluded on purpose -- an
@@ -61,9 +59,10 @@ class PublicationService:
     def create_publication(
         self, job_id: str, provider: str, account_reference: str,
         publisher_snapshot: dict | None = None,
-        privacy_status: str = "private",
+        privacy_status: str | None = None,
         confirm_public_upload: bool = False,
         public_upload_enabled: bool = False,
+        confirm_platform_options: bool = False,
     ) -> tuple[Publication, EligibilityResult]:
         """Returns (publication, eligibility). Idempotent: a second call with
         the same (provider, account_reference, job_id, final_video_checksum)
@@ -71,16 +70,33 @@ class PublicationService:
         constraint at the same time -- returns the existing row rather than
         creating a duplicate upload target. Raises PublicationNotEligibleError
         (with structured reasons) before creating anything if the job fails
-        the fresh eligibility re-check."""
-        if privacy_status not in PRIVACY_STATUSES:
+        the fresh eligibility re-check.
+
+        `privacy_status`/its validity and `confirm_platform_options`'s
+        necessity are both driven by the provider's own
+        `PublisherCapabilities` (providers.registry.provider_capabilities)
+        -- never a hardcoded YouTube-shaped set. `privacy_status=None` uses
+        the provider's own most-restrictive default."""
+        from reel_harness.providers.registry import provider_capabilities
+
+        caps = provider_capabilities(provider)
+        if privacy_status is None:
+            privacy_status = caps.default_privacy
+        if privacy_status not in caps.privacy_values:
             raise PublicationInvalidActionError(
-                f"unknown privacy_status {privacy_status!r} (allowed: {sorted(PRIVACY_STATUSES)})"
+                f"unknown privacy_status {privacy_status!r} for provider {provider!r} "
+                f"(allowed: {sorted(caps.privacy_values)})"
             )
-        if privacy_status == "public" and not (confirm_public_upload and public_upload_enabled):
+        if privacy_status in caps.public_privacy_values and not (confirm_public_upload and public_upload_enabled):
             raise PublicationInvalidActionError(
-                "public uploads require both --confirm-public-upload and the "
-                "REEL_HARNESS_ALLOW_PUBLIC_UPLOAD feature flag -- private is always available "
-                "without extra confirmation"
+                "public-visibility uploads require both --confirm-public-upload and the "
+                "REEL_HARNESS_ALLOW_PUBLIC_UPLOAD feature flag -- the provider's default privacy is always "
+                "available without extra confirmation"
+            )
+        if caps.requires_user_confirmation and not confirm_platform_options:
+            raise PublicationInvalidActionError(
+                f"provider {provider!r} requires --confirm-platform-options before creating a publication -- "
+                "review the platform-specific options (comments/remix/disclosure/etc.) first"
             )
 
         with self._session_factory() as session:

@@ -4,8 +4,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from reel_harness.core.errors import (
+    MetadataInvalidError,
     ProviderAuthError,
     ProviderNotConfiguredError,
+    PublisherAppReviewRequiredError,
+    PublisherCreatorNotEligibleError,
+    PublisherPrivacyNotAllowedError,
     TransientProviderError,
     UploadSessionExpiredError,
 )
@@ -20,6 +24,22 @@ from reel_harness.worker.publish_runner import _DEFAULT_CHUNK_SIZE
 # any state this module cannot positively confirm lands in
 # manual_review_required or ambiguous_remote_state rather than guessing --
 # see the module docstring below and docs/PUBLISHING.md.
+#
+# This vocabulary is intentionally SHARED across every provider rather than
+# forked per-provider (YouTube and TikTok both use it) -- the framework
+# reuse this project favors over parallel per-provider reconciliation
+# modules. TikTok-flavored concepts from docs/PUBLISHING.md map onto these
+# existing names rather than duplicating them under new literals:
+# "upload_initialized"/"publish_submitted"/"upload_complete_not_published"
+# -> already_consistent (the granular remote status -- e.g.
+# processing_status=PROCESSING_UPLOAD -- is already in `reasons`);
+# "remote_post_found"/"remote_post_missing" -> recovered_remote_video/
+# remote_video_missing; "session_expired" -> upload_session_expired (which
+# TikTok publications always reach, since TikTokPublisher.query_upload_offset
+# always raises it -- see providers.tiktok_publisher). app_review_required
+# is the one genuinely new outcome TikTok needed: proactively surfacing an
+# unaudited-app block on a stuck, not-yet-uploaded publication, which no
+# other provider's reconciliation needed before.
 RECONCILE_OUTCOMES = frozenset({
     "already_consistent",
     "recovered_remote_video",
@@ -29,6 +49,7 @@ RECONCILE_OUTCOMES = frozenset({
     "credentials_unavailable",
     "manual_review_required",
     "ambiguous_remote_state",
+    "app_review_required",
 })
 
 _TERMINAL = frozenset({PublicationStatus.PUBLISHED, PublicationStatus.CANCELLED})
@@ -63,7 +84,7 @@ def _result(outcome: str, publication_id: str, reasons: list[str], provider_vide
 
 def _chunk_size_for(publication: Publication) -> int:
     config = publication.publisher_config or {}
-    size = config.get("youtube_chunk_size")
+    size = config.get("youtube_chunk_size") or config.get("tiktok_chunk_size")
     return int(size) if isinstance(size, int) and size > 0 else _DEFAULT_CHUNK_SIZE
 
 
@@ -151,6 +172,10 @@ def _reconcile_unlocked_no_known_video(session, publication: Publication, bundle
     real_uri = bundle.session_store.get(pub_id)
     total_bytes = publication.total_bytes
     if real_uri is None or total_bytes is None:
+        if publication.provider == "tiktok":
+            app_review_result = _check_tiktok_app_review_block(publication, bundle)
+            if app_review_result is not None:
+                return app_review_result
         return _result("upload_incomplete", pub_id,
                        ["no resumable session reference on record locally -- safe to start a fresh session"])
 
@@ -219,3 +244,46 @@ def _repair_from_confirmed_video(session, publication: Publication, video_id: st
     ))
     session.commit()
     return _result("recovered_remote_video", publication.id, reasons, video_id)
+
+
+def _tiktok_options_from_snapshot(publication: Publication):
+    from reel_harness.providers.tiktok_publisher import platform_options_from_dict
+
+    snapshot = publication.metadata_snapshot or {}
+    return platform_options_from_dict(snapshot.get("platform_options") or {})
+
+
+def _check_tiktok_app_review_block(publication: Publication, bundle) -> ReconciliationResult | None:
+    """A TikTok publication that never even created an upload session is
+    often stuck for a reason a plain 'upload_incomplete' doesn't explain:
+    the app hasn't passed TikTok's review yet, so every attempt at the
+    publication's configured (non-SELF_ONLY) privacy_status will keep
+    failing validation before any network upload even starts. This is a
+    read-only, proactive check (get_creator_info is always safe -- never
+    mutates anything) -- returns None (defer to the generic
+    upload_incomplete outcome) when nothing app-review-related explains
+    the stall, so it never masks a genuinely ordinary "just hasn't been
+    retried yet" case."""
+    from reel_harness.providers.tiktok_publisher import validate_publish_options
+
+    pub_id = publication.id
+    try:
+        creator_info = bundle.publisher.get_creator_info()
+    except (ProviderAuthError, ProviderNotConfiguredError) as exc:
+        return _result("credentials_unavailable", pub_id,
+                       [f"cannot check creator_info before reconciling: {(redact(str(exc)) or '')[:200]}"])
+    except TransientProviderError:
+        return None  # a transient creator_info hiccup should never block reconciliation itself
+
+    if creator_info is None:
+        return None
+    options = _tiktok_options_from_snapshot(publication)
+    try:
+        validate_publish_options(creator_info, publication.privacy_status, options)
+    except PublisherAppReviewRequiredError as exc:
+        return _result("app_review_required", pub_id, [(redact(str(exc)) or "")[:300]])
+    except (PublisherPrivacyNotAllowedError, MetadataInvalidError, PublisherCreatorNotEligibleError) as exc:
+        return _result("manual_review_required", pub_id,
+                       [f"this publication's configured options are no longer valid for the account: "
+                        f"{(redact(str(exc)) or '')[:300]}"])
+    return None

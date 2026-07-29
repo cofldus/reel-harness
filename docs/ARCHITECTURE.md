@@ -255,6 +255,11 @@ commands that are known to work.
   contract tests use a mock transport.
 - **Subtitle overlay + BGM mixing** in `media/ffmpeg_render.py`
 - **Web admin UI** — CLI is the only interface today
-- **TikTok/YouTube publishing** — `Publisher` Protocol exists, no
-  implementation, no publish-gate license check wired up yet (there is
-  nothing to gate since nothing publishes)
+- **Instagram/Facebook Reels publishing** — the `Publisher` Protocol,
+  `PublisherCapabilities` capability model, and the provider-generic
+  worker/reconciliation/retry framework already support this without
+  further core changes; only a new adapter module + registry entry is
+  needed (see `providers/youtube_publisher.py`/`providers/tiktok_publisher.py`
+  for the pattern). YouTube (Phase 3A/3B) and TikTok (Phase 3C) are both
+  real, tested implementations as of `docs/STATUS.md`'s current entry —
+  this is no longer an unimplemented Protocol.

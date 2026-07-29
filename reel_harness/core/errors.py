@@ -123,6 +123,37 @@ class PublisherQuotaExceededError(PipelineError):
     retryable = False
 
 
+class PublisherAppReviewRequiredError(PipelineError):
+    """The connected app has not passed the platform's review/audit
+    process, so publishing is restricted below what was requested (e.g.
+    TikTok's unaudited-app rule, which forces every post to SELF_ONLY
+    visibility regardless of the requested privacy_level -- see
+    docs/PUBLISHING.md). Never auto-retried and never silently downgraded
+    to the restricted option -- surfaced explicitly so the operator learns
+    their real capability instead of a generic validation failure."""
+
+    code = "APP_REVIEW_REQUIRED"
+    retryable = False
+
+
+class PublisherPrivacyNotAllowedError(PipelineError):
+    """The requested privacy_status is not in this account's own allowed
+    set, per a freshly-fetched CreatorInfo (providers.base.CreatorInfo) --
+    never silently substituted for an allowed option."""
+
+    code = "PRIVACY_NOT_ALLOWED"
+    retryable = False
+
+
+class PublisherCreatorNotEligibleError(PipelineError):
+    """The connected creator/account cannot publish right now (e.g. an
+    account-level warning surfaced by a creator-info query). Never
+    auto-retried -- the operator must resolve the account-level issue."""
+
+    code = "CREATOR_NOT_ELIGIBLE"
+    retryable = False
+
+
 class PublisherRateLimitedError(TransientProviderError):
     """429 from the publisher API. Retryable, honoring Retry-After -- same
     treatment as the LLM/TTS/asset adapters' 429 handling."""

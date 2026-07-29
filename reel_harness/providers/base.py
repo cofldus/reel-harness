@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -103,18 +103,35 @@ class LocalAssetResult:
 
 @dataclass
 class PublicationMetadata:
-    """Deterministic, provider-agnostic upload metadata built by
-    publisher.metadata (see docs/PUBLISHING.md) -- never handed to an
-    adapter unvalidated, since every field here becomes part of the actual
-    upload request."""
+    """Deterministic upload metadata built by pipeline.publish_metadata (see
+    docs/PUBLISHING.md) -- never handed to an adapter unvalidated, since
+    every field here becomes part of the actual upload/post request.
+
+    `title`/`description`/`tags`/`category_id`/`made_for_kids`/
+    `default_language` are the fields every current adapter uses in some
+    form (YouTube uses all of them; a text-only platform like TikTok uses
+    `title` as the post caption and ignores `category_id`/`made_for_kids`).
+    `privacy_status` is validated against the specific provider's own
+    `PublisherCapabilities.privacy_values` (see below), not a fixed global
+    enum -- different platforms have entirely different privacy vocabularies
+    (YouTube: private/unlisted/public; TikTok: SELF_ONLY/PUBLIC_TO_EVERYONE/
+    MUTUAL_FOLLOW_FRIENDS/FOLLOWER_OF_CREATOR).
+
+    `platform_options` is a deliberately generic passthrough dict for
+    fields that exist on ONE platform's API and don't generalize (TikTok's
+    disable_comment/disable_duet/disable_stitch/video_cover_timestamp_ms/
+    brand_content_toggle/brand_organic_toggle/is_aigc, for instance) --
+    see core.publish_service and docs/PUBLISHING.md. Never contains a
+    credential, a local path, or a raw provider response."""
 
     title: str
     description: str
     tags: list[str]
     category_id: str
-    privacy_status: str  # "private" | "unlisted" | "public"
+    privacy_status: str
     made_for_kids: bool
     default_language: str | None = None
+    platform_options: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -123,11 +140,73 @@ class UploadSessionHandle:
     session. `session_reference` is a safe, opaque local identifier -- the
     real session URI (a bearer-style capability URL) is never part of this
     dataclass's persisted form; adapters keep it only in their own memory or
-    behind the credential/secret backend (see docs/PUBLISHING.md)."""
+    behind the credential/secret backend (see docs/PUBLISHING.md).
+
+    `provider_reference` is set only for adapters where the provider hands
+    back a durable identifier at SESSION-creation time, before any bytes
+    are uploaded (TikTok's `publish_id`, known immediately from the init
+    response) -- as opposed to YouTube, where the durable video id is only
+    known once the upload completes. When set, callers persist it onto
+    `Publication.provider_video_id` right away, closing an even earlier
+    version of the "provider succeeded, DB commit lost" crash-recovery gap
+    (see core.publish_reconciliation) for providers structured this way."""
 
     session_reference: str
     total_bytes: int
     chunk_size: int
+    provider_reference: str | None = None
+
+
+@dataclass(frozen=True)
+class PublisherCapabilities:
+    """What one Publisher adapter actually supports -- checked by
+    core.publish_service/CLI/API instead of scattering
+    `if provider == "youtube"`/`if provider == "tiktok"` conditionals
+    through domain code (see docs/PUBLISHING.md's Phase 3C capability
+    model). A platform that doesn't support something a caller asked for
+    gets an explicit validation error, never a silent fallback to a
+    different option.
+
+    `privacy_values` is the full set of privacy strings this provider's API
+    defines; `public_privacy_values` is the subset "public-like" enough to
+    require the double-confirmation gate (an explicit --confirm-public-upload
+    flag AND the REEL_HARNESS_ALLOW_PUBLIC_UPLOAD feature flag) --
+    `supports_public_privacy`/`supports_unlisted_privacy` are coarser
+    booleans some callers (e.g. a quick capability check) may prefer over
+    inspecting the full sets."""
+
+    supports_direct_publish: bool
+    supports_upload_only: bool
+    supports_scheduled_publish: bool
+    supports_public_privacy: bool
+    supports_unlisted_privacy: bool
+    supports_comments_control: bool
+    supports_remix_control: bool  # duet/stitch-style "build on this" controls
+    supports_processing_poll: bool
+    supports_remote_delete: bool
+    requires_creator_info: bool
+    requires_user_confirmation: bool
+    privacy_values: frozenset[str]
+    default_privacy: str
+    public_privacy_values: frozenset[str]
+
+
+@dataclass
+class CreatorInfo:
+    """Safe, non-secret account/creator state fetched fresh immediately
+    before a publish attempt (never trusted from an earlier snapshot -- see
+    docs/OPERATIONS.md). Generic across platforms that have this concept
+    (TikTok's `creator_info` query); a platform without one (YouTube) never
+    constructs this and `requires_creator_info=False` in its capabilities.
+    Never contains a token or any credential."""
+
+    account_identifier: str
+    display_name: str
+    allowed_privacy_values: frozenset[str]
+    comments_configurable: bool
+    remix_configurable: bool
+    max_post_duration_sec: float | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -183,15 +262,27 @@ class StockMediaProvider(Protocol):
 
 
 class Publisher(Protocol):
-    """Real vendor names (YouTube, ...) live only in the adapter module and
-    the registry -- core.publish_service and worker.publish_runner depend
-    only on this Protocol, mirroring LLMProvider/TTSProvider/
-    StockMediaProvider. See docs/PUBLISHING.md for the resumable-upload
-    contract this shape is built from."""
+    """Real vendor names (YouTube, TikTok, ...) live only in the adapter
+    module and the registry -- core.publish_service and
+    worker.publish_runner depend only on this Protocol, mirroring
+    LLMProvider/TTSProvider/StockMediaProvider. See docs/PUBLISHING.md for
+    the resumable-upload contract this shape is built from.
+
+    `capabilities` is a plain attribute (every adapter sets it once, from
+    its module-level `CAPABILITIES` constant -- see
+    providers.registry.provider_capabilities for the credential-free
+    lookup used by validation that must work even before an adapter
+    instance can be constructed). `get_creator_info` returns `None` for any
+    adapter whose `capabilities.requires_creator_info` is `False`
+    (YouTube); an adapter that DOES require it always re-fetches fresh,
+    never reusing an earlier result."""
 
     provider_id: str
+    capabilities: PublisherCapabilities
 
     def validate_configuration(self) -> None: ...
+
+    def get_creator_info(self) -> CreatorInfo | None: ...
 
     def create_upload_session(
         self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,

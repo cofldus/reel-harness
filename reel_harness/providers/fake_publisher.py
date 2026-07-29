@@ -6,13 +6,34 @@ from typing import Literal
 
 from reel_harness.core.errors import TransientProviderError, UploadRejectedError, UploadSessionExpiredError
 from reel_harness.providers.base import (
+    CreatorInfo,
     ProcessingStatusResult,
     PublicationMetadata,
+    PublisherCapabilities,
     UploadChunkResult,
     UploadSessionHandle,
 )
 
 FakeMode = Literal["ok", "reject_metadata", "fail_processing", "timeout"]
+
+# Mirrors YouTube's real capabilities (see providers.youtube_publisher) --
+# FakePublisher stands in for YouTube in most of this project's tests.
+CAPABILITIES = PublisherCapabilities(
+    supports_direct_publish=True,
+    supports_upload_only=False,
+    supports_scheduled_publish=False,
+    supports_public_privacy=True,
+    supports_unlisted_privacy=True,
+    supports_comments_control=False,
+    supports_remix_control=False,
+    supports_processing_poll=True,
+    supports_remote_delete=False,
+    requires_creator_info=False,
+    requires_user_confirmation=False,
+    privacy_values=frozenset({"private", "unlisted", "public"}),
+    default_privacy="private",
+    public_privacy_values=frozenset({"public"}),
+)
 
 
 class FakePublisher:
@@ -21,6 +42,7 @@ class FakePublisher:
     FakeStockMediaProvider's role for the publisher worker's tests."""
 
     provider_id = "fake"
+    capabilities = CAPABILITIES
 
     def __init__(self, mode: FakeMode = "ok") -> None:
         self.mode = mode
@@ -29,6 +51,9 @@ class FakePublisher:
 
     def validate_configuration(self) -> None:
         pass
+
+    def get_creator_info(self) -> CreatorInfo | None:
+        return None
 
     def create_upload_session(
         self, metadata: PublicationMetadata, total_bytes: int, mime_type: str, correlation_id: str,

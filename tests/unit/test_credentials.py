@@ -107,6 +107,23 @@ def test_file_backend_persists_invalid_marker_and_error(tmp_path) -> None:
     assert loaded.last_refresh_error == "invalid_grant"
 
 
+def test_file_backend_round_trips_refresh_token_expiry(tmp_path) -> None:
+    """Some providers' refresh tokens themselves expire (TikTok: 365 days);
+    None means the provider doesn't report/have one (YouTube)."""
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    backend = FileCredentialBackend(store)
+    refresh_expiry = datetime.now(UTC) + timedelta(days=365)
+    backend.save_credential(_credential(
+        provider="tiktok", refresh_expires_at=refresh_expiry, channel_id="tiktok-open-id",
+    ))
+    loaded = backend.get_credential("tiktok", "default")
+    assert loaded is not None
+    assert loaded.refresh_expires_at == refresh_expiry
+
+    backend.save_credential(_credential())  # youtube default has no refresh_expires_at
+    assert backend.get_credential("youtube", "default").refresh_expires_at is None
+
+
 def test_file_backend_list_accounts_is_scoped_per_provider(tmp_path) -> None:
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     backend = FileCredentialBackend(store)

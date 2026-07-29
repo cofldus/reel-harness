@@ -195,6 +195,38 @@ def test_unknown_privacy_status_rejected(
         )
 
 
+def test_platform_options_confirmation_required_when_capability_demands_it(
+    job_service, channel, session_factory, storage, publish_service, tmp_path, monkeypatch,
+) -> None:
+    """No real adapter sets requires_user_confirmation=True yet (that lands
+    with the TikTok adapter, whose direct-publish options -- comments/duet/
+    stitch/commercial-disclosure -- must be reviewed before every publish).
+    Simulated here via a capability override so the gate itself is proven
+    correct ahead of that adapter existing."""
+    import dataclasses
+
+    from reel_harness.providers import registry as registry_module
+
+    real_capabilities = registry_module.provider_capabilities
+
+    def _fake_capabilities(provider: str):
+        caps = real_capabilities(provider)
+        if provider == "youtube":
+            return dataclasses.replace(caps, requires_user_confirmation=True)
+        return caps
+
+    monkeypatch.setattr(registry_module, "provider_capabilities", _fake_capabilities)
+
+    job = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path)
+    with pytest.raises(PublicationInvalidActionError):
+        publish_service.create_publication(job.id, provider="youtube", account_reference="acct-1")
+
+    pub, _ = publish_service.create_publication(
+        job.id, provider="youtube", account_reference="acct-1", confirm_platform_options=True,
+    )
+    assert pub.status == PublicationStatus.READY_TO_UPLOAD.value
+
+
 def test_cancel_before_upload_is_immediate(
     job_service, channel, session_factory, storage, publish_service, tmp_path,
 ) -> None:
