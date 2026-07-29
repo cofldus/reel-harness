@@ -58,10 +58,21 @@ def _audit(session, publication_id: str, event: str, detail: dict | None = None)
     session.add(PublicationAuditEvent(publication_id=publication_id, event=event, detail=detail))
 
 
-def _chunk_size_for(publication: Publication) -> int:
+def _chunk_size_for(publication: Publication, total_bytes: int | None = None) -> int:
+    """A provider-configured chunk size wins if one was pinned at session
+    creation (youtube_chunk_size/tiktok_chunk_size). A provider with no
+    such setting (Instagram, whose resumable upload is always the whole
+    file in one request -- see providers.instagram_publisher) falls back
+    to `total_bytes` when given, rather than an arbitrary generic
+    default that would otherwise split a genuinely single-shot upload
+    into multiple wrong-sized requests."""
     config = publication.publisher_config or {}
     size = config.get("youtube_chunk_size") or config.get("tiktok_chunk_size")
-    return int(size) if isinstance(size, int) and size > 0 else _DEFAULT_CHUNK_SIZE
+    if isinstance(size, int) and size > 0:
+        return size
+    if total_bytes is not None and total_bytes > 0:
+        return total_bytes
+    return _DEFAULT_CHUNK_SIZE
 
 
 def run_publication(
@@ -259,7 +270,16 @@ def _resolve_session_handle(
         # recourse; it never risks reusing or leaking a stale capability URL.
         raise _SessionNotResumable
     return UploadSessionHandle(
-        session_reference=real_uri, total_bytes=total_bytes, chunk_size=_chunk_size_for(publication),
+        session_reference=real_uri, total_bytes=total_bytes,
+        chunk_size=_chunk_size_for(publication, total_bytes),
+        # Carries forward a durable id already known from this same
+        # publication (set early, at session-creation time, for a
+        # provider whose UploadSessionHandle.provider_reference was
+        # populated -- see providers.base's docstring) -- without this,
+        # a reconstructed handle would silently blank
+        # UploadChunkResult.provider_video_id back to None on its next
+        # completion, overwriting a value the DB already had correct.
+        provider_reference=publication.provider_video_id,
     )
 
 

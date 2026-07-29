@@ -96,10 +96,17 @@ def _result(outcome: str, publication_id: str, reasons: list[str], provider_vide
     )
 
 
-def _chunk_size_for(publication: Publication) -> int:
+def _chunk_size_for(publication: Publication, total_bytes: int | None = None) -> int:
+    """Mirrors worker.publish_runner._chunk_size_for -- see its docstring
+    for why a provider with no configured chunk size (Instagram) falls
+    back to total_bytes rather than an arbitrary generic default."""
     config = publication.publisher_config or {}
     size = config.get("youtube_chunk_size") or config.get("tiktok_chunk_size")
-    return int(size) if isinstance(size, int) and size > 0 else _DEFAULT_CHUNK_SIZE
+    if isinstance(size, int) and size > 0:
+        return size
+    if total_bytes is not None and total_bytes > 0:
+        return total_bytes
+    return _DEFAULT_CHUNK_SIZE
 
 
 def reconcile_publication(session, publication: Publication, bundle) -> ReconciliationResult:
@@ -198,7 +205,8 @@ def _reconcile_unlocked_no_known_video(session, publication: Publication, bundle
                        ["no resumable session reference on record locally -- safe to start a fresh session"])
 
     handle = UploadSessionHandle(session_reference=real_uri, total_bytes=total_bytes,
-                                  chunk_size=_chunk_size_for(publication))
+                                  chunk_size=_chunk_size_for(publication, total_bytes),
+                                  provider_reference=publication.provider_video_id)
     try:
         offset = bundle.publisher.query_upload_offset(handle, total_bytes)
     except UploadSessionExpiredError:
