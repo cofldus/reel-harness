@@ -4,6 +4,54 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [0.3.0rc1] — 2026-07-30 — Local Web UI MVP (first release candidate)
+
+### Added
+
+- **Web UI** (`reel-harness serve` now also serves a browser UI on the
+  same process/port — no separate `web` command): server-rendered
+  (FastAPI + Jinja2 + HTMX + vanilla JS, no SPA framework, no Node build
+  step) pages for Dashboard (`/`), Job List (`/jobs`), New Job
+  (`/jobs/new`), Job Detail (`/jobs/{id}`), System Status (`/system`),
+  and a read-only Settings Guide (`/settings`). A user can create a Demo
+  Mode job, watch it progress (self-terminating 2s poll), review the
+  result, approve/reject/retry/cancel, and download the finished video —
+  entirely by clicking, no terminal commands after `serve` starts.
+  Real-platform publishing (OAuth connect, account selection) has no web
+  UI yet and stays CLI-only; deferred to a later phase.
+- **Per-job provider profile**: the New Job form's Demo/Real/Fake choice
+  is a genuine per-job override (`JobService.create_job` gained an
+  optional `provider_snapshot` parameter), independent of whatever the
+  process was started with. Real is only offered when actually
+  configured; Fake is hidden unless `REEL_HARNESS_UI_SHOW_FAKE_PROFILE=true`.
+- **New JSON API endpoints** (`/v1/*`, additive, existing routes
+  unchanged): `GET /v1/jobs` (paginated job list), `POST /v1/jobs/{id}/reject`,
+  `POST /v1/jobs/{id}/retry`.
+- **Video streaming**: `GET /jobs/{id}/video` (`?download=1` for
+  download) with real HTTP Range/206 support for browser `<video>`
+  seeking.
+- **New `Settings.api_host`** (`REEL_HARNESS_API_HOST`, default
+  `127.0.0.1`) and a new `preflight` check (`public_bind_security`) that
+  WARNs (any profile) or FAILs (`--profile production`) when bound
+  beyond loopback — the web UI has no login system, only CSRF
+  protection for browser-originated requests.
+
+### Security
+
+- Double-submit CSRF cookie (`rh_csrf`/`X-CSRF-Token`) on every
+  mutating web route, independent of the existing `/v1/*` bearer-token
+  `require_api_key` gate. Security-header middleware (CSP with no
+  inline script/style, `X-Frame-Options: DENY`, etc.) applies to every
+  response. HTMX is vendored (no CDN reference anywhere).
+
+### Known limitations
+
+- Real-platform publishing (YouTube/TikTok/Instagram account
+  connection, per-platform options) has no web UI — CLI-only.
+- Real-provider (OpenAI-compatible LLM/TTS, Pexels) credential
+  configuration stays env/`.env`-driven — the Settings Guide page only
+  explains what to set, it is not a secret-input form.
+
 ## [0.2.0rc1] — 2026-07-30 — Demo Mode (first release candidate)
 
 ### Added
