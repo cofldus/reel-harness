@@ -17,6 +17,7 @@ from reel_harness.web.dependencies import (
     require_csrf,
 )
 from reel_harness.web.forms import ALLOWED_LANGUAGES, ALLOWED_STYLES, validate_new_job_form
+from reel_harness.web.publication_view_models import build_publisher_account_view
 from reel_harness.web.view_models import (
     build_job_detail_view,
     build_job_summary_view,
@@ -27,6 +28,10 @@ router = APIRouter()
 
 FINAL_VIDEO_REL_PATH = "final/final.mp4"
 _FAKE_PROFILE_ENV_FLAG = "REEL_HARNESS_UI_SHOW_FAKE_PROFILE"
+
+# The only three publisher ids a browser can ever connect an OAuth account
+# for -- "fake" has no OAuth client at all and never appears here.
+_REAL_PUBLISHER_PROVIDERS = ("youtube", "tiktok", "instagram")
 
 
 def _set_csrf_cookie(response, token: str) -> None:
@@ -98,6 +103,38 @@ def _provider_snapshot_for_profile(ctx: AppContext, profile: str) -> dict:
     }
     overridden = ctx.settings.model_copy(update=name_map[profile])
     return provider_snapshot(overridden)
+
+
+def _require_real_publisher_provider(provider: str) -> None:
+    if provider not in _REAL_PUBLISHER_PROVIDERS:
+        raise HTTPException(status_code=404, detail=f"unknown publisher provider: {provider}")
+
+
+def _publisher_credentials_configured(provider: str, settings) -> tuple[bool, str | None]:
+    """Whether PROVIDER's OAuth client itself is configured -- the gate
+    /connect checks before generating any PKCE/state at all. Small,
+    deliberate duplication of publication_view_models._oauth_client_configured
+    (a display-only helper for the accounts/publish-setup pages): this one
+    is the actual precondition check for a mutating action, kept local to
+    the route the same way _real_provider_readiness lives here rather than
+    in view_models.py."""
+    from reel_harness.config import (
+        ProviderConfigurationError,
+        validate_instagram_credentials_configured,
+        validate_tiktok_credentials_configured,
+        validate_youtube_credentials_configured,
+    )
+
+    validators = {
+        "youtube": validate_youtube_credentials_configured,
+        "tiktok": validate_tiktok_credentials_configured,
+        "instagram": validate_instagram_credentials_configured,
+    }
+    try:
+        validators[provider](settings)
+    except ProviderConfigurationError as exc:
+        return False, str(exc)
+    return True, None
 
 
 # --- Pages -----------------------------------------------------------------
@@ -367,3 +404,229 @@ def job_video(job_id: str, download: int = 0, ctx: AppContext = Depends(get_cont
         path, media_type="video/mp4",
         headers={"Content-Disposition": f'{disposition}; filename="{job_id}.mp4"'},
     )
+
+
+# --- Publisher accounts (OAuth connect/disconnect) ---------------------------
+
+
+@router.get("/publisher-accounts", response_class=HTMLResponse)
+def publisher_accounts_page(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
+    backend = ctx.credential_backend()
+    accounts = [build_publisher_account_view(p, ctx.settings, backend) for p in _REAL_PUBLISHER_PROVIDERS]
+    return _render(request, "publisher_accounts.html", {
+        "accounts": accounts,
+        "connected": request.query_params.get("connected"),
+        "error": request.query_params.get("error"),
+    })
+
+
+def _build_youtube_authorization_url(request: Request, settings, state: str, pkce) -> str:
+    from reel_harness.publisher.oauth_youtube import build_authorization_url
+
+    redirect_uri = str(request.url_for("publisher_oauth_callback", provider="youtube"))
+    return build_authorization_url(settings.youtube_client_id, redirect_uri, state, pkce)
+
+
+def _build_tiktok_authorization_url(settings, state: str, pkce) -> str:
+    from reel_harness.publisher.oauth_tiktok import build_authorization_url
+
+    return build_authorization_url(
+        settings.tiktok_client_key, settings.tiktok_redirect_uri, state, pkce, settings.tiktok_auth_url,
+    )
+
+
+def _build_instagram_authorization_url(settings, state: str, pkce) -> str:
+    from reel_harness.publisher.oauth_instagram import build_authorization_url
+
+    return build_authorization_url(
+        settings.instagram_app_id, settings.instagram_redirect_uri, state, pkce, settings.instagram_auth_url,
+    )
+
+
+@router.post("/publisher-accounts/{provider}/connect", dependencies=[Depends(require_csrf)])
+def publisher_connect(
+    request: Request, provider: str, account_reference: str = Form("default"),
+    ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Generates PKCE + a single-use `state`, stores them in the transient
+    OAuthFlowStore (never a cookie, never the DB -- see
+    publisher.oauth_flow_store), then 303-redirects the browser straight to
+    the real provider's authorization page. YouTube's redirect_uri is
+    computed per-request via url_for (Google's Desktop-app OAuth client type
+    tolerates any port on 127.0.0.1, the same property the CLI's own
+    ephemeral-port loopback flow already relies on); TikTok/Instagram use
+    their existing configured settings verbatim, since those platforms
+    require an exact pre-registered match -- see docs/OPERATIONS.md for what
+    to register for the web flow to work."""
+    _require_real_publisher_provider(provider)
+    account_reference = account_reference.strip() or "default"
+
+    configured, reason = _publisher_credentials_configured(provider, ctx.settings)
+    if not configured:
+        raise HTTPException(status_code=409, detail=reason)
+
+    from reel_harness.publisher.oauth_common import generate_pkce
+
+    pkce = generate_pkce()
+    state = ctx.oauth_flow_store().create(provider, account_reference, pkce.verifier)
+
+    if provider == "youtube":
+        auth_url = _build_youtube_authorization_url(request, ctx.settings, state, pkce)
+    elif provider == "tiktok":
+        auth_url = _build_tiktok_authorization_url(ctx.settings, state, pkce)
+    else:  # instagram
+        auth_url = _build_instagram_authorization_url(ctx.settings, state, pkce)
+
+    return RedirectResponse(url=auth_url, status_code=303)
+
+
+def _redirect_to_accounts(*, connected: str | None = None, error: str | None = None) -> RedirectResponse:
+    import urllib.parse
+
+    params = {}
+    if connected:
+        params["connected"] = connected
+    if error:
+        params["error"] = error
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    return RedirectResponse(url=f"/publisher-accounts{query}", status_code=303)
+
+
+def _exchange_youtube_code(request: Request, settings, code: str, verifier: str, account_reference: str):
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_youtube import YouTubeOAuthClient
+
+    redirect_uri = str(request.url_for("publisher_oauth_callback", provider="youtube"))
+    client = YouTubeOAuthClient(settings.youtube_client_id, settings.youtube_client_secret.get_secret_value())
+    try:
+        tokens = client.exchange_code(code, verifier, redirect_uri)
+        identity = client.fetch_channel_identity(tokens.access_token)
+    finally:
+        client.close()
+    now = datetime.now(UTC)
+    return OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token,
+        expires_at=now + timedelta(seconds=tokens.expires_in), scope=tokens.scope,
+        provider="youtube", account_reference=account_reference,
+        channel_id=identity.channel_id, channel_title=identity.title,
+        created_at=now, last_refreshed_at=now,
+    )
+
+
+def _exchange_tiktok_code(settings, code: str, verifier: str, account_reference: str):
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_tiktok import TikTokOAuthClient
+
+    client = TikTokOAuthClient(
+        settings.tiktok_client_key, settings.tiktok_client_secret.get_secret_value(), settings.tiktok_token_url,
+        connect_timeout=settings.tiktok_connect_timeout_seconds, read_timeout=settings.tiktok_read_timeout_seconds,
+    )
+    try:
+        tokens = client.exchange_code(code, verifier, settings.tiktok_redirect_uri)
+    finally:
+        client.close()
+    now = datetime.now(UTC)
+    return OAuthCredential(
+        access_token=tokens.access_token, refresh_token=tokens.refresh_token,
+        expires_at=now + timedelta(seconds=tokens.expires_in),
+        refresh_expires_at=(
+            now + timedelta(seconds=tokens.refresh_expires_in) if tokens.refresh_expires_in is not None else None
+        ),
+        scope=tokens.scope, provider="tiktok", account_reference=account_reference,
+        channel_id=tokens.open_id or None, channel_title=None,
+        created_at=now, last_refreshed_at=now,
+    )
+
+
+def _exchange_instagram_code(settings, code: str, verifier: str, account_reference: str):
+    from datetime import UTC, datetime, timedelta
+
+    from reel_harness.publisher.credentials import OAuthCredential
+    from reel_harness.publisher.oauth_instagram import SCOPES, InstagramOAuthClient
+
+    client = InstagramOAuthClient(
+        settings.instagram_app_id, settings.instagram_app_secret.get_secret_value(),
+        settings.instagram_token_url, settings.instagram_graph_url,
+        connect_timeout=settings.instagram_connect_timeout_seconds,
+        read_timeout=settings.instagram_read_timeout_seconds,
+    )
+    try:
+        short_lived = client.exchange_code(code, verifier, settings.instagram_redirect_uri)
+        long_lived = client.exchange_long_lived_token(short_lived.access_token)
+        identity = client.fetch_account_identity(long_lived.access_token)
+    finally:
+        client.close()
+    now = datetime.now(UTC)
+    return OAuthCredential(
+        access_token=long_lived.access_token, refresh_token=None,  # see InstagramOAuthClient's docstring
+        expires_at=now + timedelta(seconds=long_lived.expires_in), scope=",".join(SCOPES),
+        provider="instagram", account_reference=account_reference,
+        channel_id=identity.account_id, channel_title=identity.username,
+        created_at=now, last_refreshed_at=now,
+    )
+
+
+@router.get("/publisher-accounts/{provider}/callback", name="publisher_oauth_callback")
+def publisher_oauth_callback(
+    request: Request, provider: str, code: str | None = None, state: str | None = None,
+    error: str | None = None, ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Deliberately has NO require_csrf dependency -- this route is reached
+    by a top-level browser navigation FROM the OAuth provider's own domain,
+    a cross-site navigation our SameSite=Strict rh_csrf cookie would never
+    even be sent on regardless of what this route required. The OAuth
+    `state` parameter (server-generated, single-use via OAuthFlowStore.pop,
+    short-TTL, provider-bound) is the standard, correct CSRF-equivalent
+    defense for an OAuth callback -- see docs/OPERATIONS.md's web UI
+    security section."""
+    _require_real_publisher_provider(provider)
+
+    from reel_harness.observability import redact
+
+    if error:
+        return _redirect_to_accounts(error=f"{provider}:{redact(error) or error}")
+    if not state:
+        return _redirect_to_accounts(error=f"{provider}:missing_state")
+
+    pending = ctx.oauth_flow_store().pop(state)
+    if pending is None or pending.get("provider") != provider:
+        return _redirect_to_accounts(error=f"{provider}:expired_or_invalid_connect_request")
+    if not code:
+        return _redirect_to_accounts(error=f"{provider}:missing_code")
+
+    account_reference = pending["account_reference"]
+    verifier = pending["verifier"]
+
+    from reel_harness.core.errors import ProviderAuthError, TransientProviderError
+
+    try:
+        if provider == "youtube":
+            credential = _exchange_youtube_code(request, ctx.settings, code, verifier, account_reference)
+        elif provider == "tiktok":
+            credential = _exchange_tiktok_code(ctx.settings, code, verifier, account_reference)
+        else:  # instagram
+            credential = _exchange_instagram_code(ctx.settings, code, verifier, account_reference)
+    except ProviderAuthError as exc:
+        return _redirect_to_accounts(error=f"{provider}:auth_failed:{redact(str(exc)) or 'unknown'}")
+    except TransientProviderError as exc:
+        return _redirect_to_accounts(error=f"{provider}:transient_error:{redact(str(exc)) or 'unknown'}")
+
+    ctx.credential_backend().save_credential(credential)
+    return _redirect_to_accounts(connected=provider)
+
+
+@router.post("/publisher-accounts/{provider}/disconnect", dependencies=[Depends(require_csrf)])
+def publisher_disconnect(
+    provider: str, account_reference: str = Form(...), ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Local-only: deletes the saved credential from this machine's file
+    store. Never revokes remote authorization at the platform -- matches
+    the CLI's publisher-account-remove behavior exactly, stated explicitly
+    in the accounts page's UI copy, not just here."""
+    _require_real_publisher_provider(provider)
+    ctx.credential_backend().revoke_credential(provider, account_reference)
+    return _redirect_to_accounts()

@@ -76,10 +76,14 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .chip { padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; color: inherit; }
 .chip-active { background: var(--primary); color: #fff; border-color: var(--primary); }
 
-.job-table, .asset-table, .preflight-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+.job-table, .asset-table, .preflight-table, .account-table, .publication-table {
+  width: 100%; border-collapse: collapse; margin-bottom: 1rem;
+}
 .job-table th, .job-table td,
 .asset-table th, .asset-table td,
-.preflight-table th, .preflight-table td { border-bottom: 1px solid var(--border); padding: 0.5rem; text-align: left; }
+.preflight-table th, .preflight-table td,
+.account-table th, .account-table td,
+.publication-table th, .publication-table td { border-bottom: 1px solid var(--border); padding: 0.5rem; text-align: left; }
 
 .pagination { display: flex; gap: 1rem; align-items: center; }
 
