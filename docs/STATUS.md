@@ -1,8 +1,91 @@
 # Status
 
-Last updated: 2026-07-30 (Phase 4C Demo Mode session, on branch
-`phase4/release-candidate`). Phase 2A through Phase 4B are merged into
-`main` as of `v0.1.0`.
+Last updated: 2026-07-30 (Phase 5A Web UI MVP session, on branch
+`phase5/web-ui-mvp`). Phase 2A through Phase 4C (Demo Mode) are merged
+into `main` as of `v0.2.0rc1`.
+
+## Phase 5A — Local Web UI MVP
+
+Goal: expose the existing CLI/API backend through a browser -- no new
+domain logic, no new pipeline behavior. A user runs `reel-harness serve`
+and can create a Demo job, watch it progress, review the result, and
+download it, entirely by clicking. Real-platform publishing UX (OAuth
+connect, account selection, per-platform options) is explicitly deferred
+to Phase 5B.
+
+- **Tech**: FastAPI + Jinja2 (server-rendered) + HTMX + a small amount of
+  vanilla JS + FastAPI `StaticFiles` -- no React/Vue/Next.js, no Node.js
+  build step, no client state store. `reel_harness/web/` (`router.py`,
+  `dependencies.py`, `view_models.py`, `labels.py`, `forms.py`,
+  `formatting.py`, `templates/`, `static/`) mounted onto the single
+  existing `api/app.py` `FastAPI()` singleton via `app.include_router(...)`
+  at import time -- `ops.supervisor.Supervisor` needed zero changes since
+  it already just uses `api.app.app` as-is.
+- **6 screens**: Dashboard (`/`), Job List (`/jobs`, paginated/filterable),
+  New Job (`/jobs/new`), Job Detail (`/jobs/{id}`), System Status
+  (`/system`), Settings Guide (`/settings`, read-only -- config stays
+  env/.env-driven, never a secret-input form).
+- **3 real backend gaps closed first** (own commit, useful to API clients
+  independent of the UI): `JobService.list_jobs` gained `limit`/`offset` +
+  a new `count_jobs`; new `JobService.get_stage_runs` reads the
+  previously-unqueried `StageRun` table for real per-stage timing; new
+  `GET /v1/jobs` (paginated list), `POST /v1/jobs/{id}/reject`,
+  `POST /v1/jobs/{id}/retry` (both `JobService` methods already existed,
+  CLI-only, mirroring how `approve`/`cancel` already made the HTTP jump).
+- **Per-job provider profile**: `JobService.create_job` gained an optional
+  `provider_snapshot` override parameter -- the New Job form's Demo/Real/
+  Fake choice is a genuine per-job override, not just whatever
+  `REEL_HARNESS_LLM_PROVIDER`/etc. the process happened to start with.
+  Real is gated on an independent readiness check against the specific
+  real provider names; Fake is hidden unless
+  `REEL_HARNESS_UI_SHOW_FAKE_PROFILE=true` (env flag, not a UI toggle).
+- **Progress polling**: HTMX self-terminating poll (`hx-trigger` only
+  re-included in the swapped-in fragment while the job is still active) --
+  stops on `TERMINAL_STATUSES` (`COMPLETED`/`CANCELLED`) **or**
+  `NEEDS_ACTION_STATUSES` (`FAILED`/`REVIEW_REQUIRED`/`READY`), since the
+  narrower `TERMINAL_STATUSES` alone under-covers "no further automatic
+  progress without a human." No fake percentage -- stage label + `StageRun`
+  timeline + elapsed time only.
+- **Video streaming**: `GET /jobs/{id}/video` uses Starlette's
+  `FileResponse` (confirmed built-in Range/206 support, no hand-rolled
+  byte-range code), path resolved exclusively via
+  `LocalFilesystemStorage.path_for()`.
+- **CSRF, not a login system**: double-submit cookie
+  (`rh_csrf`/`X-CSRF-Token`), independent of `/v1/*`'s bearer-token
+  `require_api_key`. New `Settings.api_host` + `preflight`'s
+  `public_bind_security` check (WARN any profile, FAIL under
+  `--profile production`) so binding beyond loopback is never a silent
+  default. Security-header middleware (CSP with no inline script/style,
+  `X-Frame-Options`, etc.) applies to every response, `/v1/*` included.
+- **Packaging**: `reel_harness/web/templates/`+`static/` needed an
+  explicit new `[tool.hatch.build.targets.wheel] artifacts` entry --
+  zero non-`.py` files existed under `reel_harness/` before this, so
+  hatchling's `packages` selection alone would not have swept them in.
+  Verified by an actual `uv build` + wheel-listing inspection + clean-venv
+  install + browser check, not assumed. New hard dependencies: `jinja2`,
+  `python-multipart`. HTMX is vendored (`static/htmx.min.js`, Zero-Clause
+  BSD, no CDN reference anywhere).
+- **A real FastAPI bug found and fixed mid-session**: the create-job
+  route's return type (`HTMLResponse | RedirectResponse`) made FastAPI try
+  to build a Pydantic response model from a `Union` of two Starlette
+  response classes, crashing the app at import time
+  (`FastAPIError: Invalid args for response field!`) -- fixed with
+  `response_model=None` on that one route. Also found: FastAPI's
+  `Form(...)` (required) rejects a genuinely-empty string field before the
+  app's own validation ever runs, producing a raw JSON 422 instead of the
+  intended friendly re-rendered form -- fixed by giving every string form
+  field a `Form("")` default and letting `web.forms.validate_new_job_form`
+  be the actual source of truth for what's acceptable.
+- **Verification**: real end-to-end manual smoke test via `curl` against a
+  live `serve` process (create → poll → REVIEW_REQUIRED → video Range
+  request returns real 206 + correct `Content-Range` → approve →
+  COMPLETED), confirmed real non-silent Demo audio in the streamed video
+  (ffprobe/volumedetect). A real Playwright/Chromium browser E2E
+  (`tests/e2e/test_web_ui_playwright.py`) drives the identical flow
+  through an actual browser and passed. Unit (view models, labels, forms),
+  route (`TestClient`, including CSRF/security-header/Range assertions),
+  and integration (full lifecycle through the web routes with a real
+  worker run) tests all pass; full suite green, mypy/ruff clean.
 
 ## Phase 4C — Demo Mode
 

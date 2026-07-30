@@ -2848,9 +2848,10 @@ def cmd_serve(args: argparse.Namespace, ctx: AppContext) -> int:
     from reel_harness.worker.publish_daemon import PublisherDaemonConfig, default_publisher_worker_id
 
     settings = ctx.settings
+    host = args.host if args.host is not None else settings.api_host
     config = SupervisorConfig(
         run_api=args.api, run_render_worker=args.render_worker, run_publisher_worker=args.publisher_worker,
-        host=args.host, port=args.port,
+        host=host, port=args.port,
         render_workers=args.render_workers, publisher_workers=args.publisher_workers,
         shutdown_timeout_seconds=args.shutdown_timeout,
         render_daemon_config=DaemonConfig(
@@ -3193,7 +3194,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--publisher-worker", dest="publisher_worker", action="store_true", default=True, help="Default: on",
     )
     serve.add_argument("--no-publisher-worker", dest="publisher_worker", action="store_false")
-    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument(
+        "--host", default=None,
+        help="Default: settings.api_host (REEL_HARNESS_API_HOST, itself defaulting to 127.0.0.1)",
+    )
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument(
         "--render-workers", type=int, default=1, help="Thread count for the render worker (SQLite: keep this low)",

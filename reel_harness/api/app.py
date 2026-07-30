@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -202,13 +204,12 @@ def readyz_publisher(account: str = "default", ctx: AppContext = Depends(get_con
     )
 
 
-@app.get("/status")
-def get_status(ctx: AppContext = Depends(get_context)) -> dict:
-    """Operational status for dashboards/incident triage -- version, config
-    fingerprint, schema, uptime, job/publication status breakdowns, stale
-    lease counts, and (only when running inside `reel-harness serve`) live
-    component/fatal-error state. Never a secret, token, script, prompt, or
-    job topic/title -- only counts and status enum values."""
+def collect_status(ctx: AppContext) -> dict:
+    """The DB-query/counting logic behind /status -- factored out so the web
+    UI's dashboard/system-status pages can reuse the exact same counts
+    in-process instead of re-deriving them (or making an HTTP self-call).
+    Never a secret, token, script, prompt, or job topic/title -- only counts
+    and status enum values."""
     from datetime import UTC, datetime, timedelta
 
     from reel_harness._version import __version__
@@ -258,6 +259,15 @@ def get_status(ctx: AppContext = Depends(get_context)) -> dict:
         "stale_publication_leases": stale_publication_leases,
         "supervisor": supervisor_status,
     }
+
+
+@app.get("/status")
+def get_status(ctx: AppContext = Depends(get_context)) -> dict:
+    """Operational status for dashboards/incident triage -- version, config
+    fingerprint, schema, uptime, job/publication status breakdowns, stale
+    lease counts, and (only when running inside `reel-harness serve`) live
+    component/fatal-error state."""
+    return collect_status(ctx)
 
 
 @app.get("/metrics")
@@ -322,6 +332,60 @@ def approve_job(job_id: str, ctx: AppContext = Depends(get_context)) -> JobRespo
     except InvalidActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_response(job)
+
+
+class RejectJobRequest(BaseModel):
+    reason: str
+    regenerate_from_stage: str
+
+
+@app.post("/v1/jobs/{job_id}/reject", dependencies=[Depends(require_api_key)])
+def reject_job(job_id: str, request: RejectJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
+    try:
+        job = ctx.jobs.reject(job_id, reason=request.reason, regenerate_from_stage=request.regenerate_from_stage)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _to_response(job)
+
+
+class RetryJobRequest(BaseModel):
+    stage: str
+
+
+@app.post("/v1/jobs/{job_id}/retry", dependencies=[Depends(require_api_key)])
+def retry_job(job_id: str, request: RetryJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
+    try:
+        job = ctx.jobs.retry_from_stage(job_id, stage=request.stage)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _to_response(job)
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+@app.get("/v1/jobs", dependencies=[Depends(require_api_key)])
+def list_jobs(
+    status_filter: str | None = None, limit: int = 50, offset: int = 0, ctx: AppContext = Depends(get_context),
+) -> JobListResponse:
+    """`status_filter` (query param name `status_filter`, not `status`, to
+    avoid colliding with FastAPI's own `status` module import in this file)
+    matches one exact JobStatus value; omit for all statuses."""
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must not be negative")
+    jobs = ctx.jobs.list_jobs(status=status_filter, limit=limit, offset=offset)
+    total = ctx.jobs.count_jobs(status=status_filter)
+    return JobListResponse(jobs=[_to_response(j) for j in jobs], total=total, limit=limit, offset=offset)
 
 
 class CreatePublicationRequest(BaseModel):
@@ -514,3 +578,37 @@ def retry_publication_endpoint(
         except PublicationRetryError as exc:
             raise HTTPException(status_code=409, detail={"reasons": exc.reasons}) from exc
     return {"retried": True, **result.to_dict()}
+
+
+# --- Web UI (reel_harness.web) ---------------------------------------------
+# Mounted here (not inside reel_harness.web itself) so this module stays the
+# single place that ever constructs FastAPI() -- ops.supervisor.Supervisor
+# imports this module and uses `app` as-is, so anything registered on it at
+# import time (this include_router/mount call, evaluated once when this
+# module is first imported) is picked up automatically with zero supervisor
+# changes needed.
+
+@app.middleware("http")
+async def _security_headers_middleware(request, call_next):
+    """Applies to every response, /v1/* and the web UI alike -- CSP has no
+    'unsafe-inline' for script/style since every script/style the web UI
+    ships is a static file (see web/static/), never an inline <script> tag
+    or a CDN reference."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "media-src 'self'; frame-ancestors 'none'"
+    )
+    return response
+
+
+from reel_harness.web.router import router as _ui_router  # noqa: E402
+
+app.include_router(_ui_router)
+
+_static_dir = Path(__file__).resolve().parent.parent / "web" / "static"
+if _static_dir.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

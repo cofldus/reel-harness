@@ -77,7 +77,7 @@ class _Checker:
     _STRICT_IN_PRODUCTION = frozenset({
         "api_authentication", "secret_placeholder", "repo_internal_credential",
         "storage_root_writable", "db_schema", "lease_heartbeat_ratio",
-        "public_upload_feature_flag", "credential_file_permission",
+        "public_upload_feature_flag", "credential_file_permission", "public_bind_security",
     })
 
     def __init__(self, profile: str) -> None:
@@ -332,6 +332,37 @@ def _check_api_authentication(checker: _Checker, settings: Settings) -> None:
         checker.add("api_authentication", "PASS", "app_api_key is set and not a known placeholder")
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _check_public_bind_security(checker: _Checker, settings: Settings) -> None:
+    """The web UI (see reel_harness.web) has no login system -- only CSRF
+    protection for browser-originated requests, the same trust boundary
+    /healthz//status already use. Binding `serve` beyond loopback without
+    that being a deliberate, informed choice is a real exposure: FAIL under
+    `--profile production` whenever app_api_key is still a placeholder (the
+    one credential /v1/* actually checks), and always at least WARN on any
+    non-loopback bind so a plain `preflight` run surfaces it too -- never
+    assume "bound to localhost" is the default just because it usually is."""
+    host = settings.api_host
+    if host in _LOOPBACK_HOSTS:
+        checker.add("public_bind_security", "PASS", f"api_host={host!r} (loopback only)")
+        return
+    if settings.app_api_key.strip().lower() in _PLACEHOLDER_SECRETS:
+        checker.add(
+            "public_bind_security", "WARN",
+            f"api_host={host!r} but app_api_key is a placeholder -- /v1/* would be effectively "
+            "open to the network",
+        )
+        return
+    checker.add(
+        "public_bind_security", "WARN",
+        f"api_host={host!r}: the web UI has no login, only CSRF protection for browser-originated "
+        "requests -- expose only on a trusted network, ideally behind a reverse proxy performing "
+        "real authentication",
+    )
+
+
 def _check_secret_placeholders(checker: _Checker, settings: Settings) -> None:
     candidates = {
         "REEL_HARNESS_LLM_API_KEY": settings.llm_api_key.get_secret_value(),
@@ -380,6 +411,7 @@ def run_preflight(
     _check_public_upload_flag(checker, settings)
     _check_api_authentication(checker, settings)
     _check_secret_placeholders(checker, settings)
+    _check_public_bind_security(checker, settings)
     return PreflightReport(profile=profile, checks=checker.checks)
 
 

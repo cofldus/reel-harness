@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}대시보드 - Reel Harness{% endblock %}
+{% block content %}
+<section class="status-banner status-{{ status.preflight_overall|lower }}" aria-live="polite">
+  <strong>시스템 상태: {{ status.preflight_overall }}</strong>
+  <a href="/system">자세히 보기</a>
+</section>
+
+<section class="hero">
+  <a class="btn btn-primary" href="/jobs/new">새 영상 만들기</a>
+</section>
+
+<section class="stat-tiles">
+  <div class="stat-tile">
+    <span class="stat-value">{{ status.queue_depth }}</span>
+    <span class="stat-label">대기/재시도 중</span>
+  </div>
+  <div class="stat-tile">
+    <span class="stat-value">{{ status.job_status_counts.get("COMPLETED", 0) }}</span>
+    <span class="stat-label">완료</span>
+  </div>
+  <div class="stat-tile">
+    <span class="stat-value">{{ status.job_status_counts.get("FAILED", 0) }}</span>
+    <span class="stat-label">실패</span>
+  </div>
+</section>
+
+<section>
+  <h2>최근 작업</h2>
+  {% if recent_jobs %}
+  <ul class="job-summary-list">
+    {% for job in recent_jobs %}
+    <li class="job-row">
+      <a href="{{ job.detail_url }}">
+        <span class="job-topic">{{ job.topic or "(주제 없음)" }}</span>
+        <span class="badge badge-status">{{ job.status_label }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  <a href="/jobs">전체 작업 목록 보기</a>
+  {% else %}
+  <p class="empty-state">아직 만든 영상이 없습니다. Demo Mode로 첫 영상을 만들어보세요.</p>
+  {% endif %}
+</section>
+{% endblock %}

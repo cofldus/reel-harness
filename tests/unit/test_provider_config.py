@@ -106,6 +106,26 @@ def test_job_persists_the_snapshot_at_creation(session_factory, storage) -> None
         assert stored.provider_config is not snapshot, "each job stores its own copy"
 
 
+def test_create_job_snapshot_override_applies_only_to_that_job(session_factory, storage) -> None:
+    """The web UI's per-job provider-profile choice: an explicit
+    provider_snapshot passed to create_job wins over the service's
+    constructor-level default for that one job, without changing what any
+    other job (or a job created without an override) gets."""
+    default_snapshot = {"llm_provider": "fake", "llm_model": "fake-deterministic-v1", "prompt_version": "v"}
+    service = JobService(session_factory, storage=storage, provider_snapshot=default_snapshot)
+    channel = service.create_channel(name="c", niche="n", language="en")
+
+    override_snapshot = {"llm_provider": "demo", "llm_model": "demo-deterministic-v1", "prompt_version": "v2"}
+    overridden_job, _ = service.create_job(
+        channel.id, idempotency_key="override-1", topic="t", provider_snapshot=override_snapshot,
+    )
+    default_job, _ = service.create_job(channel.id, idempotency_key="default-1", topic="t")
+
+    with session_factory() as session:
+        assert session.get(Job, overridden_job.id).provider_config == override_snapshot
+        assert session.get(Job, default_job.id).provider_config == default_snapshot
+
+
 def test_resolution_honors_fake_snapshot_even_when_env_is_real() -> None:
     """Changing environment variables after job creation must not switch an
     existing job's provider."""

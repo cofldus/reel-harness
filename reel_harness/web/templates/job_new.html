@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}새 영상 만들기 - Reel Harness{% endblock %}
+{% block content %}
+<h1>새 영상 만들기</h1>
+
+<form method="post" action="/jobs" class="job-form" data-disable-on-submit>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+
+  <div class="form-field">
+    <label for="topic">주제</label>
+    <textarea id="topic" name="topic" required maxlength="200">{{ values.get("topic", "") }}</textarea>
+    {% if errors.get("topic") %}<p class="field-error">{{ errors["topic"] }}</p>{% endif %}
+  </div>
+
+  <div class="form-field">
+    <label for="language">언어</label>
+    <select id="language" name="language">
+      {% for lang in languages %}
+      <option value="{{ lang }}" {{ "selected" if values.get("language", "ko") == lang }}>{{ lang }}</option>
+      {% endfor %}
+    </select>
+    {% if errors.get("language") %}<p class="field-error">{{ errors["language"] }}</p>{% endif %}
+  </div>
+
+  <div class="form-field">
+    <label for="duration_seconds">목표 길이(초)</label>
+    <input type="number" id="duration_seconds" name="duration_seconds" min="10" max="180"
+           value="{{ values.get('duration_seconds', 30) }}">
+    {% if errors.get("duration_seconds") %}<p class="field-error">{{ errors["duration_seconds"] }}</p>{% endif %}
+  </div>
+
+  <div class="form-field">
+    <label for="style">영상 스타일</label>
+    <select id="style" name="style">
+      {% for s in styles %}
+      <option value="{{ s }}" {{ "selected" if values.get("style", "general") == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    {% if errors.get("style") %}<p class="field-error">{{ errors["style"] }}</p>{% endif %}
+  </div>
+
+  <fieldset class="form-field">
+    <legend>Provider profile</legend>
+    <label>
+      <input type="radio" name="provider_profile" value="demo"
+             {{ "checked" if values.get("provider_profile", "demo") == "demo" }}>
+      Demo -- API 키 불필요, 실제 음성/자막, 게시 불가
+    </label>
+    <label {{ "class=disabled" if not real_ready }}>
+      <input type="radio" name="provider_profile" value="real" {{ "disabled" if not real_ready }}
+             {{ "checked" if values.get("provider_profile") == "real" }}>
+      Real -- 실제 콘텐츠 (LLM/TTS/스톡미디어 API 필요)
+      {% if not real_ready %}<span class="hint">미설정: {{ real_reason }} (<a href="/settings">설정 안내</a>)</span>{% endif %}
+    </label>
+    {% if fake_visible %}
+    <label>
+      <input type="radio" name="provider_profile" value="fake"
+             {{ "checked" if values.get("provider_profile") == "fake" }}>
+      Fake -- 파이프라인 테스트 전용 (개발자 모드)
+    </label>
+    {% endif %}
+    {% if errors.get("provider_profile") %}<p class="field-error">{{ errors["provider_profile"] }}</p>{% endif %}
+  </fieldset>
+
+  <div class="form-field">
+    <label>
+      <input type="checkbox" name="burn_subtitles" value="true"
+             {{ "checked" if values.get("burn_subtitles", true) }}>
+      자막 번인
+    </label>
+  </div>
+
+  <button type="submit" class="btn btn-primary">영상 생성</button>
+</form>
+{% endblock %}

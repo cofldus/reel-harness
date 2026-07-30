@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./reel_harness.db"
     jobs_dir: Path = Path("./jobs")
     app_api_key: str = "changeme-local-dev-key"
+    # `serve --host` defaults from this (a CLI flag still overrides for a
+    # one-off run) so ops.preflight's public-bind check and the running
+    # server always agree on the same source of truth. The web UI has no
+    # login -- only CSRF protection for browser-originated requests -- so
+    # binding beyond loopback needs a real authenticating reverse proxy in
+    # front of it; see ops.preflight._check_public_bind_security.
+    api_host: str = Field("127.0.0.1", validation_alias=_llm_alias("REEL_HARNESS_API_HOST", "API_HOST"))
     log_level: str = "INFO"
 
     # Worker lease policy. The heartbeat interval must stay well below the

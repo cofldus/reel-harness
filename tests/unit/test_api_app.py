@@ -83,6 +83,85 @@ def test_get_job_assets_requires_api_key_and_exposes_no_local_path(tmp_path) -> 
         app.dependency_overrides.clear()
 
 
+def test_list_jobs_requires_api_key_and_paginates(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        for i in range(3):
+            ctx.jobs.create_job(channel.id, idempotency_key=f"k{i}", topic=f"t{i}")
+
+        unauthed = client.get("/v1/jobs")
+        assert unauthed.status_code == 401
+
+        response = client.get("/v1/jobs?limit=2", headers={"Authorization": "Bearer test-key"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 3
+        assert body["limit"] == 2
+        assert len(body["jobs"]) == 2
+
+        bad_limit = client.get("/v1/jobs?limit=0", headers={"Authorization": "Bearer test-key"})
+        assert bad_limit.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_reject_job_requires_review_required_status(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k-reject", topic="t")
+
+        unauthed = client.post(
+            f"/v1/jobs/{job.id}/reject", json={"reason": "r", "regenerate_from_stage": "SCRIPT"},
+        )
+        assert unauthed.status_code == 401
+
+        response = client.post(
+            f"/v1/jobs/{job.id}/reject", json={"reason": "r", "regenerate_from_stage": "SCRIPT"},
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert response.status_code == 409  # job is QUEUED, not REVIEW_REQUIRED
+
+        missing = client.post(
+            "/v1/jobs/does-not-exist/reject", json={"reason": "r", "regenerate_from_stage": "SCRIPT"},
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert missing.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retry_job_requires_failed_status(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k-retry", topic="t")
+
+        unauthed = client.post(f"/v1/jobs/{job.id}/retry", json={"stage": "SCRIPT"})
+        assert unauthed.status_code == 401
+
+        response = client.post(
+            f"/v1/jobs/{job.id}/retry", json={"stage": "SCRIPT"},
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert response.status_code == 409  # job is QUEUED, not FAILED
+
+        missing = client.post(
+            "/v1/jobs/does-not-exist/retry", json={"stage": "SCRIPT"},
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert missing.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_create_publication_requires_api_key(tmp_path) -> None:
     ctx = _make_ctx(tmp_path)
     app.dependency_overrides[get_context] = lambda: ctx
