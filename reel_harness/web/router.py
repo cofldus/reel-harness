@@ -8,6 +8,11 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from reel_harness.api.app import get_context
 from reel_harness.bootstrap import AppContext
 from reel_harness.config import ProviderConfigurationError, validate_provider_settings
+from reel_harness.core.publish_service import (
+    PublicationInvalidActionError,
+    PublicationNotEligibleError,
+    PublicationNotFoundError,
+)
 from reel_harness.core.service import InvalidActionError, JobNotFoundError
 from reel_harness.core.state_machine import JobStatus
 from reel_harness.web.dependencies import (
@@ -17,7 +22,8 @@ from reel_harness.web.dependencies import (
     require_csrf,
 )
 from reel_harness.web.forms import ALLOWED_LANGUAGES, ALLOWED_STYLES, validate_new_job_form
-from reel_harness.web.publication_view_models import build_publisher_account_view
+from reel_harness.web.publication_forms import validate_create_publication_form
+from reel_harness.web.publication_view_models import build_publish_setup_view, build_publisher_account_view
 from reel_harness.web.view_models import (
     build_job_detail_view,
     build_job_summary_view,
@@ -404,6 +410,104 @@ def job_video(job_id: str, download: int = 0, ctx: AppContext = Depends(get_cont
         path, media_type="video/mp4",
         headers={"Content-Disposition": f'{disposition}; filename="{job_id}.mp4"'},
     )
+
+
+# --- Publish setup and creation -----------------------------------------------
+
+
+def _render_publish_setup_with_errors(
+    request: Request, ctx: AppContext, job, submitted_provider: str, errors: dict, values: dict,
+    status_code: int,
+) -> HTMLResponse:
+    setup = build_publish_setup_view(job, ctx.settings, ctx.credential_backend())
+    return _render(request, "publish_setup.html", {
+        "job": job, "setup": setup, "errors": errors, "submitted_provider": submitted_provider,
+        "values": values,
+    }, status_code=status_code)
+
+
+@router.get("/jobs/{job_id}/publish", response_class=HTMLResponse, response_model=None)
+def job_publish_setup(
+    request: Request, job_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse | RedirectResponse:
+    """Only reachable when the job is actually COMPLETED and currently
+    eligible -- a direct hit otherwise redirects back to the job detail
+    page, whose existing eligibility-reasons banner already explains why
+    (e.g. Demo/Fake output is permanently ineligible), rather than
+    rendering a blank or broken setup form."""
+    try:
+        job = ctx.jobs.get_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    if job.status != JobStatus.COMPLETED.value:
+        return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+    eligibility = ctx.publications.check_eligibility(job_id)
+    if not eligibility.eligible:
+        return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+
+    setup = build_publish_setup_view(job, ctx.settings, ctx.credential_backend())
+    return _render(request, "publish_setup.html", {
+        "job": job, "setup": setup, "errors": {}, "submitted_provider": None, "values": {},
+    })
+
+
+@router.post("/jobs/{job_id}/publications", dependencies=[Depends(require_csrf)], response_model=None)
+def create_publication_web(
+    request: Request, job_id: str,
+    provider: str = Form(""), account_reference: str = Form(""), privacy_status: str = Form(""),
+    confirm_public_upload: bool = Form(False), confirm_platform_options: bool = Form(False),
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse | RedirectResponse:
+    """Server-side validation (validate_create_publication_form) is a
+    friendliness pass only -- PublicationService.create_publication remains
+    the actual authority, and its exceptions (e.g. a race where the
+    account got disconnected between page load and submit) are caught here
+    and re-rendered the same way, never a raw 404/409 JSON body."""
+    try:
+        job = ctx.jobs.get_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+
+    submitted_values = {
+        "account_reference": account_reference, "privacy_status": privacy_status,
+        "confirm_public_upload": confirm_public_upload, "confirm_platform_options": confirm_platform_options,
+    }
+
+    result = validate_create_publication_form(
+        provider, account_reference, privacy_status, confirm_public_upload, confirm_platform_options,
+        settings=ctx.settings, credential_backend=ctx.credential_backend(),
+    )
+    if not result.ok or result.value is None:
+        return _render_publish_setup_with_errors(
+            request, ctx, job, provider, result.errors, submitted_values, status_code=422,
+        )
+
+    value = result.value
+    from reel_harness.providers.registry import publisher_snapshot
+
+    snapshot = publisher_snapshot(ctx.settings, value.provider, value.account_reference)
+    try:
+        pub, _eligibility = ctx.publications.create_publication(
+            job_id, provider=value.provider, account_reference=value.account_reference,
+            publisher_snapshot=snapshot, privacy_status=value.privacy_status,
+            confirm_public_upload=value.confirm_public_upload,
+            public_upload_enabled=ctx.settings.allow_public_upload,
+            confirm_platform_options=value.confirm_platform_options,
+        )
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except PublicationNotEligibleError as exc:
+        errors = {"_eligibility": "; ".join(exc.reasons)}
+        return _render_publish_setup_with_errors(
+            request, ctx, job, provider, errors, submitted_values, status_code=409,
+        )
+    except PublicationInvalidActionError as exc:
+        errors = {"_general": str(exc)}
+        return _render_publish_setup_with_errors(
+            request, ctx, job, provider, errors, submitted_values, status_code=400,
+        )
+
+    return RedirectResponse(url=f"/publications/{pub.id}", status_code=303)
 
 
 # --- Publisher accounts (OAuth connect/disconnect) ---------------------------
