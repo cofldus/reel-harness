@@ -23,7 +23,12 @@ from reel_harness.web.dependencies import (
 )
 from reel_harness.web.forms import ALLOWED_LANGUAGES, ALLOWED_STYLES, validate_new_job_form
 from reel_harness.web.publication_forms import validate_create_publication_form
-from reel_harness.web.publication_view_models import build_publish_setup_view, build_publisher_account_view
+from reel_harness.web.publication_view_models import (
+    build_publication_detail_view,
+    build_publication_summary_view,
+    build_publish_setup_view,
+    build_publisher_account_view,
+)
 from reel_harness.web.view_models import (
     build_job_detail_view,
     build_job_summary_view,
@@ -508,6 +513,75 @@ def create_publication_web(
         )
 
     return RedirectResponse(url=f"/publications/{pub.id}", status_code=303)
+
+
+# --- Publications (list, detail, status polling) ------------------------------
+
+_PUBLICATION_FILTERABLE_STATUSES = (
+    None, "UPLOADING", "PROCESSING", "PUBLISHED", "FAILED", "CANCELLED",
+)
+_PUBLICATION_PAGE_SIZE = 20
+
+
+def _job_topic(ctx: AppContext, job_id: str) -> str | None:
+    try:
+        return ctx.jobs.get_job(job_id).topic
+    except JobNotFoundError:
+        return None
+
+
+@router.get("/publications", response_class=HTMLResponse)
+def publications_list(
+    request: Request, status_filter: str | None = None, provider: str | None = None, page: int = 1,
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    if status_filter not in _PUBLICATION_FILTERABLE_STATUSES:
+        status_filter = None
+    page = max(page, 1)
+    offset = (page - 1) * _PUBLICATION_PAGE_SIZE
+    pubs = ctx.publications.list_publications(
+        status=status_filter, provider=provider or None, limit=_PUBLICATION_PAGE_SIZE, offset=offset,
+    )
+    total = ctx.publications.count_publications(status=status_filter, provider=provider or None)
+    return _render(request, "publications_list.html", {
+        "publications": [build_publication_summary_view(p, _job_topic(ctx, p.job_id)) for p in pubs],
+        "status_filter": status_filter, "provider_filter": provider, "page": page,
+        "has_next": offset + _PUBLICATION_PAGE_SIZE < total, "has_prev": page > 1, "total": total,
+    })
+
+
+def _publication_status_fragment(request: Request, publication_id: str, ctx: AppContext) -> HTMLResponse:
+    try:
+        pub = ctx.publications.get_publication(publication_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}") from exc
+    view = build_publication_detail_view(pub)
+    # Reuses _render (not a bare TemplateResponse), same reason as
+    # web.router._status_fragment for jobs: this fragment's own hidden
+    # csrf_token form fields need a real value on every htmx-swapped
+    # re-render, not just the page's first render.
+    return _render(request, "fragments/publication_status.html", {"publication": view})
+
+
+@router.get("/publications/{publication_id}", response_class=HTMLResponse)
+def publication_detail(
+    request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    try:
+        pub = ctx.publications.get_publication(publication_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}") from exc
+    view = build_publication_detail_view(pub)
+    return _render(request, "publication_detail.html", {
+        "publication": view, "job_topic": _job_topic(ctx, view.job_id),
+    })
+
+
+@router.get("/publications/{publication_id}/status", response_class=HTMLResponse)
+def publication_status_fragment(
+    request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    return _publication_status_fragment(request, publication_id, ctx)
 
 
 # --- Publisher accounts (OAuth connect/disconnect) ---------------------------

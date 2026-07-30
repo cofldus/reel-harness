@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}게시 목록 - Reel Harness{% endblock %}
+{% block content %}
+<h1>게시 목록</h1>
+
+<nav class="filter-chips" aria-label="상태 필터">
+  <a href="/publications" class="chip {{ 'chip-active' if not status_filter }}">전체</a>
+  <a href="/publications?status_filter=UPLOADING" class="chip {{ 'chip-active' if status_filter == 'UPLOADING' }}">업로드 중</a>
+  <a href="/publications?status_filter=PROCESSING" class="chip {{ 'chip-active' if status_filter == 'PROCESSING' }}">처리 중</a>
+  <a href="/publications?status_filter=PUBLISHED" class="chip {{ 'chip-active' if status_filter == 'PUBLISHED' }}">게시 완료</a>
+  <a href="/publications?status_filter=FAILED" class="chip {{ 'chip-active' if status_filter == 'FAILED' }}">실패</a>
+  <a href="/publications?status_filter=CANCELLED" class="chip {{ 'chip-active' if status_filter == 'CANCELLED' }}">취소</a>
+</nav>
+
+{% if publications %}
+<table class="publication-table">
+  <thead>
+    <tr><th>작업</th><th>플랫폼</th><th>상태</th><th>생성 시간</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for pub in publications %}
+    <tr>
+      <td>{{ pub.job_topic or "(주제 없음)" }}</td>
+      <td>{{ pub.provider_display }}</td>
+      <td><span class="badge badge-status">{{ pub.status_label }}</span></td>
+      <td>{{ pub.created_at }}</td>
+      <td><a href="{{ pub.detail_url }}">열기</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<nav class="pagination" aria-label="페이지 이동">
+  {% if has_prev %}
+  <a href="/publications?page={{ page - 1 }}{{ '&status_filter=' ~ status_filter if status_filter else '' }}">이전</a>
+  {% endif %}
+  <span>{{ page }} 페이지 (총 {{ total }}개)</span>
+  {% if has_next %}
+  <a href="/publications?page={{ page + 1 }}{{ '&status_filter=' ~ status_filter if status_filter else '' }}">다음</a>
+  {% endif %}
+</nav>
+{% else %}
+<p class="empty-state">해당 상태의 게시가 없습니다.</p>
+{% endif %}
+{% endblock %}

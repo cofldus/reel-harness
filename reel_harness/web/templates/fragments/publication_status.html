@@ -1,0 +1,35 @@
+<div id="publication-status"
+     {% if not publication.is_terminal and not publication.needs_action %}
+     hx-get="/publications/{{ publication.publication_id }}/status"
+     hx-trigger="every 2s [document.visibilityState=='visible']" hx-swap="outerHTML"
+     {% endif %}>
+
+  <div class="status-header">
+    <span class="badge badge-status">{{ publication.status_label }}</span>
+    <span class="stage-label">{{ publication.provider_display }} / {{ publication.account_reference }}</span>
+  </div>
+  <p class="meta">
+    공개 범위: {{ publication.privacy_status_label or "-" }}
+    {% if publication.retry_count %} · 재시도 {{ publication.retry_count }}회{% endif %}
+  </p>
+
+  {% if publication.total_bytes and not publication.is_terminal %}
+  <p class="meta">업로드 진행: {{ publication.bytes_uploaded }} / {{ publication.total_bytes }} bytes</p>
+  {% endif %}
+
+  {% if publication.failure_summary %}
+  <div class="alert alert-error" role="alert">
+    <p>{{ publication.failure_summary }}</p>
+    <details>
+      <summary>기술 세부정보</summary>
+      <dl><dt>failure_code</dt><dd>{{ publication.failure_code }}</dd></dl>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if publication.publication_url %}
+  <p><a href="{{ publication.publication_url }}" target="_blank" rel="noopener noreferrer">게시된 영상 보기</a></p>
+  {% elif publication.provider_video_id %}
+  <p class="meta">provider_video_id: {{ publication.provider_video_id }}</p>
+  {% endif %}
+</div>
