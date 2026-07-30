@@ -945,6 +945,84 @@ manifest) are preserved for post-mortem with `approval.decision` staying
 `null` and `publish_eligible=false`; approve/reject/retry/re-cancel are all
 refused once a job is `CANCELLED`.
 
+## Web UI (Phase 5A)
+
+`reel-harness serve` mounts a server-rendered web UI (Jinja2 + HTMX +
+vanilla JS, zero Node/SPA build step) onto the same FastAPI app as the
+JSON API and ops endpoints — there is no separate `web` command. Open
+`http://<host>:<port>/` (default `http://127.0.0.1:8000/`) after `serve`
+starts.
+
+**Routes**: full pages (`/`, `/jobs`, `/jobs/new`, `/jobs/{id}`, `/system`,
+`/settings`) plus HTMX fragment/action endpoints under the same
+`/jobs/{id}/...` path space (`status`, `cancel`, `approve`, `reject`,
+`retry`, `video`) and static assets under `/static/*`. None of this
+overlaps the existing `/v1/*` JSON API or the top-level ops routes
+(`/healthz`, `/readyz`, `/status`, `/metrics`) — the web UI is purely
+additive.
+
+**In-process, not a second API client**: web routes call `AppContext`
+(`ctx.jobs`, `ctx.storage`, `ctx.publications`) directly, the same way the
+CLI does — never an HTTP self-call to `/v1/*`.
+
+**Security model — deliberately not a login system**: the web UI has no
+accounts, matching this tool's local-first single-user design (same trust
+boundary `/healthz`/`/status` already use — unauthenticated in the "who are
+you" sense). What it does add is CSRF hardening: a double-submit cookie
+(`rh_csrf`, `SameSite=Strict`) plus a matching `X-CSRF-Token` header/hidden
+form field on every mutating request, checked by a `require_csrf`
+dependency independent of `/v1/*`'s `require_api_key` bearer-token gate.
+This defends against a different attacker than `require_api_key` does — a
+malicious page open in another browser tab, not a network attacker who can
+already reach the port. Every response also carries
+`X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, and a
+`Content-Security-Policy` with no inline script/style (HTMX is vendored at
+`reel_harness/web/static/htmx.min.js`, never loaded from a CDN).
+
+**Binding beyond loopback**: `Settings.api_host` (`REEL_HARNESS_API_HOST`,
+default `127.0.0.1`) is what `serve --host` defaults from when `--host` is
+not explicitly passed, so `preflight` and the running server always agree
+on the same source of truth. `preflight`'s `public_bind_security` check
+WARNs (any profile) or FAILs (`--profile production`) when bound beyond
+loopback — the web UI having no login is a real exposure if the port is
+reachable from an untrusted network; put a real authenticating reverse
+proxy in front of it before doing that.
+
+**Provider profile per job**: the New Job form's Demo/Real/Fake choice is a
+genuine per-job override (`JobService.create_job`'s optional
+`provider_snapshot` parameter), independent of whatever `REEL_HARNESS_
+LLM_PROVIDER`/etc. the process was started with. Real is only selectable
+when `openai-compatible` LLM/TTS + Pexels are actually configured (checked
+fresh per page render); Fake is hidden entirely unless
+`REEL_HARNESS_UI_SHOW_FAKE_PROFILE=true` is set (an env flag, not a UI
+toggle — Fake is a pipeline-test tool, not an end-user mode).
+
+**Video streaming**: `GET /jobs/{id}/video` (`?download=1` for
+`Content-Disposition: attachment`) uses Starlette's `FileResponse`, which
+already implements HTTP Range/206 support — no hand-rolled byte-range
+code. The filesystem path is resolved exclusively through
+`LocalFilesystemStorage.path_for()` (UUID-validated, traversal-safe); the
+route never accepts a client-supplied path.
+
+**Packaging**: `reel_harness/web/templates/` and `reel_harness/web/static/`
+ship inside the wheel via an explicit `[tool.hatch.build.targets.wheel]
+artifacts` entry in `pyproject.toml` — there were zero non-`.py` files
+under `reel_harness/` before this, so this is not implicit. Verify after
+any packaging change: `uv build`, then check the wheel's file listing
+actually includes `templates/`/`static/`, then a clean-venv install +
+`python -m reel_harness.cli.main serve` + browser check (the same
+discipline used for every release in this project). New runtime
+dependencies: `jinja2`, `python-multipart` (both in `[project].dependencies`,
+always installed). Browser E2E tests
+(`tests/e2e/test_web_ui_playwright.py`) need the separate `e2e-browser`
+extra plus `playwright install chromium` — never required for normal use
+or the rest of the test suite.
+
+**Scope**: Phase 5A covers Demo-Mode generation end to end (create → watch
+progress → review → approve/reject/retry/cancel → download). Real-platform
+publishing (account selection, OAuth connect, per-platform options) has no
+web UI yet — CLI-only (`publisher-auth`, `publish-job`) until Phase 5B.
+
 ## Health and readiness
 
 - `GET /healthz` — shallow liveness.

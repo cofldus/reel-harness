@@ -63,7 +63,15 @@ reel_harness/
     lease.py                      lease_next_job(), recover_stale_jobs()
     runner.py                     run_job() — the actual per-job orchestration loop
   cli/main.py                     argparse CLI (reel-harness ...)
-  api/app.py                      FastAPI app (healthz, /v1/jobs, cancel/approve)
+  api/app.py                      FastAPI app (healthz, /v1/jobs, cancel/approve); also the sole
+                                   FastAPI() composition root -- mounts web/router.py + StaticFiles
+  web/                             Server-rendered web UI (Phase 5A) -- Jinja2 + HTMX + vanilla JS,
+                                   zero Node/SPA build step. router.py (pages + HTMX fragment/action
+                                   routes, mounted onto api/app.py's app via include_router at import
+                                   time), view_models.py (plain dataclasses, never raw ORM to
+                                   templates), labels.py (the one enum -> user-facing-string mapping
+                                   table), dependencies.py (CSRF), templates/, static/ (incl. vendored
+                                   htmx.min.js, no CDN) -- see docs/OPERATIONS.md's Web UI section
 ```
 
 ## State machine

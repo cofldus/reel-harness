@@ -8,7 +8,7 @@ Reel Harness는 사용자가 주제와 원하는 영상 방향을 입력하면 �
 
 ## 현재 범위
 
-웹 UI는 아직 범위 밖입니다. 현재 Reel Harness는 완성된 SaaS 화면이라기보다 **CLI + FastAPI 기반의 영상 자동화 백엔드**에 가깝습니다.
+`reel-harness serve`를 실행하면 브라우저에서 주제 입력부터 진행 상태 확인, 완성 영상 재생·다운로드까지 클릭만으로 가능합니다(Phase 5A MVP). 다만 실제 플랫폼 게시(YouTube/TikTok/Instagram 계정 연결, 게시 옵션)는 아직 CLI 전용이며 웹 화면은 Phase 5B로 예정돼 있습니다. 실제 provider(OpenAI-compatible LLM/TTS, Pexels) 자격 증명 입력도 웹에서는 안내만 하고, 값 입력은 여전히 환경변수/`.env`로 합니다.
 
 ## 로컬에서 실행하기
 
@@ -25,6 +25,26 @@ uv run reel-harness serve
 ```
 
 즉, DB를 따로 구축하지 않아도 로컬 테스트는 바로 돌아가지만, 별도의 배포 설정 없이는 다른 사람이 접속하는 실제 운영 서비스로 굴러가지는 않습니다. 실제 운영 환경으로 배포하기 전에는 `reel-harness preflight --profile production`으로 API 키·자격 증명·저장소 설정을 먼저 점검하세요.
+
+## 웹 UI로 실행하기 (터미널 명령 없이)
+
+`serve`는 API·워커와 함께 웹 UI도 같은 프로세스에서 띄웁니다. 별도의 `web` 명령은 없습니다.
+
+```
+uv run reel-harness serve
+```
+
+브라우저에서 `http://127.0.0.1:8000/`을 열면:
+
+1. 대시보드에서 "새 영상 만들기" 클릭
+2. 주제·언어·길이·스타일 입력 (기본값은 API 키가 필요 없는 Demo Mode)
+3. 생성 후 자동으로 진행 상태 화면으로 이동, 2초 간격으로 자동 갱신 (완료/실패/검수 필요 시 자동 정지)
+4. 완성되면 화면에서 바로 재생, 다운로드 버튼으로 MP4 저장
+5. 검수 화면에서 승인/반려/재시도/취소
+
+Windows에서 이 저장소처럼 Application Control 정책이 `reel-harness.exe` 실행을 막는 환경이라면 `python -m reel_harness.cli.main serve`로 실행하세요 (같은 UI가 뜹니다).
+
+로컬 단일 사용자 도구이므로 로그인 화면은 없습니다. 대신 브라우저 기반 CSRF 방어(더블서밋 쿠키)가 모든 변경 요청(생성/승인/취소/재시도/반려)에 적용됩니다. `REEL_HARNESS_API_HOST`를 loopback(127.0.0.1) 밖으로 바꿔 다른 기기에서 접속하게 하려면 `reel-harness preflight`가 그 사실을 경고/차단(운영 프로파일)하니, 신뢰할 수 있는 네트워크 안에서만 열거나 앞단에 실제 인증을 하는 리버스 프록시를 두세요.
 
 ## Demo Mode — API 키 없이 실제 결과물 눈으로 확인하기
 
