@@ -214,6 +214,7 @@ def run_rendering(
     job, assets: list[AssetFetchResult], tts_results: list[TTSResult], storage,
     width: int = RENDER_WIDTH, height: int = RENDER_HEIGHT,
     output_path: Path | None = None,
+    burn_subtitles: bool = False,
 ) -> RenderOutput:
     """`width`/`height` default to the fast-test resolution used by the normal
     per-job pipeline. A separate production-smoke check calls this with
@@ -225,6 +226,13 @@ def run_rendering(
     (removing any stale copy first). The fenced worker instead passes a
     worker-private temp path and promotes it to the official name only after
     proving it still owns the lease -- see worker.runner.
+
+    `burn_subtitles` (Settings.render_burn_subtitles, off by default -- see
+    ProviderBundle.render_burn_subtitles) overlays each scene's
+    Script.subtitle text via ffmpeg drawtext. This is a generic pipeline
+    feature, not tied to any one provider (see providers/registry.py's own
+    rule against vendor-name branching outside the registry) -- it is simply
+    most useful with Demo Mode's silent-colored-placeholder output.
     """
     deps = check_ffmpeg_available()
     if not deps.ffmpeg_available:
@@ -242,9 +250,35 @@ def run_rendering(
 
     work_dir = storage.job_dir(job.id) / "render"
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # A Windows absolute path's drive-letter colon cannot survive ffmpeg's
+    # own filtergraph option-value escaping in practice (verified against a
+    # real ffmpeg build -- every backslash-escaping variant still terminated
+    # the option early at the colon). The caption text file and the font
+    # file are therefore written into work_dir itself and referenced by bare
+    # filename with `cwd=work_dir` passed to the ffmpeg subprocess -- see
+    # media.ffmpeg_render._drawtext_filter's docstring.
+    font_file_name: str | None = None
+    if burn_subtitles:
+        from reel_harness.media.deps import resolve_font_path
+
+        resolved_font = resolve_font_path()
+        if resolved_font is not None:
+            font_file_name = "caption_font" + resolved_font.suffix
+            font_dest = work_dir / font_file_name
+            if not font_dest.exists():
+                font_dest.write_bytes(resolved_font.read_bytes())
+
     clip_paths: list[Path] = []
     for asset, tts_result in zip(assets, tts_results, strict=True):
         clip_path = work_dir / f"scene_{asset.scene_index}.mp4"
+        subtitle_file_name: str | None = None
+        run_cwd: str | None = None
+        if burn_subtitles:
+            subtitle_text = job.script["scenes"][asset.scene_index]["subtitle"]
+            subtitle_file_name = f"subtitle_{asset.scene_index}.txt"
+            (work_dir / subtitle_file_name).write_text(subtitle_text, encoding="utf-8")
+            run_cwd = str(work_dir)
         if asset.mime_type.startswith("video/"):
             # Real stock-video asset (already normalized to H.264/yuv420p/
             # muted at ASSET time -- see media.asset_video): loop it
@@ -255,12 +289,14 @@ def run_rendering(
             # docs/OPERATIONS.md).
             argv = ffmpeg_render.render_scene_clip_from_video(
                 ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
+                subtitle_file_name=subtitle_file_name, font_file_name=font_file_name,
             )
         else:
             argv = ffmpeg_render.render_scene_clip(
                 ffmpeg_path, asset.local_path, tts_result.audio_path, clip_path, width, height,
+                subtitle_file_name=subtitle_file_name, font_file_name=font_file_name,
             )
-        result = run(argv, timeout=60)
+        result = run(argv, cwd=run_cwd, timeout=60)
         if result.returncode != 0:
             raise TransientProviderError(f"ffmpeg scene render failed: {result.stderr[-500:]}")
         clip_paths.append(clip_path)

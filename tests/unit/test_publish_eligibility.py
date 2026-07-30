@@ -148,6 +148,22 @@ def test_fake_license_fails_closed(eligible_job, session_factory, storage) -> No
 
 
 @pytest.mark.skipif(not FFMPEG_PRESENT, reason="requires real ffmpeg")
+def test_demo_license_fails_closed(eligible_job, session_factory, storage) -> None:
+    job, manifest, checksum = eligible_job
+    manifest.assets = [AssetInfo(
+        scene_index=0, source_url="demo://x", author="A", license_type="DEMO_TEST_LICENSE",
+        checksum_sha256="a" * 64, commercial_use_allowed=True, modification_allowed=True,
+        attribution_text="x",
+    )]
+    write_manifest(storage, job.id, manifest)
+    with session_factory() as session:
+        db_job = session.get(Job, job.id)
+        result = check_publish_eligibility(session, db_job, storage)
+    assert result.eligible is False
+    assert "ASSET_LICENSE_NOT_PUBLISHABLE" in result.reasons
+
+
+@pytest.mark.skipif(not FFMPEG_PRESENT, reason="requires real ffmpeg")
 def test_missing_license_fails_closed(eligible_job, session_factory, storage) -> None:
     job, manifest, checksum = eligible_job
     manifest.assets = [AssetInfo(

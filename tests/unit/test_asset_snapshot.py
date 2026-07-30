@@ -70,6 +70,16 @@ def test_resolution_honors_fake_snapshot_even_when_env_is_real() -> None:
     assert provider.provider_id == "fake"
 
 
+def test_demo_asset_snapshot_shape_and_resolution() -> None:
+    snapshot = asset_provider_snapshot(_settings(asset_provider="demo"))
+    assert snapshot["asset_provider"] == "demo"
+    assert "asset_adapter_version" in snapshot
+    validate_provider_settings(_settings(asset_provider="demo"))
+
+    provider = resolve_stock_media_for_snapshot({"asset_provider": "demo"}, _real_asset_settings())
+    assert provider.provider_id == "demo"
+
+
 def test_legacy_snapshots_without_asset_block_fall_back_to_current_settings() -> None:
     """Jobs created before the asset block existed keep working: an LLM/TTS-only
     snapshot resolves the stock-media provider from current settings."""

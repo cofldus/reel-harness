@@ -224,6 +224,17 @@ def _check_ffmpeg(checker: _Checker) -> None:
     )
 
 
+def _check_demo_tts(checker: _Checker) -> None:
+    """WARN, never FAIL -- unlike ffmpeg (required by every render regardless
+    of provider), a local TTS engine is only needed if Demo Mode is actually
+    selected (tts_provider=demo). Missing it is not a baseline readiness
+    problem."""
+    from reel_harness.providers.demo_tts import check_demo_tts_available
+
+    status = check_demo_tts_available()
+    checker.add("demo_tts", "PASS" if status.available else "WARN", status.detail)
+
+
 def _check_runtime_dependencies(checker: _Checker) -> None:
     missing = []
     for module in ("httpx", "fastapi", "sqlalchemy", "pydantic", "pydantic_settings", "uvicorn"):
@@ -361,6 +372,7 @@ def run_preflight(
     _check_credential_and_journal_roots(checker, settings)
     _check_env_file_permission(checker)
     _check_ffmpeg(checker)
+    _check_demo_tts(checker)
     _check_runtime_dependencies(checker)
     _check_provider_registry(checker)
     _check_worker_settings(checker, settings)

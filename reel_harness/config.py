@@ -146,6 +146,17 @@ class Settings(BaseSettings):
     asset_safe_search: bool = Field(
         True, validation_alias=_llm_alias("REEL_HARNESS_ASSET_SAFE_SEARCH", "ASSET_SAFE_SEARCH"))
 
+    # Generic render-stage feature, independent of which provider produced a
+    # scene's asset/audio (see providers/registry.py's own rule against
+    # vendor-name branching outside the registry): burns each scene's
+    # Script.subtitle text into the rendered video via ffmpeg's drawtext
+    # filter (media/ffmpeg_render.py). Off by default so every existing
+    # fake/real pipeline's rendered output is unchanged unless explicitly
+    # opted in -- primarily useful for Demo Mode, where it turns a silent
+    # colored placeholder into something with readable on-screen captions.
+    render_burn_subtitles: bool = Field(
+        False, validation_alias=_llm_alias("REEL_HARNESS_RENDER_BURN_SUBTITLES", "RENDER_BURN_SUBTITLES"))
+
     # Publisher (Phase 3A) global safety switch: `public` privacy uploads are
     # refused (core.publish_service.PublicationService.create_publication)
     # unless this AND the caller's own explicit --confirm-public-upload are
@@ -311,11 +322,11 @@ class Settings(BaseSettings):
 
 def _validate_llm_settings(settings: Settings) -> None:
     name = normalize_provider_name(settings.llm_provider)
-    if name == "fake":
+    if name in ("fake", "demo"):
         return
     if name != "openai-compatible":
         raise ProviderConfigurationError(
-            f"unknown llm provider {settings.llm_provider!r} (supported: fake, openai_compatible)"
+            f"unknown llm provider {settings.llm_provider!r} (supported: fake, demo, openai_compatible)"
         )
     missing = [
         var for var, value in (
@@ -346,11 +357,11 @@ def _validate_tts_settings(settings: Settings) -> None:
         raise ProviderConfigurationError("tts retry count must not be negative")
 
     name = normalize_provider_name(settings.tts_provider)
-    if name == "fake":
+    if name in ("fake", "demo"):
         return
     if name != "openai-compatible":
         raise ProviderConfigurationError(
-            f"unknown tts provider {settings.tts_provider!r} (supported: fake, openai_compatible)"
+            f"unknown tts provider {settings.tts_provider!r} (supported: fake, demo, openai_compatible)"
         )
     missing = [
         var for var, value in (
@@ -389,11 +400,11 @@ def _validate_asset_settings(settings: Settings) -> None:
         )
 
     name = normalize_provider_name(settings.asset_provider)
-    if name == "fake":
+    if name in ("fake", "demo"):
         return
     if name != "pexels":
         raise ProviderConfigurationError(
-            f"unknown asset provider {settings.asset_provider!r} (supported: fake, pexels)"
+            f"unknown asset provider {settings.asset_provider!r} (supported: fake, demo, pexels)"
         )
     missing = [
         var for var, value in (

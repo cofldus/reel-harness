@@ -20,6 +20,10 @@ from reel_harness.providers.base import (
     UploadChunkResult,
     UploadSessionHandle,
 )
+from reel_harness.providers.demo_llm import PROMPT_VERSION as DEMO_PROMPT_VERSION
+from reel_harness.providers.demo_llm import DemoLLMProvider
+from reel_harness.providers.demo_stock_media import DemoStockMediaProvider
+from reel_harness.providers.demo_tts import DemoTTSProvider
 from reel_harness.providers.fake_llm import PROMPT_VERSION as FAKE_PROMPT_VERSION
 from reel_harness.providers.fake_llm import FakeLLMProvider
 from reel_harness.providers.fake_publisher import FakePublisher
@@ -117,6 +121,12 @@ def llm_provider_snapshot(settings: Settings | None) -> dict:
             "llm_model": FakeLLMProvider.model_id,
             "prompt_version": FAKE_PROMPT_VERSION,
         }
+    if name == "demo":
+        return {
+            "llm_provider": "demo",
+            "llm_model": DemoLLMProvider.model_id,
+            "prompt_version": DEMO_PROMPT_VERSION,
+        }
     from reel_harness.providers.openai_compatible_llm import PROMPT_VERSION
 
     assert settings is not None
@@ -149,6 +159,14 @@ def tts_provider_snapshot(settings: Settings | None) -> dict:
             "tts_model": "fake-tts-v1",
             "tts_voice": "fake-voice-1",
             "tts_adapter_version": "fake-tts-v1",
+            "tts_output_policy": output_policy,
+        }
+    if name == "demo":
+        return {
+            "tts_provider": "demo",
+            "tts_model": "demo-tts-local-v1",
+            "tts_voice": "demo-auto-selected",
+            "tts_adapter_version": "demo-tts-local-v1",
             "tts_output_policy": output_policy,
         }
     from reel_harness.providers.openai_compatible_tts import ADAPTER_VERSION
@@ -189,6 +207,14 @@ def asset_provider_snapshot(settings: Settings | None) -> dict:
             "asset_query_version": ASSET_QUERY_VERSION,
             "asset_selection_version": ASSET_SELECTION_VERSION,
         }
+    if name == "demo":
+        return {
+            "asset_provider": "demo",
+            "asset_adapter_version": "demo-stock-media-v1",
+            "asset_search_policy": search_policy,
+            "asset_query_version": ASSET_QUERY_VERSION,
+            "asset_selection_version": ASSET_SELECTION_VERSION,
+        }
     from reel_harness.providers.pexels_stock_media import ADAPTER_VERSION
 
     assert settings is not None
@@ -224,6 +250,8 @@ def resolve_stock_media_for_snapshot(snapshot: dict | None, settings: Settings |
     name = normalize_provider_name(snapshot.get("asset_provider"))
     if name == "fake":
         return FakeStockMediaProvider()
+    if name == "demo":
+        return DemoStockMediaProvider()
     if name != "pexels":
         return _UnconfiguredStockMediaProvider(
             f"job is pinned to asset provider {name!r}, which is not registered"
@@ -255,6 +283,8 @@ def resolve_tts_for_snapshot(snapshot: dict | None, settings: Settings | None) -
     name = normalize_provider_name(snapshot.get("tts_provider"))
     if name == "fake":
         return FakeTTSProvider()
+    if name == "demo":
+        return DemoTTSProvider()
     if name != "openai-compatible":
         return _UnconfiguredTTSProvider(
             f"job is pinned to tts provider {name!r}, which is not registered"
@@ -292,6 +322,8 @@ def resolve_llm_for_snapshot(snapshot: dict | None, settings: Settings | None) -
     name = normalize_provider_name(snapshot.get("llm_provider"))
     if name == "fake":
         return FakeLLMProvider()
+    if name == "demo":
+        return DemoLLMProvider()
     if name != "openai-compatible":
         return _UnconfiguredLLMProvider(
             f"job is pinned to llm provider {name!r}, which is not registered"
@@ -365,14 +397,17 @@ def _build_pexels_stock_media(settings: Settings | None) -> StockMediaProvider:
 # was chosen.
 LLM_PROVIDERS: dict[str, Callable[[Settings | None], LLMProvider]] = {
     "fake": lambda settings: FakeLLMProvider(),
+    "demo": lambda settings: DemoLLMProvider(),
     "openai-compatible": _build_openai_compatible_llm,
 }
 TTS_PROVIDERS: dict[str, Callable[[Settings | None], TTSProvider]] = {
     "fake": lambda settings: FakeTTSProvider(),
+    "demo": lambda settings: DemoTTSProvider(),
     "openai-compatible": _build_openai_compatible_tts,
 }
 STOCK_MEDIA_PROVIDERS: dict[str, Callable[[Settings | None], StockMediaProvider]] = {
     "fake": lambda settings: FakeStockMediaProvider(),
+    "demo": lambda settings: DemoStockMediaProvider(),
     "pexels": _build_pexels_stock_media,
 }
 

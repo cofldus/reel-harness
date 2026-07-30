@@ -1,7 +1,81 @@
 # Status
 
-Last updated: 2026-07-29 (Phase 4B live-verification session; `v0.1.0`
-tagged on `main`). Phase 2A through Phase 4A are merged into `main`.
+Last updated: 2026-07-30 (Phase 4C Demo Mode session, on branch
+`phase4/release-candidate`). Phase 2A through Phase 4B are merged into
+`main` as of `v0.1.0`.
+
+## Phase 4C — Demo Mode
+
+Not a new content/publishing provider in the Phase 2/3 sense -- a new
+`provider_id = "demo"` tier (LLM/TTS/stock-media, registered in
+`providers/registry.py` parallel to `fake`/the real providers) that
+produces genuinely watchable/audible output with zero external API calls
+or credentials, addressing a real gap found while manually demoing the
+service to the user: a `fake`-provider job renders a silent, flat-color
+video that proves the pipeline mechanics work but is useless for judging
+actual UX.
+
+- **`reel_harness/providers/demo_llm.py`**: deterministic, no-network
+  script generation (same non-LLM approach as `FakeLLMProvider`), but
+  writes subtitle text that embeds the real topic (`"{i+1}/{n}: {topic}"`)
+  so burned-in captions are meaningful.
+- **`reel_harness/providers/demo_stock_media.py`**: synthetic per-scene
+  images from a fixed 16-color high-contrast palette (not
+  `FakeStockMediaProvider`'s raw hash-derived RGB, which frequently landed
+  on visually-similar dark colors) -- reuses `fake_stock_media.py`'s
+  from-scratch PNG builder. Every asset is stamped `DEMO_TEST_LICENSE`.
+- **`reel_harness/providers/demo_tts.py`**: real, audible speech via
+  `pyttsx3` (SAPI5 on Windows, espeak/espeak-ng on Linux) -- fully offline,
+  no API key. New optional dependency (`uv sync --extra demo`), never
+  required by the default/fake/real pipelines. Best-effort voice-by-language
+  matching (`voice.languages`, never `voice.id` -- a Windows SAPI5 voice
+  id's fixed `...\Voices\Tokens\...` registry-path segment spuriously
+  contains "en", found by actually testing against real installed voices,
+  not assumed). Missing engine raises `DependencyError`
+  (`BLOCKED_DEPENDENCY`), mirroring ffmpeg-missing handling exactly.
+- **`Settings.render_burn_subtitles`** (default `False`): a generic,
+  provider-agnostic pipeline flag -- burns `Scene.subtitle` onto the video
+  via ffmpeg `drawtext`. Deliberately NOT a `demo`-provider-name branch in
+  `pipeline/stages.py` (`registry.py`'s own rule: vendor names never
+  checked outside the registry); works with any provider combination.
+  `media/ffmpeg_render.py`'s `_drawtext_filter` references the caption
+  text file and font file by **bare filename only, with `cwd` set to their
+  directory** -- a Windows absolute path's drive-letter colon could not be
+  made to survive ffmpeg's filtergraph option-value escaping in practice
+  (every backslash-escaping variant tried against a real ffmpeg build still
+  terminated the option early at the colon); the relative-path/cwd approach
+  was verified working by direct ffmpeg invocation before being written
+  into the pipeline. `media/deps.py`'s new `resolve_font_path()` mirrors
+  `check_ffmpeg_available()`'s resolution order (env var -> project-local
+  `.tools/fonts/` -> platform default -> `font=sans-serif` fontconfig
+  fallback, never a hard failure).
+- **License gate**: `DEMO_TEST_LICENSE` added to
+  `manifest.schema.NON_PUBLISHABLE_LICENSES` alongside `FAKE_TEST_LICENSE`
+  -- Demo Mode assets can never pass real publish eligibility, same
+  invariant as Fake provider assets (see `CLAUDE.md`).
+  `reel-harness demo-run` (new CLI command): channel-create (if needed) +
+  job-create + drive-to-terminal-status in one command, collapsing the
+  manual create/lease/inspect loop used to first demonstrate this to the
+  user.
+- **CI**: `espeak-ng` installed on the Ubuntu runner (mirrors the existing
+  ffmpeg apt-get step) and `uv sync --extra demo` added to the main test
+  job so demo-TTS tests actually run in CI rather than always skipping;
+  Windows CI already ships SAPI5.
+- **A real environment bug found and fixed mid-session**: an earlier
+  `uv sync ... --no-install-project` call left the editable install's
+  `_editable_impl_reel_harness.pth` as an un-renamed `.pth.tmp`, breaking
+  `import reel_harness` for any subprocess NOT launched through `uv run`
+  (e.g. `tests/e2e/test_supervisor_subprocess_e2e.py`'s real `sys.executable`
+  subprocess). Fixed by a full `uv sync --extra dev --extra demo` (no
+  `--no-install-project`) followed by the documented CP949 re-encode of the
+  `.pth` file (see the `venv-cp949-pth-workaround` memory / this file's
+  Windows+non-ASCII-path note below) -- unrelated to Demo Mode's own code,
+  but found and fixed in the course of this session's own regression run.
+- **Verification**: real `demo-run` executions inspected directly --
+  extracted video frames read back as images (distinct palette colors per
+  scene, readable burned-in Korean captions), `ffprobe`/`volumedetect`
+  confirmed genuinely non-silent audio (~-21dB mean, not the ~-91dB silence
+  floor). Full suite 956 passed/1 skipped, mypy/ruff clean.
 
 ## Phase 4B — Live platform verification and v0.1.0 release
 

@@ -3,8 +3,39 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def _drawtext_filter(subtitle_file_name: str, font_file_name: str | None) -> str:
+    """Builds a drawtext filter referencing FILENAMES ONLY (never a full
+    path). A Windows absolute path's drive-letter colon (`C:\\...`) cannot
+    be made to survive ffmpeg's own filtergraph option-value escaping in
+    practice -- every documented backslash-escaping variant (`\\:`, `\\\\:`,
+    `\\\\\\:`, quoting the value in `'...'`) was tried against a real
+    ffmpeg build and each one still terminated the option early at the
+    colon. A bare relative filename has no colon at all, so this sidesteps
+    the problem entirely -- the caller (pipeline.stages.run_rendering) is
+    responsible for writing the subtitle text file and the font file into
+    the SAME directory it passes as `cwd` to media.runner.run() for this
+    render call."""
+    parts = [f"textfile={subtitle_file_name}"]
+    if font_file_name:
+        parts.append(f"fontfile={font_file_name}")
+    else:
+        # No resolved font file -- ffmpeg's own fontconfig fallback (the
+        # local build has --enable-fontconfig) picks some installed
+        # sans-serif rather than failing outright.
+        parts.append("font=sans-serif")
+    parts.extend([
+        # fontsize as a w-relative expression (not a fixed pixel count) so a
+        # caption fits both the fast-test 360-wide render and a real
+        # 1080-wide one without separately tuning each.
+        "fontcolor=white", "fontsize=w/16", "box=1", "boxcolor=black@0.5", "boxborderw=(w/60)",
+        "x=(w-text_w)/2", "y=h-th-(h/12)",
+    ])
+    return "drawtext=" + ":".join(parts)
+
+
 def render_scene_clip(
     ffmpeg_path: Path, image_path: Path, audio_path: Path, output_path: Path, width: int, height: int,
+    subtitle_file_name: str | None = None, font_file_name: str | None = None,
 ) -> list[str]:
     """Builds the ffmpeg argv for a single still-image-plus-audio scene clip.
 
@@ -13,11 +44,19 @@ def render_scene_clip(
     .tools/ffmpeg/bin copy is actually honored rather than silently falling
     back to whatever "ffmpeg" resolves to on PATH.
 
-    Phase 1 scope note: this proves the ffmpeg integration end-to-end (image + TTS
-    audio -> portrait mp4) but does not yet burn in subtitles or mix BGM. Subtitle
-    overlay and BGM mixing are extension points for a later phase (see
-    docs/ARCHITECTURE.md) once real script/asset content exists to render.
+    `subtitle_file_name` (Settings.render_burn_subtitles, off by default)
+    burns that text onto the video via drawtext -- see `_drawtext_filter`'s
+    docstring for why it must be a bare filename, not a path, and why the
+    caller must invoke this argv with `cwd` set to that filename's directory.
+    BGM mixing remains an extension point for a later phase (see
+    docs/ARCHITECTURE.md).
     """
+    filters = [
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+    ]
+    if subtitle_file_name:
+        filters.append(_drawtext_filter(subtitle_file_name, font_file_name))
     return [
         str(ffmpeg_path), "-y",
         "-loop", "1", "-i", str(image_path),
@@ -25,10 +64,7 @@ def render_scene_clip(
         "-c:v", "libx264", "-tune", "stillimage",
         "-c:a", "aac", "-b:a", "128k",
         "-pix_fmt", "yuv420p",
-        "-vf", (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-        ),
+        "-vf", ",".join(filters),
         "-shortest",
         str(output_path),
     ]
@@ -36,6 +72,7 @@ def render_scene_clip(
 
 def render_scene_clip_from_video(
     ffmpeg_path: Path, video_path: Path, audio_path: Path, output_path: Path, width: int, height: int,
+    subtitle_file_name: str | None = None, font_file_name: str | None = None,
 ) -> list[str]:
     """Builds the ffmpeg argv for a single real-stock-video-plus-audio scene
     clip. `video_path` is already normalized to H.264/yuv420p/muted by the
@@ -49,7 +86,16 @@ def render_scene_clip_from_video(
     zero-offset trim) -- both cases resolve to exactly the narration's
     duration through one ffmpeg invocation, mirroring the still-image path's
     `-loop 1 -shortest` behavior above.
+
+    `subtitle_file_name`/`font_file_name`: see render_scene_clip's docstring
+    and `_drawtext_filter` -- same bare-filename-plus-cwd contract.
     """
+    filters = [
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+    ]
+    if subtitle_file_name:
+        filters.append(_drawtext_filter(subtitle_file_name, font_file_name))
     return [
         str(ffmpeg_path), "-y",
         "-stream_loop", "-1", "-i", str(video_path),
@@ -57,10 +103,7 @@ def render_scene_clip_from_video(
         "-c:v", "libx264",
         "-c:a", "aac", "-b:a", "128k",
         "-pix_fmt", "yuv420p",
-        "-vf", (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-        ),
+        "-vf", ",".join(filters),
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest",
         str(output_path),

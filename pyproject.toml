@@ -22,6 +22,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
 ]
+# Demo Mode only: offline/local text-to-speech (SAPI5 on Windows, espeak on
+# Linux) for reel_harness.providers.demo_tts -- no network call, no API key.
+# Never required for the fake/real pipelines; see reel_harness/providers/demo_tts.py.
+demo = [
+    "pyttsx3>=2.90",
+]
 
 [build-system]
 requires = ["hatchling"]

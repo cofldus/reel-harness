@@ -23,6 +23,10 @@ def test_fake_asset_provider_needs_no_configuration() -> None:
     validate_provider_settings(_settings())
 
 
+def test_demo_asset_provider_needs_no_configuration() -> None:
+    validate_provider_settings(_settings(asset_provider="demo"))
+
+
 def test_pexels_provider_requires_api_key() -> None:
     with pytest.raises(ProviderConfigurationError, match="REEL_HARNESS_ASSET_API_KEY"):
         validate_provider_settings(_real_asset_settings(asset_api_key=""))

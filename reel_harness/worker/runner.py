@@ -59,6 +59,12 @@ class ProviderBundle:
     tts: TTSProvider
     stock_media: StockMediaProvider
     publisher: Publisher | None = None
+    # Settings.render_burn_subtitles, carried alongside the resolved
+    # providers since both are per-job execution config resolved at lease
+    # time from AppContext.settings (see bootstrap.AppContext.providers_for_job)
+    # -- not itself a provider, but this is the existing channel for getting
+    # settings-derived config into run_job's stage execution.
+    render_burn_subtitles: bool = False
 
 
 def _start_stage(job) -> Stage:
@@ -319,6 +325,7 @@ def _execute_stage(session, stage: Stage, job, channel, providers: ProviderBundl
         temp_path = official_path.parent / f"final-inprogress-{uuid.uuid4().hex}.mp4"
         render = stages.run_rendering(
             job, context["assets"], context["tts_results"], storage, output_path=temp_path,
+            burn_subtitles=providers.render_burn_subtitles,
         )
         if not assert_lease(session, job.id, lease_token):
             session.rollback()

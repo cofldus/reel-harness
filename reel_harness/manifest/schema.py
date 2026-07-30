@@ -80,8 +80,9 @@ class ValidationInfo(BaseModel):
 
 
 # Licenses that must never be treated as cleared for real publishing. Fake
-# providers stamp every asset they produce with this exact string.
-NON_PUBLISHABLE_LICENSES = frozenset({"FAKE_TEST_LICENSE"})
+# and Demo providers stamp every asset they produce with one of these exact
+# strings -- see providers/fake_stock_media.py and providers/demo_stock_media.py.
+NON_PUBLISHABLE_LICENSES = frozenset({"FAKE_TEST_LICENSE", "DEMO_TEST_LICENSE"})
 
 
 class Manifest(BaseModel):

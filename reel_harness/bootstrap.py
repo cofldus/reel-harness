@@ -138,6 +138,7 @@ class AppContext:
             llm=resolve_llm_for_snapshot(snapshot, self.settings),
             tts=resolve_tts_for_snapshot(snapshot, self.settings),
             stock_media=resolve_stock_media_for_snapshot(snapshot, self.settings),
+            render_burn_subtitles=self.settings.render_burn_subtitles,
         )
 
     def default_providers(self) -> ProviderBundle:
@@ -151,4 +152,5 @@ class AppContext:
             llm=resolve_llm_provider(self.settings.llm_provider, self.settings),
             tts=resolve_tts_provider(self.settings.tts_provider, self.settings),
             stock_media=resolve_stock_media_provider(self.settings.asset_provider, self.settings),
+            render_burn_subtitles=self.settings.render_burn_subtitles,
         )

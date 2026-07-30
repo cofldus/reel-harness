@@ -40,7 +40,10 @@ reel_harness/
     schema.py                engine/session-factory creation, init_db()
   providers/
     base.py                  LLMProvider / TTSProvider / StockMediaProvider / Publisher Protocols
-    fake_llm.py, fake_tts.py, fake_stock_media.py   Fake implementations (only ones registered)
+    fake_llm.py, fake_tts.py, fake_stock_media.py   Fake implementations (pipeline testing, zero network)
+    demo_llm.py, demo_tts.py, demo_stock_media.py   Demo Mode: watchable/audible output, still zero network
+                                                     (real speech via local pyttsx3, no API key -- see docs/STATUS.md)
+    openai_compatible_llm.py, openai_compatible_tts.py, pexels_stock_media.py   Real providers (opt-in, need credentials)
     registry.py               name -> provider class lookup; the ONLY place vendor names may appear
   storage/
     base.py, local.py         StorageBackend Protocol + LocalFilesystemStorage (path-traversal safe)

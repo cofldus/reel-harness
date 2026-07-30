@@ -26,6 +26,30 @@ uv run reel-harness serve
 
 즉, DB를 따로 구축하지 않아도 로컬 테스트는 바로 돌아가지만, 별도의 배포 설정 없이는 다른 사람이 접속하는 실제 운영 서비스로 굴러가지는 않습니다. 실제 운영 환경으로 배포하기 전에는 `reel-harness preflight --profile production`으로 API 키·자격 증명·저장소 설정을 먼저 점검하세요.
 
+## Demo Mode — API 키 없이 실제 결과물 눈으로 확인하기
+
+`fake` provider(Phase 0/1의 파이프라인 검증용)는 단색 프레임과 무음 오디오만 만들기 때문에 실제 UX를 판단하기 어렵습니다. Demo Mode는 **API 키를 전혀 요구하지 않으면서** 실제로 보고 들을 수 있는 결과물을 만드는 별도 provider 계열입니다.
+
+```
+uv sync --extra demo
+REEL_HARNESS_LLM_PROVIDER=demo REEL_HARNESS_TTS_PROVIDER=demo REEL_HARNESS_ASSET_PROVIDER=demo \
+REEL_HARNESS_RENDER_BURN_SUBTITLES=true \
+uv run reel-harness demo-run --topic "김치찌개 맛있게 끓이는 법" --niche cooking --language ko
+```
+
+- **화면**: 장면마다 다른 색(고정 팔레트)의 배경 + 자막 텍스트가 실제로 화면에 박힙니다. 실사 영상은 아닙니다.
+- **음성**: 로컬 OS TTS(Windows SAPI5 / Linux espeak-ng)로 실제 사람 목소리가 나옵니다. 무료·오프라인이지만 상용 API 대비 기계음스럽고, 요청 언어의 로컬 음성이 설치돼 있지 않으면 다른 언어 음성으로 대체됩니다.
+- **대본**: 실제 LLM 호출 없이 주제 텍스트를 장면 수만큼 반복하는 결정론적 템플릿입니다.
+
+즉 Demo Mode는 **콘텐츠 품질이 아니라 파이프라인(검수 대기 전환, 라이선스 게이트, 자막/오디오/렌더링 배관)이 실제로 도는지**를 확인하는 용도입니다. Demo Mode 자산도 Fake provider와 동일하게 `DEMO_TEST_LICENSE`로 표시되어 실제 게시 게이트를 절대 통과하지 못합니다.
+
+진짜 콘텐츠 품질(문맥 있는 대본, 자연스러운 음성, 실제 스톡 영상)을 보려면 필요한 것만 골라 실제 provider를 설정하면 됩니다.
+
+- **LLM**: OpenAI-compatible 엔드포인트 API 키 (`REEL_HARNESS_LLM_PROVIDER=openai_compatible`, `REEL_HARNESS_LLM_API_KEY` 등)
+- **TTS**: OpenAI-compatible 엔드포인트 API 키 (`REEL_HARNESS_TTS_PROVIDER=openai_compatible`, `REEL_HARNESS_TTS_API_KEY` 등)
+- **스톡 미디어**: Pexels API 키 (`REEL_HARNESS_ASSET_PROVIDER=pexels`, `REEL_HARNESS_ASSET_API_KEY`)
+- **게시**: YouTube/TikTok/Instagram 각각 OAuth 클라이언트 ID/Secret (`reel-harness publisher-auth`로 계정 연결)
+
 ## 실제 플랫폼 게시 검증 상태
 
 YouTube·TikTok·Instagram 업로드 기능은 각 플랫폼의 공개 API 사양에 맞춰 구현되어 있고 계약(contract) E2E 테스트로 커버되지만, 이 릴리스를 빌드·테스트한 환경에는 세 플랫폼 모두 실제 자격 증명이 구성되어 있지 않습니다. 즉 **실제 계정으로의 게시가 아직 검증되지 않은 preview 기능**입니다. `reel-harness live-verify`로 직접 상태를 확인할 수 있고, 실제 자격 증명을 구성한 뒤 `--upload-tests`로 재검증할 수 있습니다. 자세한 내용은 `CHANGELOG.md`와 릴리스 매니페스트의 `live_verification` 필드를 참고하세요.

@@ -469,6 +469,79 @@ def cmd_worker_run_once(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+_DEMO_RUN_TERMINAL_STATUSES = frozenset({
+    "REVIEW_REQUIRED", "COMPLETED", "FAILED",
+})
+
+
+def cmd_demo_run(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Collapses channel-create (if needed) + job-create + the same lease/
+    heartbeat/run_job/release-lease sequence as worker-run-once, looped until
+    THIS job reaches a terminal-ish status, into one command -- for quickly
+    seeing a job's actual rendered output (most useful with
+    REEL_HARNESS_LLM_PROVIDER=demo / TTS_PROVIDER=demo / ASSET_PROVIDER=demo,
+    see README.md's Demo Mode section, but not itself provider-specific).
+    Not a substitute for `serve` -- other queued jobs may also get processed
+    along the way, exactly like any other worker-run-once call would."""
+    if args.channel_id:
+        channel_id = args.channel_id
+    else:
+        channel = ctx.jobs.create_channel(
+            name=args.channel_name or "demo", niche=args.niche, language=args.language,
+        )
+        channel_id = channel.id
+        print(json.dumps({"channel_id": channel_id, "name": channel.name}, indent=2), file=sys.stderr)
+
+    idempotency_key = args.idempotency_key or str(uuid.uuid4())
+    job, replay = ctx.jobs.create_job(channel_id=channel_id, idempotency_key=idempotency_key, topic=args.topic)
+    print(
+        json.dumps({"job_id": job.id, "status": job.status, "idempotent_replay": replay}, indent=2),
+        file=sys.stderr,
+    )
+
+    lease_timeout = ctx.settings.lease_timeout_seconds
+    worker_id = f"demo-run-{uuid.uuid4().hex[:12]}"
+    for _ in range(args.max_attempts):
+        with ctx.session_factory() as session:
+            db_job = ctx.jobs.get_job(job.id)
+            if db_job.status in _DEMO_RUN_TERMINAL_STATUSES:
+                break
+            recover_stale_jobs(session, lease_timeout_seconds=lease_timeout)
+            leased = lease_next_job(session, worker_id=worker_id)
+            if leased is None:
+                break
+            leased_channel = session.get(Channel, leased.channel_id)
+            lease_token = leased.lease_token
+            assert lease_token is not None
+            heartbeat = LeaseHeartbeat(
+                ctx.session_factory, leased.id, lease_token, ctx.settings.lease_heartbeat_seconds,
+            )
+            heartbeat.start()
+            try:
+                run_job(
+                    session, leased, leased_channel, ctx.providers_for_job(leased), ctx.storage,
+                    lease_token=lease_token,
+                )
+            finally:
+                heartbeat.stop()
+                release_lease(session, leased, lease_token=lease_token)
+
+    final_job = ctx.jobs.get_job(job.id)
+    payload = {
+        "job_id": final_job.id,
+        "status": final_job.status,
+        "current_stage": final_job.current_stage,
+        "failure_code": final_job.failure_code,
+        "failure_summary": final_job.failure_summary,
+        "reason_code": final_job.reason_code,
+        "preview_path": None,
+    }
+    if final_job.status == "REVIEW_REQUIRED":
+        payload["preview_path"] = str(ctx.storage.job_dir(final_job.id) / "final" / "final.mp4")
+    print(json.dumps(payload, indent=2))
+    return 0 if final_job.status in ("REVIEW_REQUIRED", "COMPLETED") else 1
+
+
 def _publication_fields(publication) -> dict:
     """Safe fields only -- never a token, the upload session reference/URL,
     a local credential path, an Authorization header, or a raw provider
@@ -3009,6 +3082,23 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: settings.lease_timeout_seconds)",
     )
     worker_run_once.set_defaults(func=cmd_worker_run_once)
+
+    demo_run = sub.add_parser(
+        "demo-run",
+        help="channel-create (if needed) + job-create + drive to a terminal status, in one command -- "
+             "most useful with REEL_HARNESS_LLM_PROVIDER=demo/TTS_PROVIDER=demo/ASSET_PROVIDER=demo",
+    )
+    demo_run.add_argument("--topic", required=True)
+    demo_run.add_argument("--channel-id", default=None, help="Reuse an existing channel instead of creating one")
+    demo_run.add_argument("--channel-name", default=None, help="Only used when --channel-id is not given")
+    demo_run.add_argument("--niche", default="general", help="Only used when --channel-id is not given")
+    demo_run.add_argument("--language", default="en", help="Only used when --channel-id is not given")
+    demo_run.add_argument("--idempotency-key", default=None)
+    demo_run.add_argument(
+        "--max-attempts", type=int, default=10,
+        help="Max lease/run cycles before giving up (default: 10)",
+    )
+    demo_run.set_defaults(func=cmd_demo_run)
 
     worker_run = sub.add_parser("worker-run", help="Continuous polling worker daemon")
     worker_run.add_argument("--worker-id", default=None, help="Default: generated unique id")
