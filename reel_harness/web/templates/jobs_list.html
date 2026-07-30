@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}작업 목록 - Reel Harness{% endblock %}
+{% block content %}
+<h1>작업 목록</h1>
+
+<nav class="filter-chips" aria-label="상태 필터">
+  <a href="/jobs" class="chip {{ 'chip-active' if not status_filter }}">전체</a>
+  <a href="/jobs?status_filter=QUEUED" class="chip {{ 'chip-active' if status_filter == 'QUEUED' }}">대기 중</a>
+  <a href="/jobs?status_filter=REVIEW_REQUIRED" class="chip {{ 'chip-active' if status_filter == 'REVIEW_REQUIRED' }}">검수 필요</a>
+  <a href="/jobs?status_filter=COMPLETED" class="chip {{ 'chip-active' if status_filter == 'COMPLETED' }}">완료</a>
+  <a href="/jobs?status_filter=FAILED" class="chip {{ 'chip-active' if status_filter == 'FAILED' }}">실패</a>
+  <a href="/jobs?status_filter=CANCELLED" class="chip {{ 'chip-active' if status_filter == 'CANCELLED' }}">취소</a>
+</nav>
+
+{% if jobs %}
+<table class="job-table">
+  <thead>
+    <tr><th>주제</th><th>상태</th><th>단계</th><th>생성 시간</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td>{{ job.topic or "(주제 없음)" }}</td>
+      <td><span class="badge badge-status">{{ job.status_label }}</span></td>
+      <td>{{ job.stage_label or "-" }}</td>
+      <td>{{ job.elapsed }} 전</td>
+      <td><a href="{{ job.detail_url }}">열기</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<nav class="pagination" aria-label="페이지 이동">
+  {% if has_prev %}<a href="/jobs?page={{ page - 1 }}{{ '&status_filter=' ~ status_filter if status_filter else '' }}">이전</a>{% endif %}
+  <span>{{ page }} 페이지 (총 {{ total }}개)</span>
+  {% if has_next %}<a href="/jobs?page={{ page + 1 }}{{ '&status_filter=' ~ status_filter if status_filter else '' }}">다음</a>{% endif %}
+</nav>
+{% else %}
+<p class="empty-state">해당 상태의 작업이 없습니다.</p>
+{% endif %}
+{% endblock %}

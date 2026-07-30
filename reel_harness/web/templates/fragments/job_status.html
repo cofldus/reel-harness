@@ -1,0 +1,82 @@
+<div id="job-status"
+     {% if not job.is_terminal and not job.needs_action %}
+     hx-get="/jobs/{{ job.job_id }}/status" hx-trigger="every 2s [document.visibilityState=='visible']" hx-swap="outerHTML"
+     {% endif %}>
+
+  <div class="status-header">
+    <span class="badge badge-status">{{ job.status_label }}</span>
+    {% if job.stage_label %}<span class="stage-label">{{ job.stage_label }}</span>{% endif %}
+  </div>
+  <p class="meta">경과 시간: {{ job.elapsed }} (마지막 갱신: {{ job.updated_at }})</p>
+
+  {% if job.failure_summary %}
+  <div class="alert alert-error" role="alert">
+    <p>{{ job.failure_summary }}</p>
+    <details>
+      <summary>기술 세부정보</summary>
+      <dl>
+        <dt>failure_code</dt><dd>{{ job.failure_code }}</dd>
+        <dt>reason_code</dt><dd>{{ job.reason_code }}</dd>
+      </dl>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if job.eligibility_reasons %}
+  <div class="alert alert-info" role="status">
+    <p>Demo Mode 영상은 기능 확인용이며 플랫폼에 게시할 수 없습니다.</p>
+    <details>
+      <summary>자세히</summary>
+      <ul>{% for reason in job.eligibility_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if job.video_available %}
+  <video controls class="job-video" src="/jobs/{{ job.job_id }}/video"></video>
+  <a class="btn" href="/jobs/{{ job.job_id }}/video?download=1">다운로드</a>
+  {% endif %}
+
+  <div class="job-actions" hx-target="#job-status" hx-swap="outerHTML">
+    {% if job.can_approve %}
+    <form method="post" action="/jobs/{{ job.job_id }}/approve" hx-post="/jobs/{{ job.job_id }}/approve">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-primary">승인</button>
+    </form>
+    {% endif %}
+    {% if job.can_reject %}
+    <form method="post" action="/jobs/{{ job.job_id }}/reject" hx-post="/jobs/{{ job.job_id }}/reject">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>다시 만들 단계
+        <select name="regenerate_from_stage">
+          <option value="SCRIPT">대본</option>
+          <option value="ASSET">영상 소스</option>
+          <option value="TTS">음성</option>
+          <option value="RENDER">렌더링</option>
+        </select>
+      </label>
+      <input type="text" name="reason" placeholder="반려 사유" required>
+      <button type="submit" class="btn">반려하고 다시 만들기</button>
+    </form>
+    {% endif %}
+    {% if job.can_retry %}
+    <form method="post" action="/jobs/{{ job.job_id }}/retry" hx-post="/jobs/{{ job.job_id }}/retry">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <select name="stage">
+        <option value="SCRIPT">대본부터</option>
+        <option value="ASSET">영상 소스부터</option>
+        <option value="TTS">음성부터</option>
+        <option value="RENDER">렌더링부터</option>
+      </select>
+      <button type="submit" class="btn btn-primary">재시도</button>
+    </form>
+    {% endif %}
+    {% if job.can_cancel %}
+    <form method="post" action="/jobs/{{ job.job_id }}/cancel" hx-post="/jobs/{{ job.job_id }}/cancel"
+          hx-confirm="정말 이 작업을 취소하시겠습니까?">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-danger">취소</button>
+    </form>
+    {% endif %}
+  </div>
+</div>

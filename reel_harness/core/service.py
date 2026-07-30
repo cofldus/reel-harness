@@ -113,11 +113,22 @@ class JobService:
             session.expunge(channel)
             return channel
 
-    def create_job(self, channel_id: str, idempotency_key: str, topic: str | None = None) -> tuple[Job, bool]:
+    def create_job(
+        self, channel_id: str, idempotency_key: str, topic: str | None = None,
+        provider_snapshot: dict | None = None,
+    ) -> tuple[Job, bool]:
         """Returns (job, idempotent_replay). idempotent_replay is True if an
         existing job with the same (channel_id, idempotency_key) was found instead
         of creating a new one -- including the race where two callers hit the
-        unique constraint at the same time."""
+        unique constraint at the same time.
+
+        `provider_snapshot`, when given, overrides the constructor-level
+        default for this one job only (e.g. the web UI letting an operator
+        pick Demo/Real per job while the process-wide env-var-configured
+        default stays whatever `serve` was started with). `resolve_*_for_
+        snapshot` in providers.registry already treats every job's snapshot
+        independently -- this just lets callers other than "whatever env
+        vars were active at AppContext construction" populate it."""
         with self._session_factory() as session:
             existing = session.execute(
                 select(Job).where(Job.channel_id == channel_id, Job.idempotency_key == idempotency_key),
@@ -126,10 +137,11 @@ class JobService:
                 session.expunge(existing)
                 return existing, True
 
+            effective_snapshot = provider_snapshot if provider_snapshot is not None else self._provider_snapshot
             job = Job(
                 channel_id=channel_id, idempotency_key=idempotency_key,
                 topic=topic, status=JobStatus.CREATED.value,
-                provider_config=dict(self._provider_snapshot) if self._provider_snapshot else None,
+                provider_config=dict(effective_snapshot) if effective_snapshot else None,
             )
             session.add(job)
             try:

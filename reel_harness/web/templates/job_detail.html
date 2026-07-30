@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ job.topic or "작업" }} - Reel Harness{% endblock %}
+{% block content %}
+<h1>{{ job.topic or "(주제 없음)" }}</h1>
+{% if job.script_title %}<p class="script-title">{{ job.script_title }}</p>{% endif %}
+
+<div class="job-detail-grid">
+  <div class="job-detail-primary">
+    {% include "fragments/job_status.html" %}
+  </div>
+
+  <div class="job-detail-secondary">
+    <section>
+      <h2>진행 단계</h2>
+      {% if job.stage_progress %}
+      <ol class="stage-timeline">
+        {% for entry in job.stage_progress %}
+        <li>
+          <span class="stage-name">{{ entry.stage_label }}</span>
+          <span class="badge">{{ entry.status }}</span>
+          {% if entry.duration %}<span class="stage-duration">{{ entry.duration }}</span>{% endif %}
+          {% if entry.error_detail %}<p class="field-error">{{ entry.error_detail }}</p>{% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <p class="empty-state">아직 시작된 단계가 없습니다.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>사용된 영상 소스</h2>
+      {% if job.assets %}
+      <table class="asset-table">
+        <thead><tr><th>장면</th><th>제공자</th><th>라이선스</th><th>제작자</th></tr></thead>
+        <tbody>
+          {% for asset in job.assets %}
+          <tr>
+            <td>{{ asset.scene_index + 1 }}</td>
+            <td>{{ asset.provider }}</td>
+            <td>{{ asset.license_type or "-" }}</td>
+            <td>{{ asset.creator or "-" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty-state">아직 영상 소스가 없습니다.</p>
+      {% endif %}
+    </section>
+
+    <section class="advanced-details">
+      <details>
+        <summary>기술 정보</summary>
+        <dl>
+          <dt>job_id</dt><dd>{{ job.job_id }}</dd>
+          <dt>attempt_number</dt><dd>{{ job.attempt_number }}</dd>
+          <dt>retry_count</dt><dd>{{ job.retry_count }}</dd>
+          <dt>created_at</dt><dd>{{ job.created_at }}</dd>
+        </dl>
+      </details>
+    </section>
+  </div>
+</div>
+{% endblock %}

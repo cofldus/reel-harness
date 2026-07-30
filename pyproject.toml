@@ -11,6 +11,9 @@ dependencies = [
     "pydantic-settings>=2.3",
     # HTTP client for the real (OpenAI-compatible) LLM/TTS provider adapters.
     "httpx>=0.27",
+    # Web UI (reel_harness.web): server-rendered templates + Form(...) parsing.
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]
@@ -28,6 +31,13 @@ dev = [
 demo = [
     "pyttsx3>=2.90",
 ]
+# Browser E2E for the web UI (tests/e2e/test_web_ui_playwright.py) only --
+# requires a separate `playwright install chromium` to download a real
+# browser; never required for the fake/demo/real pipelines or the rest of
+# the test suite.
+e2e-browser = [
+    "playwright>=1.40",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,6 +45,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["reel_harness"]
+# Web UI templates/static assets (see reel_harness/web/) -- there are no
+# other non-.py files under reel_harness/ today, so hatchling's `packages`
+# selection alone does not sweep these in; verified by inspecting the built
+# wheel's file listing (see docs/OPERATIONS.md's web UI packaging section).
+artifacts = [
+    "reel_harness/web/templates/**/*.html",
+    "reel_harness/web/static/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

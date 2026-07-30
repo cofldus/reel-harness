@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}시스템 상태 - Reel Harness{% endblock %}
+{% block content %}
+<h1>시스템 상태</h1>
+
+<section class="status-banner status-{{ status.preflight_overall|lower }}">
+  <strong>전체: {{ status.preflight_overall }}</strong>
+</section>
+
+<section>
+  <h2>기본 정보</h2>
+  <dl>
+    <dt>버전</dt><dd>{{ status.version }}</dd>
+    <dt>가동 시간</dt><dd>{{ status.uptime }}</dd>
+    <dt>대기/재시도 큐</dt><dd>{{ status.queue_depth }}</dd>
+    <dt>지연된 job lease</dt><dd>{{ status.stale_job_leases }}</dd>
+    <dt>지연된 publication lease</dt><dd>{{ status.stale_publication_leases }}</dd>
+  </dl>
+</section>
+
+<section>
+  <h2>점검 항목</h2>
+  <table class="preflight-table">
+    <thead><tr><th>항목</th><th>상태</th><th>세부정보</th></tr></thead>
+    <tbody>
+      {% for check in status.preflight_checks %}
+      <tr>
+        <td>{{ check.provider_id }}</td>
+        <td><span class="badge badge-{{ check.status|lower }}">{{ check.status }}</span></td>
+        <td>{{ check.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">
+    운영(production) 환경 점검은 CLI에서 실행하세요: <code>reel-harness preflight --profile production</code>
+    (원격 자격 증명 확인은 <code>publisher-doctor --check-remote</code>)
+  </p>
+</section>
+
+<section>
+  <h2>작업 상태 분포</h2>
+  <dl>
+    {% for status_name, count in status.job_status_counts.items() %}
+    <dt>{{ status_name }}</dt><dd>{{ count }}</dd>
+    {% endfor %}
+  </dl>
+</section>
+{% endblock %}

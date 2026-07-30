@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}설정 안내 - Reel Harness{% endblock %}
+{% block content %}
+<h1>설정 안내</h1>
+<p class="hint">
+  실제 자격 증명 값은 이 화면에 표시되지 않습니다. 아래 환경변수를 <code>.env</code> 파일이나
+  셸 환경변수로 설정한 뒤 서버를 재시작하세요. 자세한 내용은
+  <code>docs/OPERATIONS.md</code>를 참고하세요.
+</p>
+
+<div class="settings-cards">
+  {% for card in cards %}
+  <section class="settings-card">
+    <h2>{{ card.name }}</h2>
+    <span class="badge badge-{{ 'pass' if card.configured else 'not-configured' }}">
+      {{ "설정됨" if card.configured else "미설정" }}
+    </span>
+    <p>{{ card.detail }}</p>
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}
