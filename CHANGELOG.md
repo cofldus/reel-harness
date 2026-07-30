@@ -4,6 +4,35 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [Unreleased] — Demo Mode
+
+### Added
+
+- **Demo Mode** (`REEL_HARNESS_LLM_PROVIDER=demo` / `TTS_PROVIDER=demo` /
+  `ASSET_PROVIDER=demo`, plus `uv sync --extra demo`): a new provider tier
+  that produces genuinely watchable/audible output with zero external API
+  calls or credentials — distinct-colored per-scene backgrounds from a
+  fixed palette, real offline text-to-speech (`pyttsx3`, SAPI5 on Windows /
+  espeak-ng on Linux), and topic-aware captions. Unlike the `fake` provider
+  (silent, flat-color video — proves pipeline mechanics only), Demo Mode is
+  for actually judging the rendered result by eye. Assets are stamped
+  `DEMO_TEST_LICENSE`, which — like `FAKE_TEST_LICENSE` — never passes
+  real publish eligibility.
+- **`Settings.render_burn_subtitles`** (`REEL_HARNESS_RENDER_BURN_SUBTITLES`,
+  default off): a generic, provider-agnostic pipeline flag that burns each
+  scene's subtitle text into the rendered video via ffmpeg's `drawtext`
+  filter. Works with any provider combination, not just Demo Mode.
+- **`reel-harness demo-run`**: a convenience CLI command that creates a
+  channel (if needed) + job and drives it to a terminal status in one call,
+  printing the final video path once ready for review.
+
+### Known limitations
+
+- Demo Mode's local TTS voice selection is best-effort: if no voice for
+  the requested language is installed on the machine, narration falls
+  back to whatever default voice is available (may mispronounce non-native
+  text).
+
 ## [0.1.0] — 2026-07-29 — First stable release (local-first)
 
 This release ships as a **local-first release with explicitly documented
