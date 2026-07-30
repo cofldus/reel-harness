@@ -15,9 +15,16 @@ from reel_harness.db.models import Job, Publication, PublicationAuditEvent
 # included: cancelling there is a purely local status change and never
 # implies deleting anything already on the provider (see
 # docs/OPERATIONS.md's cancellation policy -- remote deletion is always a
-# separate, explicit action, not implemented in Phase 3A).
+# separate, explicit action, not implemented in Phase 3A). FAILED is also
+# excluded: ALLOWED_PUBLICATION_TRANSITIONS deliberately only allows
+# FAILED -> RETRY_WAIT (see state_machine.py and
+# test_failed_allows_only_manual_retry_wait) -- a FAILED publication is
+# resolved by retrying it, or simply left as-is (no active worker is
+# touching it, so there is nothing to interrupt); it is blocked explicitly
+# below, alongside PUBLISHED/CANCELLED, rather than being silently included
+# here and crashing on the FAILED -> CANCELLED transition attempt.
 _IMMEDIATE_CANCEL_STATUSES = frozenset(PublicationStatus) - {
-    PublicationStatus.PUBLISHED, PublicationStatus.CANCELLED,
+    PublicationStatus.PUBLISHED, PublicationStatus.CANCELLED, PublicationStatus.FAILED,
     PublicationStatus.UPLOADING, PublicationStatus.UPLOAD_PAUSED,
 }
 
@@ -224,13 +231,19 @@ class PublicationService:
         transition to CANCELLED immediately (including UPLOAD_COMPLETED/
         PROCESSING, as pure local bookkeeping -- see the module docstring
         above); UPLOADING/UPLOAD_PAUSED only get cancel_requested set, honored
-        by the worker at its next chunk boundary. PUBLISHED/CANCELLED refuse."""
+        by the worker at its next chunk boundary. PUBLISHED/CANCELLED refuse,
+        as does FAILED (the state machine only allows FAILED -> RETRY_WAIT --
+        retry it instead, or leave it as-is; there is no active work to stop)."""
         with self._session_factory() as session:
             pub = self._require(session, publication_id)
             current = PublicationStatus(pub.status)
             if current in (PublicationStatus.PUBLISHED, PublicationStatus.CANCELLED):
                 raise PublicationInvalidActionError(
                     f"cannot cancel a publication in terminal status {pub.status}"
+                )
+            if current == PublicationStatus.FAILED:
+                raise PublicationInvalidActionError(
+                    "cannot cancel a FAILED publication -- retry it instead, or leave it as-is"
                 )
             pub.cancel_requested = True
             if current in _IMMEDIATE_CANCEL_STATUSES and pub.locked_by is None:

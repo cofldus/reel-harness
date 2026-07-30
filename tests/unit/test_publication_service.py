@@ -279,6 +279,33 @@ def test_cancel_refused_once_published(
         publish_service.cancel_publication(pub.id)
 
 
+def test_cancel_refused_once_failed(
+    job_service, channel, session_factory, storage, publish_service, tmp_path,
+) -> None:
+    """The state machine deliberately only allows FAILED -> RETRY_WAIT (see
+    test_publication_state_machine.py::test_failed_allows_only_manual_retry_wait),
+    never a direct FAILED -> CANCELLED. cancel_publication must refuse
+    cleanly with PublicationInvalidActionError here, not attempt the
+    transition and let a raw InvalidTransitionError escape -- found while
+    building the Phase 5B web UI's can_cancel mirroring test."""
+    job = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path)
+    pub, _ = publish_service.create_publication(job.id, provider="youtube", account_reference="acct-1")
+    with session_factory() as session:
+        from reel_harness.core.state_machine import apply_publication_transition
+
+        db_pub = session.get(Publication, pub.id)
+        apply_publication_transition(
+            db_pub, PublicationStatus.UPLOAD_SESSION_CREATED, upload_session_reference="ref-1",
+        )
+        apply_publication_transition(
+            db_pub, PublicationStatus.FAILED, failure_code="X", failure_summary="boom",
+        )
+        session.commit()
+
+    with pytest.raises(PublicationInvalidActionError):
+        publish_service.cancel_publication(pub.id)
+
+
 def test_dry_run_style_check_eligibility_never_persists_anything(
     job_service, channel, session_factory, storage, publish_service, tmp_path,
 ) -> None:
