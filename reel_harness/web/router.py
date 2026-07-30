@@ -207,7 +207,10 @@ def job_detail(request: Request, job_id: str, ctx: AppContext = Depends(get_cont
     if job.status == JobStatus.COMPLETED.value:
         eligibility = ctx.publications.check_eligibility(job_id)
     view = build_job_detail_view(job, stage_runs, assets, ctx.storage, eligibility=eligibility)
-    return _render(request, "job_detail.html", {"job": view})
+    publications = [
+        build_publication_summary_view(p, job.topic) for p in ctx.publications.list_publications(job_id=job_id)
+    ]
+    return _render(request, "job_detail.html", {"job": view, "publications": publications})
 
 
 @router.get("/system", response_class=HTMLResponse)
@@ -550,7 +553,9 @@ def publications_list(
     })
 
 
-def _publication_status_fragment(request: Request, publication_id: str, ctx: AppContext) -> HTMLResponse:
+def _publication_status_fragment(
+    request: Request, publication_id: str, ctx: AppContext, reconcile_result: dict | None = None,
+) -> HTMLResponse:
     try:
         pub = ctx.publications.get_publication(publication_id)
     except PublicationNotFoundError as exc:
@@ -560,7 +565,9 @@ def _publication_status_fragment(request: Request, publication_id: str, ctx: App
     # web.router._status_fragment for jobs: this fragment's own hidden
     # csrf_token form fields need a real value on every htmx-swapped
     # re-render, not just the page's first render.
-    return _render(request, "fragments/publication_status.html", {"publication": view})
+    return _render(request, "fragments/publication_status.html", {
+        "publication": view, "reconcile_result": reconcile_result,
+    })
 
 
 @router.get("/publications/{publication_id}", response_class=HTMLResponse)
@@ -582,6 +589,113 @@ def publication_status_fragment(
     request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
 ) -> HTMLResponse:
     return _publication_status_fragment(request, publication_id, ctx)
+
+
+# --- Publication actions -------------------------------------------------------
+
+
+@router.post(
+    "/publications/{publication_id}/cancel", response_class=HTMLResponse, dependencies=[Depends(require_csrf)],
+)
+def publication_cancel(
+    request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    try:
+        ctx.publications.cancel_publication(publication_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}") from exc
+    except PublicationInvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _publication_status_fragment(request, publication_id, ctx)
+
+
+@router.post(
+    "/publications/{publication_id}/retry", response_class=HTMLResponse, dependencies=[Depends(require_csrf)],
+)
+def publication_retry(
+    request: Request, publication_id: str, from_stage: str = Form(""), ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """Mirrors api.app.retry_publication_endpoint's exact call shape (same
+    core.publish_retry.retry_publication call, in-process instead of over
+    HTTP)."""
+    from reel_harness.core.publish_retry import PublicationRetryError, retry_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        try:
+            retry_publication(session, pub, ctx.storage, from_stage=from_stage or None)
+        except PublicationRetryError as exc:
+            raise HTTPException(status_code=409, detail={"reasons": exc.reasons}) from exc
+    return _publication_status_fragment(request, publication_id, ctx)
+
+
+@router.post(
+    "/publications/{publication_id}/refresh", response_class=HTMLResponse, dependencies=[Depends(require_csrf)],
+)
+def publication_refresh(
+    request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """Mirrors api.app.refresh_publication's exact lease/run/release
+    sequence (re-polls one PROCESSING publication out of turn), in-process
+    instead of over HTTP."""
+    from reel_harness.db.models import Job, Publication
+    from reel_harness.worker.publish_lease import lease_specific_publication, release_publication_lease
+    from reel_harness.worker.publish_runner import run_publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        if not lease_specific_publication(session, publication_id, worker_id="web-refresh"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"publication is not currently PROCESSING and unlocked (status={pub.status})",
+            )
+        lease_token = pub.lease_token
+        job = session.get(Job, pub.job_id)
+        channel_niche = ctx.channel_niche_for_job(job)
+        bundle = ctx.bundle_for_publication(pub)
+        try:
+            run_publication(
+                session, pub, ctx.storage, bundle, channel_niche=channel_niche, lease_token=lease_token,
+            )
+        finally:
+            release_publication_lease(session, pub, lease_token=lease_token)
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    return _publication_status_fragment(request, publication_id, ctx)
+
+
+@router.post(
+    "/publications/{publication_id}/reconcile", response_class=HTMLResponse, dependencies=[Depends(require_csrf)],
+)
+def publication_reconcile(
+    request: Request, publication_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """Mirrors api.app.reconcile_publication_endpoint's exact call shape --
+    a read-only confirmation against the provider, never starts a new
+    upload (see core.publish_reconciliation). The outcome is threaded into
+    the re-rendered status fragment so the user sees what reconcile found,
+    not just a silent no-op."""
+    from reel_harness.core.publish_reconciliation import reconcile_publication
+    from reel_harness.db.models import Publication
+
+    with ctx.session_factory() as session:
+        pub = session.get(Publication, publication_id)
+        if pub is None:
+            raise HTTPException(status_code=404, detail=f"publication not found: {publication_id}")
+        bundle = ctx.bundle_for_publication(pub)
+        try:
+            result = reconcile_publication(session, pub, bundle)
+        finally:
+            close = getattr(bundle.publisher, "close", None)
+            if callable(close):
+                close()
+    return _publication_status_fragment(request, publication_id, ctx, reconcile_result=result.to_dict())
 
 
 # --- Publisher accounts (OAuth connect/disconnect) ---------------------------

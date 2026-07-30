@@ -11,6 +11,24 @@
 
   <div class="job-detail-secondary">
     <section>
+      <h2>게시</h2>
+      {% if job.can_publish %}
+      <a href="/jobs/{{ job.job_id }}/publish" class="btn btn-primary">게시하기</a>
+      {% endif %}
+      {% if publications %}
+      <ul class="publication-summary-list">
+        {% for pub in publications %}
+        <li>
+          <a href="{{ pub.detail_url }}">{{ pub.provider_display }} -- {{ pub.status_label }}</a>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty-state">아직 게시된 항목이 없습니다.</p>
+      {% endif %}
+    </section>
+
+    <section>
       <h2>진행 단계</h2>
       {% if job.stage_progress %}
       <ol class="stage-timeline">

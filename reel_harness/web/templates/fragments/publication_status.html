@@ -27,9 +27,56 @@
   </div>
   {% endif %}
 
+  {% if reconcile_result %}
+  <div class="alert alert-info" role="status">
+    <p>동기화 결과: {{ reconcile_result.outcome }}</p>
+    {% if reconcile_result.reasons %}
+    <ul>{% for reason in reconcile_result.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% if publication.publication_url %}
   <p><a href="{{ publication.publication_url }}" target="_blank" rel="noopener noreferrer">게시된 영상 보기</a></p>
   {% elif publication.provider_video_id %}
   <p class="meta">provider_video_id: {{ publication.provider_video_id }}</p>
   {% endif %}
+
+  <div class="job-actions" hx-target="#publication-status" hx-swap="outerHTML">
+    {% if publication.can_retry %}
+    <form method="post" action="/publications/{{ publication.publication_id }}/retry"
+          hx-post="/publications/{{ publication.publication_id }}/retry">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <select name="from_stage">
+        <option value="">자동으로 이어서</option>
+        <option value="SESSION">세션부터</option>
+        <option value="UPLOAD">업로드부터</option>
+        <option value="PROCESSING">처리 확인부터</option>
+      </select>
+      <button type="submit" class="btn btn-primary">재시도</button>
+    </form>
+    {% endif %}
+    {% if publication.can_refresh %}
+    <form method="post" action="/publications/{{ publication.publication_id }}/refresh"
+          hx-post="/publications/{{ publication.publication_id }}/refresh">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn">지금 처리 상태 확인</button>
+    </form>
+    {% endif %}
+    {% if publication.can_reconcile %}
+    <form method="post" action="/publications/{{ publication.publication_id }}/reconcile"
+          hx-post="/publications/{{ publication.publication_id }}/reconcile">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn">플랫폼과 상태 동기화</button>
+    </form>
+    {% endif %}
+    {% if publication.can_cancel %}
+    <form method="post" action="/publications/{{ publication.publication_id }}/cancel"
+          hx-post="/publications/{{ publication.publication_id }}/cancel"
+          hx-confirm="정말 이 게시를 취소하시겠습니까?">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-danger">취소</button>
+    </form>
+    {% endif %}
+  </div>
 </div>
