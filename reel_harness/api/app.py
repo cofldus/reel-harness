@@ -324,6 +324,60 @@ def approve_job(job_id: str, ctx: AppContext = Depends(get_context)) -> JobRespo
     return _to_response(job)
 
 
+class RejectJobRequest(BaseModel):
+    reason: str
+    regenerate_from_stage: str
+
+
+@app.post("/v1/jobs/{job_id}/reject", dependencies=[Depends(require_api_key)])
+def reject_job(job_id: str, request: RejectJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
+    try:
+        job = ctx.jobs.reject(job_id, reason=request.reason, regenerate_from_stage=request.regenerate_from_stage)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _to_response(job)
+
+
+class RetryJobRequest(BaseModel):
+    stage: str
+
+
+@app.post("/v1/jobs/{job_id}/retry", dependencies=[Depends(require_api_key)])
+def retry_job(job_id: str, request: RetryJobRequest, ctx: AppContext = Depends(get_context)) -> JobResponse:
+    try:
+        job = ctx.jobs.retry_from_stage(job_id, stage=request.stage)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _to_response(job)
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+@app.get("/v1/jobs", dependencies=[Depends(require_api_key)])
+def list_jobs(
+    status_filter: str | None = None, limit: int = 50, offset: int = 0, ctx: AppContext = Depends(get_context),
+) -> JobListResponse:
+    """`status_filter` (query param name `status_filter`, not `status`, to
+    avoid colliding with FastAPI's own `status` module import in this file)
+    matches one exact JobStatus value; omit for all statuses."""
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must not be negative")
+    jobs = ctx.jobs.list_jobs(status=status_filter, limit=limit, offset=offset)
+    total = ctx.jobs.count_jobs(status=status_filter)
+    return JobListResponse(jobs=[_to_response(j) for j in jobs], total=total, limit=limit, offset=offset)
+
+
 class CreatePublicationRequest(BaseModel):
     provider: str
     account_reference: str

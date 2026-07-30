@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from reel_harness.core.state_machine import RESUMABLE_STAGES, JobStatus, Stage, apply_transition
-from reel_harness.db.models import ApprovalDecision, Asset, Channel, Job
+from reel_harness.db.models import ApprovalDecision, Asset, Channel, Job, StageRun
 from reel_harness.manifest.schema import ApprovalInfo, Manifest
 from reel_harness.manifest.writer import write_manifest
 from reel_harness.observability import redact
@@ -172,15 +172,44 @@ class JobService:
                 session.expunge(row)
             return rows
 
-    def list_jobs(self, status: str | None = None) -> list[Job]:
+    def list_jobs(self, status: str | None = None, limit: int | None = None, offset: int = 0) -> list[Job]:
+        """`limit=None` (the default) preserves the original unbounded
+        behavior every existing CLI/API caller relies on. Pass an explicit
+        `limit` (e.g. the web UI's job list page) to page results -- ordering
+        is always `created_at desc`, so `offset` is stable across calls as
+        long as no job is created between pages (acceptable for a local
+        single-user tool; not a strictly consistent cursor)."""
         with self._session_factory() as session:
             stmt = select(Job)
             if status:
                 stmt = stmt.where(Job.status == status)
-            jobs = list(session.execute(stmt.order_by(Job.created_at.desc())).scalars().all())
+            stmt = stmt.order_by(Job.created_at.desc()).offset(offset)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            jobs = list(session.execute(stmt).scalars().all())
             for job in jobs:
                 session.expunge(job)
             return jobs
+
+    def count_jobs(self, status: str | None = None) -> int:
+        with self._session_factory() as session:
+            stmt = select(func.count()).select_from(Job)
+            if status:
+                stmt = stmt.where(Job.status == status)
+            return int(session.execute(stmt).scalar_one())
+
+    def get_stage_runs(self, job_id: str) -> list[StageRun]:
+        """Every stage-attempt row for this job, oldest first -- the real
+        per-stage timing source (Job.current_stage is only a single "current"
+        value). Used by the web UI's job-detail progress timeline."""
+        with self._session_factory() as session:
+            self._require_job(session, job_id)
+            rows = list(session.execute(
+                select(StageRun).where(StageRun.job_id == job_id).order_by(StageRun.started_at),
+            ).scalars().all())
+            for row in rows:
+                session.expunge(row)
+            return rows
 
     def request_cancel(self, job_id: str) -> Job:
         """Cancels a job. States with no worker process attached
