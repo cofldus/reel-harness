@@ -86,16 +86,27 @@ def test_job_detail_view_needs_action_and_terminal_flags(job_service, channel, s
     assert done_view.is_terminal is True
 
 
-def test_job_detail_view_can_cancel_derived_from_allowed_transitions(
+def test_job_detail_view_can_cancel_matches_request_cancels_real_precondition(
     job_service, channel, session_factory, storage,
 ) -> None:
+    """Must mirror JobService.request_cancel's actual raised-error condition
+    (blocks only COMPLETED/FAILED/CANCELLED), not ALLOWED_TRANSITIONS --
+    request_cancel accepts READY/PUBLISHING too (cancellation there is
+    asynchronous via cancel_requested, not a direct ALLOWED_TRANSITIONS edge
+    to CANCELLED). A mismatch here would hide a valid Cancel button."""
     job, _ = job_service.create_job(channel.id, idempotency_key="k1", topic="t")
-    fresh = job_service.get_job(job.id)  # QUEUED -- CANCELLED is an allowed transition
+    fresh = job_service.get_job(job.id)  # QUEUED
     assert build_job_detail_view(fresh, [], [], storage).can_cancel is True
 
-    _set_status(session_factory, job.id, "COMPLETED")
-    completed = job_service.get_job(job.id)  # COMPLETED -- no transitions allowed at all
-    assert build_job_detail_view(completed, [], [], storage).can_cancel is False
+    for blocked_status in ("COMPLETED", "FAILED", "CANCELLED"):
+        _set_status(session_factory, job.id, blocked_status)
+        blocked = job_service.get_job(job.id)
+        assert build_job_detail_view(blocked, [], [], storage).can_cancel is False, blocked_status
+
+    for allowed_status in ("READY", "PUBLISHING"):
+        _set_status(session_factory, job.id, allowed_status)
+        allowed = job_service.get_job(job.id)
+        assert build_job_detail_view(allowed, [], [], storage).can_cancel is True, allowed_status
 
 
 def test_job_detail_view_video_available_reflects_real_file_existence(

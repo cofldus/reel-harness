@@ -29,6 +29,17 @@ def _extract_csrf_and_idempotency(html: str) -> tuple[str, str]:
     return csrf_match.group(1), idem_match.group(1)
 
 
+def _set_status(ctx: AppContext, job_id: str, status: str, **extra) -> None:
+    from reel_harness.db.models import Job
+
+    with ctx.session_factory() as session:
+        db_job = session.get(Job, job_id)
+        db_job.status = status
+        for key, value in extra.items():
+            setattr(db_job, key, value)
+        session.commit()
+
+
 def test_dashboard_renders(tmp_path) -> None:
     ctx = _make_ctx(tmp_path)
     app.dependency_overrides[get_context] = lambda: ctx
@@ -230,6 +241,133 @@ def test_job_approve_refuses_when_not_review_required(tmp_path) -> None:
 
         response = client.post(f"/jobs/{job.id}/approve", headers={"X-CSRF-Token": csrf_token})
         assert response.status_code == 409  # job is QUEUED, not REVIEW_REQUIRED
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_reject_without_csrf_is_rejected(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        response = TestClient(app).post(
+            f"/jobs/{job.id}/reject", data={"reason": "not good", "regenerate_from_stage": "SCRIPT"},
+        )
+        assert response.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_reject_refuses_when_not_review_required(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        client = TestClient(app)
+        form_page = client.get("/jobs/new")
+        csrf_token, _ = _extract_csrf_and_idempotency(form_page.text)
+
+        response = client.post(
+            f"/jobs/{job.id}/reject", data={"reason": "not good", "regenerate_from_stage": "SCRIPT"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert response.status_code == 409  # job is QUEUED, not REVIEW_REQUIRED
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_reject_succeeds_when_review_required(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        _set_status(ctx, job.id, "REVIEW_REQUIRED", reason_code="USER_APPROVAL_REQUIRED")
+        client = TestClient(app)
+        form_page = client.get("/jobs/new")
+        csrf_token, _ = _extract_csrf_and_idempotency(form_page.text)
+
+        response = client.post(
+            f"/jobs/{job.id}/reject", data={"reason": "not good", "regenerate_from_stage": "SCRIPT"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert response.status_code == 200
+        assert "재시도 대기 중" in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_retry_without_csrf_is_rejected(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        response = TestClient(app).post(f"/jobs/{job.id}/retry", data={"stage": "SCRIPT"})
+        assert response.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_retry_refuses_when_not_failed(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        client = TestClient(app)
+        form_page = client.get("/jobs/new")
+        csrf_token, _ = _extract_csrf_and_idempotency(form_page.text)
+
+        response = client.post(
+            f"/jobs/{job.id}/retry", data={"stage": "SCRIPT"}, headers={"X-CSRF-Token": csrf_token},
+        )
+        assert response.status_code == 409  # job is QUEUED, not FAILED
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_job_retry_succeeds_when_failed(tmp_path) -> None:
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        _set_status(ctx, job.id, "FAILED", failure_code="X", failure_summary="boom")
+        client = TestClient(app)
+        form_page = client.get("/jobs/new")
+        csrf_token, _ = _extract_csrf_and_idempotency(form_page.text)
+
+        response = client.post(
+            f"/jobs/{job.id}/retry", data={"stage": "SCRIPT"}, headers={"X-CSRF-Token": csrf_token},
+        )
+        assert response.status_code == 200
+        assert "재시도 대기 중" in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_status_fragment_response_carries_a_real_csrf_token_not_empty(tmp_path) -> None:
+    """Regression test for a bug found by independent review: the status
+    fragment (what every htmx poll AND every action response re-renders)
+    must carry a real csrf_token into its own action forms' hidden fields
+    -- not just the first full-page render -- or the no-JS <form> fallback
+    silently 403s after the very first poll."""
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k1", topic="t")
+        client = TestClient(app)
+        client.get("/jobs/new")  # establishes the CSRF cookie in the client's jar
+
+        fragment = client.get(f"/jobs/{job.id}/status")
+        assert fragment.status_code == 200
+        match = _CSRF_INPUT_RE.search(fragment.text)
+        assert match, "fragment never renders a csrf_token hidden field at all"
+        assert match.group(1), "fragment's csrf_token hidden field is empty"
     finally:
         app.dependency_overrides.clear()
 

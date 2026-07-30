@@ -274,8 +274,17 @@ def _status_fragment(request: Request, job_id: str, ctx: AppContext) -> HTMLResp
     if job.status == JobStatus.COMPLETED.value:
         eligibility = ctx.publications.check_eligibility(job_id)
     view = build_job_detail_view(job, stage_runs, assets, ctx.storage, eligibility=eligibility)
-    templates = get_templates()
-    return templates.TemplateResponse(request, "fragments/job_status.html", {"job": view})
+    # Reuses _render (not a bare TemplateResponse) specifically so
+    # csrf_token is threaded through here too -- this fragment is what
+    # every htmx poll AND every cancel/approve/reject/retry action response
+    # swaps into the page, so its own action forms' hidden csrf_token
+    # fields need a real value on every render, not just the page's first
+    # one (the no-JS <form> fallback POSTs that hidden field directly;
+    # htmx's own requests are separately covered by the X-CSRF-Token header
+    # set once on <body>, which is why a missing token here was previously
+    # easy to miss under normal JS-enabled testing -- found by independent
+    # review, reproduced, and fixed here).
+    return _render(request, "fragments/job_status.html", {"job": view})
 
 
 @router.get("/jobs/{job_id}/status", response_class=HTMLResponse)

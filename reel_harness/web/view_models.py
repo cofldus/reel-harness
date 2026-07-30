@@ -4,11 +4,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from reel_harness.core.service import asset_safe_metadata
-from reel_harness.core.state_machine import ALLOWED_TRANSITIONS, TERMINAL_STATUSES, JobStatus
+from reel_harness.core.state_machine import TERMINAL_STATUSES, JobStatus
 from reel_harness.web.formatting import format_duration, format_elapsed_since
 from reel_harness.web.labels import NEEDS_ACTION_STATUSES, job_status_label, stage_label
 
 FINAL_VIDEO_REL_PATH = "final/final.mp4"
+
+# Mirrors JobService.request_cancel's own precondition exactly (core/
+# service.py) -- deriving this from ALLOWED_TRANSITIONS instead would be
+# wrong: request_cancel accepts READY/PUBLISHING too (cancellation there is
+# asynchronous via cancel_requested, not a direct ALLOWED_TRANSITIONS edge
+# to CANCELLED), so a transitions-based derivation would hide a valid
+# Cancel button for those statuses. Found by independent review.
+_CANCEL_BLOCKED_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 
 
 @dataclass
@@ -189,7 +197,7 @@ def build_job_detail_view(job, stage_runs, assets, storage, eligibility=None) ->
     actually COMPLETED; the route decides when to call
     ctx.publications.check_eligibility and passes the result through."""
     status = _job_status(job)
-    can_cancel = JobStatus.CANCELLED in ALLOWED_TRANSITIONS.get(status, set())
+    can_cancel = status not in _CANCEL_BLOCKED_STATUSES
     video_available = storage.exists(job.id, FINAL_VIDEO_REL_PATH)
     script_title = None
     if isinstance(job.script, dict):
