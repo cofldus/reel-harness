@@ -580,6 +580,37 @@ def retry_publication_endpoint(
     return {"retried": True, **result.to_dict()}
 
 
+class PublicationListResponse(BaseModel):
+    publications: list[PublicationResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+@app.get("/v1/publications", dependencies=[Depends(require_api_key)])
+def list_publications(
+    job_id: str | None = None, provider: str | None = None, status_filter: str | None = None,
+    limit: int = 50, offset: int = 0, ctx: AppContext = Depends(get_context),
+) -> PublicationListResponse:
+    """`status_filter` (query param name `status_filter`, not `status`, to
+    avoid colliding with FastAPI's own `status` module import in this file,
+    same naming choice as GET /v1/jobs). Additive endpoint -- ctx.publications
+    already supported all of this filtering; only limit/offset pagination
+    and this HTTP surface are new (see PublicationService.list_publications/
+    count_publications)."""
+    if not (1 <= limit <= 200):
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must not be negative")
+    pubs = ctx.publications.list_publications(
+        job_id=job_id, provider=provider, status=status_filter, limit=limit, offset=offset,
+    )
+    total = ctx.publications.count_publications(job_id=job_id, provider=provider, status=status_filter)
+    return PublicationListResponse(
+        publications=[_to_publication_response(p) for p in pubs], total=total, limit=limit, offset=offset,
+    )
+
+
 # --- Web UI (reel_harness.web) ---------------------------------------------
 # Mounted here (not inside reel_harness.web itself) so this module stays the
 # single place that ever constructs FastAPI() -- ops.supervisor.Supervisor

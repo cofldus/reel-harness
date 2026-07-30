@@ -10,6 +10,7 @@ from reel_harness.config import Settings
 from reel_harness.providers.registry import (
     _resolve_fresh_tiktok_access_token,
     _resolve_fresh_youtube_access_token,
+    configured_publishers,
     provider_capabilities,
     publisher_snapshot,
     resolve_publisher,
@@ -641,3 +642,40 @@ def test_instagram_invalid_credential_refuses_further_attempts_without_a_new_net
         _resolve_fresh_instagram_access_token(
             settings, backend, "default", oauth_transport=httpx.MockTransport(handler),
         )
+
+
+def test_configured_publishers_omits_providers_with_no_oauth_client() -> None:
+    settings = Settings(_env_file=None)  # nothing configured at all
+    backend = InMemoryCredentialBackend()
+    result = configured_publishers(settings, backend)
+    assert result == {}
+
+
+def test_configured_publishers_includes_configured_provider_with_empty_account_list() -> None:
+    settings = _settings()  # youtube client configured, no account connected yet
+    backend = InMemoryCredentialBackend()
+    result = configured_publishers(settings, backend)
+    assert result == {"youtube": []}
+
+
+def test_configured_publishers_lists_connected_accounts_for_configured_providers() -> None:
+    settings = Settings(
+        _env_file=None,
+        youtube_client_id="client-1", youtube_client_secret=FAKE_CLIENT_SECRET,
+        tiktok_client_key="key-1", tiktok_client_secret=FAKE_CLIENT_SECRET,
+        tiktok_redirect_uri="https://example.invalid/callback",
+    )
+    backend = InMemoryCredentialBackend()
+    backend.save_credential(OAuthCredential(
+        access_token="tok", refresh_token="ref", expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="", provider="youtube", account_reference="default",
+    ))
+    backend.save_credential(OAuthCredential(
+        access_token="tok2", refresh_token="ref2", expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scope="", provider="youtube", account_reference="second",
+    ))
+
+    result = configured_publishers(settings, backend)
+
+    assert result == {"youtube": ["default", "second"], "tiktok": []}
+    assert "instagram" not in result  # not configured -- must not appear as a key at all

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from reel_harness.core.publish_eligibility import EligibilityResult, check_publish_eligibility
@@ -162,30 +162,62 @@ class PublicationService:
         provider: str | None = None, account_reference: str | None = None,
         statuses: list[str] | None = None,
         created_after: object = None, created_before: object = None,
+        limit: int | None = None, offset: int = 0,
     ) -> list[Publication]:
         """`status` filters to exactly one status; `statuses` (used by e.g.
         `publication-list --failed-only`) filters to any of a set -- passing
-        both is redundant, `status` wins if both are given."""
+        both is redundant, `status` wins if both are given. `limit=None`
+        (the default) preserves the original unbounded behavior every
+        existing CLI/API caller relies on -- pass an explicit `limit` (e.g.
+        the web UI's publication list page) to page results, same
+        limit/offset contract as JobService.list_jobs."""
         with self._session_factory() as session:
-            stmt = select(Publication)
-            if job_id:
-                stmt = stmt.where(Publication.job_id == job_id)
-            if status:
-                stmt = stmt.where(Publication.status == status)
-            elif statuses:
-                stmt = stmt.where(Publication.status.in_(statuses))
-            if provider:
-                stmt = stmt.where(Publication.provider == provider)
-            if account_reference:
-                stmt = stmt.where(Publication.account_reference == account_reference)
-            if created_after is not None:
-                stmt = stmt.where(Publication.created_at >= created_after)
-            if created_before is not None:
-                stmt = stmt.where(Publication.created_at <= created_before)
-            rows = list(session.execute(stmt.order_by(Publication.created_at.desc())).scalars().all())
+            stmt = self._filtered_publications_stmt(
+                job_id=job_id, status=status, provider=provider, account_reference=account_reference,
+                statuses=statuses, created_after=created_after, created_before=created_before,
+            )
+            stmt = stmt.order_by(Publication.created_at.desc()).offset(offset)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            rows = list(session.execute(stmt).scalars().all())
             for row in rows:
                 session.expunge(row)
             return rows
+
+    def count_publications(
+        self, job_id: str | None = None, status: str | None = None, *,
+        provider: str | None = None, account_reference: str | None = None,
+        statuses: list[str] | None = None,
+        created_after: object = None, created_before: object = None,
+    ) -> int:
+        with self._session_factory() as session:
+            stmt = self._filtered_publications_stmt(
+                job_id=job_id, status=status, provider=provider, account_reference=account_reference,
+                statuses=statuses, created_after=created_after, created_before=created_before,
+                base=select(func.count()).select_from(Publication),
+            )
+            return int(session.execute(stmt).scalar_one())
+
+    @staticmethod
+    def _filtered_publications_stmt(
+        *, job_id, status, provider, account_reference, statuses, created_after, created_before, base=None,
+    ):
+        stmt = base if base is not None else select(Publication)
+        if job_id:
+            stmt = stmt.where(Publication.job_id == job_id)
+        if status:
+            stmt = stmt.where(Publication.status == status)
+        elif statuses:
+            stmt = stmt.where(Publication.status.in_(statuses))
+        if provider:
+            stmt = stmt.where(Publication.provider == provider)
+        if account_reference:
+            stmt = stmt.where(Publication.account_reference == account_reference)
+        if created_after is not None:
+            stmt = stmt.where(Publication.created_at >= created_after)
+        if created_before is not None:
+            stmt = stmt.where(Publication.created_at <= created_before)
+        return stmt
 
     def cancel_publication(self, publication_id: str) -> Publication:
         """Cancels a publication. States with no active upload in flight

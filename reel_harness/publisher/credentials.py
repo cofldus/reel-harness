@@ -48,6 +48,27 @@ class OAuthCredential:
     invalid: bool = False
 
 
+def publisher_account_safe_metadata(cred: OAuthCredential) -> dict:
+    """The subset of an OAuthCredential safe to hand to a client (CLI stdout
+    or a web template) -- never access_token, refresh_token, or the raw
+    stored JSON. Mirrors core.service.asset_safe_metadata's role: the one
+    place that decides what's externally safe, so the CLI and the web UI
+    can't drift into two different allowlists."""
+    return {
+        "provider": cred.provider,
+        "account_reference": cred.account_reference,
+        "channel_id": cred.channel_id,
+        "channel_title": cred.channel_title,
+        "scope": cred.scope,
+        "has_refresh_token": bool(cred.refresh_token),
+        "created_at": cred.created_at.isoformat() if cred.created_at else None,
+        "last_refreshed_at": cred.last_refreshed_at.isoformat() if cred.last_refreshed_at else None,
+        "last_refresh_error": cred.last_refresh_error,
+        "invalid": cred.invalid,
+        "expires_at": cred.expires_at.isoformat() if cred.expires_at else None,
+    }
+
+
 def _key(provider: str, account_reference: str) -> str:
     return f"{provider}__{account_reference}"
 

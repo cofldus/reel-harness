@@ -80,6 +80,14 @@ class AppContext:
 
         return FileCredentialBackend(self._get_secret_store())
 
+    def oauth_flow_store(self):
+        """Transient, single-use state bridging a browser OAuth connect
+        request and its callback -- see publisher.oauth_flow_store for why
+        this is a separate namespace from credentials, never a DB table."""
+        from reel_harness.publisher.oauth_flow_store import OAuthFlowStore
+
+        return OAuthFlowStore(self._get_secret_store())
+
     def publish_journal(self):
         """Durable, append-only, fsync'd crash-recovery journal -- rooted
         alongside OAuth credentials/upload-session references (same
