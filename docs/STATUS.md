@@ -1,8 +1,127 @@
 # Status
 
-Last updated: 2026-07-30 (Phase 5A Web UI MVP session, on branch
-`phase5/web-ui-mvp`). Phase 2A through Phase 4C (Demo Mode) are merged
-into `main` as of `v0.2.0rc1`.
+Last updated: 2026-07-30 (Phase 5B Publishing Web UI session, on branch
+`phase5/publishing-ui`). Phase 2A through Phase 5A (Local Web UI MVP) are
+merged into `main` as of `v0.3.0rc1`.
+
+## Phase 5B — Publishing Web UI
+
+Goal: extend the Phase 5A web UI to cover real-platform publishing --
+connecting a YouTube/TikTok/Instagram account, creating a publication from
+a completed job, and watching it through upload/processing to a published
+video, entirely by clicking. No change to the underlying publish backend
+(`PublicationService`, `core.publish_retry`/`publish_reconciliation`, the
+publisher worker) -- every new web route calls the exact same in-process
+functions the CLI/`/v1/publications/*` API already used.
+
+- **Repo audit confirmed the backend was already complete**: `Publisher`
+  Protocol + 3 real adapters + `fake`, `PublicationService`, a
+  `Publication`/`PublicationStatus` state machine independent of
+  `Job`/`JobStatus`, eligibility checking that permanently blocks Demo/Fake
+  output, a durable crash-recovery journal, reconciliation, manual retry,
+  and full `/v1/publications/*` routes. The actual gap was narrow: no HTTP
+  OAuth callback existed anywhere (the CLI's `publisher-auth` holds a
+  loopback listener open synchronously in the terminal, which a browser
+  can't do), no page rendered `JobDetailView.can_publish` (already
+  computed in Phase 5A, but dead -- no template used it), no
+  "which publishers are connected" query existed, and the CLI's
+  credential-safe-metadata allowlist was inlined twice instead of factored
+  out once.
+- **New `publisher.oauth_flow_store.OAuthFlowStore`**: transient, single-
+  use state (PKCE verifier + pending account_reference) bridging a
+  browser's `POST /connect` and its `GET /callback` -- a browser redirect
+  round-trip can't hold a CLI process's in-memory PKCE state the way
+  `publisher-auth` does. File-backed (same repository-external secret
+  directory as credentials, its own namespace), keyed by `state` only
+  (never `(provider, account_reference)`, so concurrent/abandoned-then-
+  retried flows never collide), TTL-checked lazily on `pop()` -- no
+  background sweep thread, consistent with the rest of this codebase.
+- **`/callback` has no CSRF dependency, by design**: it's reached by a
+  genuine cross-site top-level navigation from the OAuth provider's own
+  domain; `rh_csrf` is `SameSite=Strict`, so that cookie would never be
+  sent there regardless. The single-use, short-TTL, provider-bound
+  `state` parameter is the correct CSRF-equivalent defense for an OAuth
+  callback -- documented explicitly in `docs/OPERATIONS.md` so a future
+  reviewer doesn't "fix" it into a bug.
+- **Redirect_uri asymmetry, deliberate**: YouTube's redirect_uri is
+  computed per-request via `request.url_for(...)` (Google's Desktop-app
+  client type tolerates any loopback port, same property the CLI's
+  ephemeral-port listener already relies on -- no new setting). TikTok/
+  Instagram reuse their existing configured `_redirect_uri` settings
+  verbatim, since those platforms need an exact pre-registered match.
+- **Platform-specific options are read-only, not editable**: a real gap
+  found while designing the publish-setup form --
+  `PublicationService.create_publication` has no parameter to accept a
+  custom per-publication `platform_options` override at all; the worker
+  always applies `providers.registry.default_platform_options(provider)`
+  (the same thing `publish-job`/the CLI already do). The form shows these
+  defaults read-only with a confirmation checkbox, rather than pretending
+  to let the user customize something the backend can't yet persist --
+  changing that would mean touching `PublicationService`/the worker's
+  metadata-snapshot resume path, real domain-logic surface this phase
+  deliberately left alone.
+- **A real pre-existing bug found and fixed**:
+  `PublicationService.cancel_publication` assumed every non-terminal
+  status could transition straight to `CANCELLED` via its
+  `_IMMEDIATE_CANCEL_STATUSES` set, but the state machine deliberately
+  only allows `FAILED` -> `RETRY_WAIT` (see
+  `test_failed_allows_only_manual_retry_wait`, a pre-existing test this
+  session didn't write) -- calling cancel on a `FAILED` publication
+  crashed with a raw `InvalidTransitionError` instead of a clean 409.
+  Found by the new web UI's `can_cancel`-mirrors-the-real-precondition
+  test (the same discipline Phase 5A established for jobs' `can_cancel`).
+  `FAILED` is now refused explicitly, alongside `PUBLISHED`/`CANCELLED`.
+  Predates Phase 5B; only ever reachable via
+  `/v1/publications/{id}/cancel`, but nothing had exercised that specific
+  path before.
+- **Two more template bugs a template-only "hide when unavailable" pattern
+  produced, both fixed**: (1) `publisher_accounts.html`/`publish_setup.html`
+  originally hid a platform's entire form (including its CSRF hidden
+  field) whenever that platform wasn't selectable -- a page where nothing
+  is configured/connected then has zero CSRF-carrying elements at all.
+  Fixed by always rendering the form with disabled inputs instead, the
+  same fix Phase 5A's own CSRF-fragment bug already established the
+  precedent for. (2) Job Detail's new "게시" empty-state message was
+  gated on `not job.can_publish`, so an eligible job with zero
+  publications yet showed neither the publish button's list nor the
+  empty state -- a genuinely eligible job's page looked broken. Both
+  caught by dedicated tests, not manual inspection.
+- **Routes**: `/publisher-accounts` (+ `connect`/`callback`/`disconnect`),
+  `/jobs/{id}/publish` (setup) + `POST /jobs/{id}/publications` (create),
+  `/publications` (list), `/publications/{id}` (detail) +
+  `/publications/{id}/status` (HTMX fragment) +
+  `/{cancel,retry,refresh,reconcile}`. None overlap `/v1/*` -- same
+  unprefixed-web-route-alongside-`/v1/*`-API pattern Phase 5A established
+  for jobs. One additive `GET /v1/publications` list route was added for
+  API-client parity, mirroring Phase 5A's own `GET /v1/jobs` precedent.
+- **No new SQL table, no Alembic, `SCHEMA_VERSION` unchanged** -- confirmed
+  during design review, not assumed: nothing downstream expects OAuth
+  pending-flow state to survive a restart, and the one existing audit
+  table (`PublicationAuditEvent`) is FK'd to `publication_id`, which
+  doesn't exist yet at OAuth-connect time.
+- **Verification**: unit tests for every new view model's `can_*`
+  mirroring the real service precondition (not a transition-table guess),
+  form validation (allow-lists sourced from `provider_capabilities()`,
+  never hardcoded), and label coverage; route tests (`TestClient`) for
+  CSRF gating, every action's success + precondition-violation case, and
+  the full OAuth connect/callback/disconnect flow (state single-use,
+  expired/missing/mismatched state, provider error handling) using an
+  injected fake `*OAuthClient` -- no real network call anywhere, per
+  CLAUDE.md; an integration test driving a full publish lifecycle purely
+  through the web routes with the `fake` publisher provider (needs no
+  OAuth account) across two real worker-drive cycles
+  (`READY_TO_UPLOAD` -> `PROCESSING`, then `PROCESSING` -> `PUBLISHED`,
+  mirroring `run_publication`'s own two-call contract) to actually reach
+  `PUBLISHED`; a real-Chromium Playwright scenario confirming the
+  publish-eligible job's "게시하기" link, the publish-setup page's real
+  (unconfigured) readiness rendering, and its navigation to
+  `/publisher-accounts`. Full suite green, mypy/ruff clean.
+- **Manual verification performed against a real running `serve`
+  process** (not just `TestClient`): the `/connect` redirect resolves to
+  Google's real authorization URL with a correct
+  `state`/`code_challenge`/`redirect_uri` (matching the actual bound
+  port), and the not-configured/missing-CSRF/invalid-state paths all
+  return the right status code.
 
 ## Phase 5A — Local Web UI MVP
 

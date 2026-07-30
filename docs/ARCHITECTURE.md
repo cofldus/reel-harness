@@ -65,13 +65,21 @@ reel_harness/
   cli/main.py                     argparse CLI (reel-harness ...)
   api/app.py                      FastAPI app (healthz, /v1/jobs, cancel/approve); also the sole
                                    FastAPI() composition root -- mounts web/router.py + StaticFiles
-  web/                             Server-rendered web UI (Phase 5A) -- Jinja2 + HTMX + vanilla JS,
-                                   zero Node/SPA build step. router.py (pages + HTMX fragment/action
-                                   routes, mounted onto api/app.py's app via include_router at import
-                                   time), view_models.py (plain dataclasses, never raw ORM to
-                                   templates), labels.py (the one enum -> user-facing-string mapping
-                                   table), dependencies.py (CSRF), templates/, static/ (incl. vendored
-                                   htmx.min.js, no CDN) -- see docs/OPERATIONS.md's Web UI section
+  web/                             Server-rendered web UI (Phase 5A generation + Phase 5B publishing)
+                                   -- Jinja2 + HTMX + vanilla JS, zero Node/SPA build step. router.py
+                                   (pages + HTMX fragment/action routes, mounted onto api/app.py's app
+                                   via include_router at import time), view_models.py +
+                                   publication_view_models.py (plain dataclasses, never raw ORM to
+                                   templates -- every can_* flag mirrors the real service-layer
+                                   precondition, not a transition-table guess), labels.py (the one
+                                   enum -> user-facing-string mapping table, Job and Publication
+                                   alike), forms.py + publication_forms.py, dependencies.py (CSRF),
+                                   templates/, static/ (incl. vendored htmx.min.js, no CDN) -- see
+                                   docs/OPERATIONS.md's Web UI sections
+  publisher/oauth_flow_store.py    transient, single-use, file-backed state bridging a browser OAuth
+                                   connect request and its callback (Phase 5B) -- never a DB table,
+                                   never a cookie; see docs/OPERATIONS.md's Publishing (Phase 5B)
+                                   section
 ```
 
 ## State machine

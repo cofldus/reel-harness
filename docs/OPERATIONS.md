@@ -536,10 +536,11 @@ directly. This remains a deliberate scope boundary, not an oversight — see
 
 Facebook Reels publishers, automatic public publishing, scheduled-publish
 automation, automatic remote delete, thumbnail/subtitle upload, analytics
-collection, auto-commenting, an OAuth account-management UI, a web
-dashboard, PostgreSQL, a cloud secret manager, and a cloud queue — none of
-these exist yet. TikTok and Instagram publishing are covered below (Phase
-3C/3D).
+collection, auto-commenting, PostgreSQL, a cloud secret manager, and a
+cloud queue — none of these exist yet. TikTok and Instagram publishing are
+covered below (Phase 3C/3D). (An OAuth account-management UI and a web
+dashboard were out of scope as of Phase 3B; both now exist — see "Web UI —
+Publishing (Phase 5B)" above.)
 
 ## Publishing (TikTok)
 
@@ -1020,8 +1021,154 @@ or the rest of the test suite.
 
 **Scope**: Phase 5A covers Demo-Mode generation end to end (create → watch
 progress → review → approve/reject/retry/cancel → download). Real-platform
-publishing (account selection, OAuth connect, per-platform options) has no
-web UI yet — CLI-only (`publisher-auth`, `publish-job`) until Phase 5B.
+publishing now has its own web UI too — see "Web UI — Publishing (Phase 5B)"
+below.
+
+## Web UI — Publishing (Phase 5B)
+
+Extends the Phase 5A web UI with real-platform publishing: connecting a
+YouTube/TikTok/Instagram account, creating a publication from a completed
+job, and watching it through upload/processing to a published video — all
+by clicking, no CLI required after `serve` starts. Nothing here changes
+the underlying publish backend (`PublicationService`, `core.publish_retry`/
+`publish_reconciliation`, the publisher worker) — every action route calls
+the exact same in-process functions the CLI/`/v1/publications/*` API
+already used, just reached from a browser instead.
+
+**Routes**: `/publisher-accounts` (connected-accounts status),
+`POST /publisher-accounts/{provider}/connect`,
+`GET /publisher-accounts/{provider}/callback`,
+`POST /publisher-accounts/{provider}/disconnect`,
+`GET /jobs/{id}/publish` (publish setup, only reachable when the job is
+COMPLETED and currently eligible), `POST /jobs/{id}/publications`
+(create), `GET /publications` (list), `GET /publications/{id}` (detail),
+`GET /publications/{id}/status` (HTMX polling fragment), and
+`POST /publications/{id}/{cancel,retry,refresh,reconcile}`. None of this
+overlaps `/v1/*` (the JSON API keeps its own `/v1/jobs/{id}/publications`
+and `/v1/publications/{id}/...` routes, unchanged) — the web UI is purely
+additive, the same discipline Phase 5A established for jobs.
+
+**OAuth connect/callback — a genuinely new mechanism, not just a new
+page**: until now the only working OAuth flow was `publisher-auth`'s
+CLI-driven loopback listener, which holds the terminal process open while
+it waits for exactly one redirect. A browser can't do that, so `/connect`
+generates a PKCE challenge + a single-use `state` token and stores them in
+a new `publisher.oauth_flow_store.OAuthFlowStore` — file-backed (same
+repository-external secret directory as credentials, a separate
+namespace), never a cookie, never the DB — then 303-redirects the browser
+straight to the provider's real authorization page. `/callback` reads it
+back by `state`, exchanges the code (mirroring each
+`_cmd_publisher_auth_{provider}` CLI flow's exact token-exchange sequence:
+YouTube/TikTok single-step, Instagram's three-step short-lived →
+long-lived → account-identity), saves the credential, and redirects to
+`/publisher-accounts`.
+
+**`/callback` deliberately has no CSRF dependency** — stated explicitly so
+it never gets "fixed" into a bug later. It's reached by a genuine
+cross-site top-level navigation from the OAuth provider's own domain; the
+`rh_csrf` cookie is `SameSite=Strict`, so the browser would never send it
+there regardless of what the route required. The single-use, short-TTL,
+provider-bound `state` parameter is the standard, correct CSRF-equivalent
+defense for an OAuth callback. `/connect` and `/disconnect`, by contrast,
+use the same `require_csrf` dependency as every other mutating web route.
+
+**Redirect_uri: YouTube vs. TikTok/Instagram, deliberately asymmetric**.
+YouTube's redirect_uri is computed per-request via `request.url_for(...)`
+— Google's Desktop-app OAuth client type tolerates any port on
+`127.0.0.1` (RFC 8252), the same property the CLI's own ephemeral-port
+loopback listener already relies on, so no new setting was needed.
+TikTok/Instagram reuse their existing `REEL_HARNESS_TIKTOK_REDIRECT_URI`/
+`REEL_HARNESS_INSTAGRAM_REDIRECT_URI` settings verbatim, unchanged, since
+those platforms require an exact pre-registered match and those settings
+already existed for the CLI's flow. **To use the web connect flow for
+TikTok or Instagram, register the exact URL
+`http://127.0.0.1:8000/publisher-accounts/{tiktok,instagram}/callback`**
+(adjust host/port to match wherever `serve` actually runs) in that
+platform's developer console — this is the same
+`http://127.0.0.1:PORT`-as-redirect_uri path `_cmd_publisher_auth_tiktok`'s
+own docstring already documents as supported (at the operator's own risk),
+just pointed at the web route's exact path instead of a CLI loopback port.
+Registering the web callback URL supersedes whatever was registered for
+the CLI's loopback/paste-back flow for that provider, unless the
+platform's console supports registering more than one redirect URI (varies
+by platform).
+
+**Disconnect is local-only**, exactly like `publisher-account-remove`:
+it deletes the saved credential from this machine's file store and never
+revokes remote authorization at the platform. Stated in the UI itself, not
+just here.
+
+**Publish-setup form**: each configured-and-connected platform gets its
+own form (disabled with the exact reason when not selectable — an
+unconfigured OAuth client or zero connected accounts — rather than
+omitted, so the CSRF token stays present on the page either way). Privacy/
+visibility choices and their labels come from `provider_capabilities()`,
+never hardcoded per-provider strings. Platform-specific options
+(TikTok/Instagram) are shown read-only from `default_platform_options()`
+— `PublicationService.create_publication` has no parameter to accept a
+custom per-publication override yet, so the form surfaces the actual
+most-restrictive defaults the worker will apply rather than pretending to
+let the user customize something the backend can't persist. Any
+`privacy_status` in `public_privacy_values` is only selectable at all when
+`REEL_HARNESS_ALLOW_PUBLIC_UPLOAD=true`; Instagram's only privacy value
+(`PUBLIC`) means Instagram is entirely unavailable as a target when that
+flag is off. TikTok's unaudited-app SELF_ONLY restriction and Instagram's
+always-public model are both called out inline as static warnings — the
+live per-account restriction is only knowable via a real
+`get_creator_info()` call, which this form never makes automatically (see
+below); the real enforcement happens server-side in `create_publication`,
+and a resulting `PublisherAppReviewRequiredError` is caught and
+re-rendered as a friendly inline error, never a raw exception.
+
+**No automatic real network call, anywhere in this UI.** Publish-setup,
+publication list/detail, and status polling are all local-only (DB + file-
+store reads). The one exception is the OAuth exchange itself (inherent to
+connecting an account) — there is no "check account status now" button in
+this phase; use `reel-harness publisher-doctor --check-remote` or
+`live-verify` from the CLI for an opt-in real readiness probe.
+
+**Status polling and actions**: `fragments/publication_status.html`
+copies the job status fragment's exact self-terminating HTMX pattern —
+`hx-get`/`hx-trigger`/`hx-swap` are omitted once the publication is
+terminal (`PUBLISHED`/`CANCELLED`) or needs a human action
+(`FAILED`/`AUTH_REQUIRED`/`QUOTA_BLOCKED`/`RETRY_WAIT`/`REVIEW_REQUIRED`
+— derived from `core.publish_retry`'s real retryable-status set, not
+guessed). Cancel/retry/refresh each call the identical
+`cancel_publication`/`retry_publication`/lease+`run_publication` logic the
+`/v1/publications/*` API routes already used; reconcile's outcome is
+threaded into the re-rendered fragment so a click shows what was actually
+found (e.g. `ambiguous_remote_state`, `app_review_required`), never a
+silent no-op.
+
+**A real pre-existing bug found and fixed while building this**:
+`PublicationService.cancel_publication` assumed every non-terminal status
+could transition straight to `CANCELLED`, but the state machine
+deliberately only allows `FAILED` → `RETRY_WAIT` (see
+`test_failed_allows_only_manual_retry_wait`) — calling cancel on a
+`FAILED` publication crashed with a raw `InvalidTransitionError` instead
+of a clean 409. `FAILED` is now refused explicitly, alongside
+`PUBLISHED`/`CANCELLED`, with a message pointing at retry as the
+alternative. This predates Phase 5B; it was only ever reachable via
+`/v1/publications/{id}/cancel`, but no test had exercised a FAILED
+publication's cancel path until this session's `can_cancel`-mirroring
+test caught it.
+
+**Job Detail** gained a "게시" section: a publish button when the job is
+COMPLETED and currently eligible, and a list of the job's existing
+publications (there can be more than one — one per platform) either way.
+
+**Verification**: unit tests for every new view model's `can_*` mirroring
+the real service precondition (not a transition-table guess), form
+validation, and label coverage; route tests (`TestClient`) for CSRF
+gating, every action's success + precondition-violation case, and the
+OAuth connect/callback/disconnect flow (state single-use, expired/
+missing/mismatched state, provider error handling — all with an injected
+fake `*OAuthClient`, no real network call); an integration test driving a
+full publish lifecycle purely through the web routes with the `fake`
+publisher provider (needs no OAuth account) across two real worker-drive
+cycles to reach `PUBLISHED`; a real-Chromium Playwright scenario
+confirming the actual rendered publish-setup page and its navigation to
+`/publisher-accounts`. Full suite green, mypy/ruff clean.
 
 ## Health and readiness
 
@@ -1276,15 +1423,17 @@ features: `publisher-doctor`, account management, durable crash-recovery
 reconciliation, manual retry, and a processing poller. Production
 operations exist (preflight, DB/storage backup and verification, the
 `serve` supervisor, metrics, incident bundles, live-verify, and the
-release-manifest/release-check/tagging process). Facebook Reels
-publishing does not exist. Also not yet supported: automatic public
-publishing (public always requires the explicit double-confirmation +
-feature flag above), scheduled-publish automation, automatic remote
-video/post delete, thumbnail/subtitle upload, analytics collection, an
-OAuth account-management UI, PostgreSQL, cloud storage/CDN (beyond
+release-manifest/release-check/tagging process). A web UI exists too
+(Phase 5A generation + Phase 5B publishing, including an OAuth
+account-connect UI — see "Web UI — Publishing (Phase 5B)" above); this
+list predates both. Facebook Reels publishing does not exist. Also not
+yet supported: automatic public publishing (public always requires the
+explicit double-confirmation + feature flag above), scheduled-publish
+automation, automatic remote video/post delete, thumbnail/subtitle
+upload, analytics collection, PostgreSQL, cloud storage/CDN (beyond
 Instagram's own resumable upload), a credential-bundling backup command
-(see "Credential backup policy" above), web UI, face-recognition smart
-crop, BGM mixing, subtitle burn-in, multi-language dubbing.
+(see "Credential backup policy" above), face-recognition smart crop, BGM
+mixing, subtitle burn-in, multi-language dubbing.
 
 ## Troubleshooting
 
