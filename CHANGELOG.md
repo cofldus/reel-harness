@@ -4,7 +4,7 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
-## [Unreleased] — Demo Mode
+## [0.2.0rc1] — 2026-07-30 — Demo Mode (first release candidate)
 
 ### Added
 
