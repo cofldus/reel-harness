@@ -13,6 +13,18 @@ _VERSION_RE = re.compile(r"version\s+(\S+)")
 
 ENV_FFMPEG_PATH = "REEL_HARNESS_FFMPEG_PATH"
 ENV_FFPROBE_PATH = "REEL_HARNESS_FFPROBE_PATH"
+ENV_FONT_PATH = "REEL_HARNESS_FONT_PATH"
+
+# Common Korean-capable font locations, checked only after the env var and
+# project-local .tools/fonts/ tiers below. Unlike ffmpeg/ffprobe, a font miss
+# here is never a hard failure -- media.ffmpeg_render falls back to ffmpeg's
+# own fontconfig-based `font=sans-serif`, which needs no explicit path at all.
+_PLATFORM_DEFAULT_FONTS: tuple[Path, ...] = (
+    Path(r"C:\Windows\Fonts\malgun.ttf"),
+    Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+)
 
 
 @dataclass
@@ -97,3 +109,31 @@ def check_ffmpeg_available(
         ffmpeg=_resolve_binary("ffmpeg", ENV_FFMPEG_PATH, env, project_root),
         ffprobe=_resolve_binary("ffprobe", ENV_FFPROBE_PATH, env, project_root),
     )
+
+
+def resolve_font_path(
+    env: Mapping[str, str] | None = None, project_root: Path | None = None,
+) -> Path | None:
+    """Resolution order mirrors _resolve_binary: REEL_HARNESS_FONT_PATH env
+    var -> project-local .tools/fonts/*.ttf -> a short list of common
+    platform-default Korean-capable font paths -> None. Unlike ffmpeg/
+    ffprobe, returning None is not an error -- media.ffmpeg_render's
+    subtitle burn-in falls back to ffmpeg's fontconfig-based
+    `font=sans-serif`, which resolves without any explicit path."""
+    env = env if env is not None else os.environ
+    project_root = project_root if project_root is not None else Path.cwd()
+
+    explicit = env.get(ENV_FONT_PATH)
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+
+    local_dir = project_root / ".tools" / "fonts"
+    if local_dir.is_dir():
+        for candidate in sorted(local_dir.glob("*.ttf")):
+            return candidate
+
+    for candidate in _PLATFORM_DEFAULT_FONTS:
+        if candidate.is_file():
+            return candidate
+
+    return None
