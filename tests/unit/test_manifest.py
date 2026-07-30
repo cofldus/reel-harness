@@ -79,6 +79,12 @@ def test_publish_not_eligible_with_fake_test_license_even_if_approved() -> None:
     assert is_publish_eligible(manifest) is False
 
 
+def test_publish_not_eligible_with_demo_test_license_even_if_approved() -> None:
+    manifest = build_manifest(_FakeJob(), [_asset(0, license_type="DEMO_TEST_LICENSE")], "demo", "demo-voice")
+    manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))
+    assert is_publish_eligible(manifest) is False
+
+
 def test_publish_not_eligible_with_missing_license() -> None:
     manifest = build_manifest(_FakeJob(), [_asset(0, license_type=None)], "fake", "fake-voice-1")
     manifest.approval = ApprovalInfo(decision="approve", decided_at=datetime.now(UTC))

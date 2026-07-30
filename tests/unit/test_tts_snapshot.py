@@ -89,6 +89,19 @@ def test_resolution_honors_fake_snapshot_even_when_env_is_real() -> None:
     assert provider.provider_id == "fake"
 
 
+def test_demo_tts_snapshot_shape_and_resolution() -> None:
+    """Demo Mode needs no credentials -- unlike the real openai-compatible
+    branch, tts_provider_snapshot's "demo" branch must never require
+    tts_base_url/tts_api_key to be set."""
+    snapshot = tts_provider_snapshot(_settings(tts_provider="demo"))
+    assert snapshot["tts_provider"] == "demo"
+    assert "tts_adapter_version" in snapshot
+    validate_provider_settings(_settings(tts_provider="demo"))
+
+    provider = resolve_tts_for_snapshot({"tts_provider": "demo"}, _real_tts_settings())
+    assert provider.provider_id == "demo"
+
+
 def test_legacy_snapshots_without_tts_block_fall_back_to_current_settings() -> None:
     """Jobs created before the TTS block existed (schema v3 DBs) keep working:
     an LLM-only snapshot resolves TTS from current settings."""

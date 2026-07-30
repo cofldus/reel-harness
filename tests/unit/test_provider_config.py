@@ -45,6 +45,10 @@ def test_api_key_never_appears_in_settings_repr() -> None:
     assert FAKE_KEY not in str(settings)
 
 
+def test_validation_passes_for_demo_with_no_credentials() -> None:
+    validate_provider_settings(_settings(llm_provider="demo"))
+
+
 def test_validation_passes_for_fake_and_fails_clearly_for_incomplete_real() -> None:
     validate_provider_settings(_settings())  # fake needs nothing
 
@@ -72,6 +76,10 @@ def test_snapshot_shape_for_fake_and_real() -> None:
     fake_snapshot = llm_provider_snapshot(_settings())
     assert fake_snapshot["llm_provider"] == "fake"
     assert "prompt_version" in fake_snapshot
+
+    demo_snapshot = llm_provider_snapshot(_settings(llm_provider="demo"))
+    assert demo_snapshot["llm_provider"] == "demo"
+    assert "prompt_version" in demo_snapshot
 
     real_snapshot = llm_provider_snapshot(_settings(
         llm_provider="openai_compatible",
@@ -107,6 +115,15 @@ def test_resolution_honors_fake_snapshot_even_when_env_is_real() -> None:
     )
     llm = resolve_llm_for_snapshot({"llm_provider": "fake"}, real_settings)
     assert llm.provider_id == "fake"
+
+
+def test_resolution_honors_demo_snapshot_even_when_env_is_real() -> None:
+    real_settings = _settings(
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.example.invalid/v1", llm_model="env-model", llm_api_key=FAKE_KEY,
+    )
+    llm = resolve_llm_for_snapshot({"llm_provider": "demo"}, real_settings)
+    assert llm.provider_id == "demo"
 
 
 def test_resolution_pins_model_and_sampling_from_the_snapshot() -> None:
