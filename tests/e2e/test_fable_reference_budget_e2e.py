@@ -13,6 +13,8 @@ against what was actually generated is a number to be suspicious of.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from reel_harness.core.cost_service import recorded_spend
@@ -45,6 +47,12 @@ def _service(session_factory, storage, **kwargs):
         cinematic_provider_resolver=lambda project: FakeCinematicVideoProvider(),
         **kwargs,
     )
+
+
+def _cast(fable, project_id):
+    """Generate the reference sheets and return the cast."""
+    fable.generate_references(project_id)
+    return fable.project_characters(project_id)
 
 
 def test_fable_f3_slice_casts_budgets_and_films(session_factory, tmp_path) -> None:
@@ -152,6 +160,62 @@ def test_fable_f3_slice_casts_budgets_and_films(session_factory, tmp_path) -> No
     reference_total = sum(c.reference_cost_amount or 0.0 for c in fable.project_characters(project.id))
     assert take_total > 0 and reference_total > 0
     assert audited == pytest.approx(take_total + reference_total)
+
+
+def test_the_final_film_can_be_assembled_with_dissolves(session_factory, tmp_path) -> None:
+    """F5's film editor through the real service: the same walk, but the
+    final assembly blends between shots instead of hard-cutting, and the
+    result is genuinely shorter than the clip sum because each transition
+    overlaps two shots."""
+    from reel_harness.media.deps import check_ffmpeg_available
+    from reel_harness.media.ffprobe_validate import build_ffprobe_argv, parse_ffprobe_output
+    from reel_harness.media.film_editor import TRANSITION_DISSOLVE, EditPlan
+    from reel_harness.media.runner import run
+
+    storage = LocalFilesystemStorage(tmp_path / "fable_projects")
+    plan = EditPlan(transition=TRANSITION_DISSOLVE, transition_sec=0.3, fade_out_sec=0.2)
+    fable = _service(session_factory, storage, edit_plan=plan)
+
+    project, _ = fable.create_project(
+        title="dissolve", source_text=STORY, idempotency_key="f3-e2e-dissolve",
+    )
+    fable.adapt_project(project.id)
+    fable.approve_story(project.id)
+    for character in _cast(fable, project.id):
+        fable.approve_reference(character.id)
+    fable.approve_characters(project.id)
+    fable.approve_shots(project.id)
+
+    daemon = FableDaemon(
+        session_factory, storage, lambda shot: FakeCinematicVideoProvider(),
+        FableDaemonConfig(
+            worker_id="dissolve-worker", poll_interval_seconds=0.05,
+            lease_timeout_seconds=300, heartbeat_interval_seconds=0.5,
+            idle_exit_after_seconds=0.5,
+        ),
+    )
+    assert daemon.run() == 0
+    shots = fable.project_shots(project.id)
+    for shot in shots:
+        fable.select_take(fable.shot_takes(shot.id)[0].id)
+
+    final_path = fable.render_final(project.id)
+    assert final_path.exists()
+
+    deps = check_ffmpeg_available()
+    probe = run(build_ffprobe_argv(deps.ffprobe.path, final_path))
+    assert probe.returncode == 0
+    measured = parse_ffprobe_output(probe.stdout).duration_sec
+
+    clip_total = 0.0
+    for shot in shots:
+        selected = [t for t in fable.shot_takes(shot.id) if t.selected][0]
+        clip_probe = run(build_ffprobe_argv(deps.ffprobe.path, Path(selected.media_path)))
+        clip_total += parse_ffprobe_output(clip_probe.stdout).duration_sec
+
+    overlap = plan.transition_sec * (len(shots) - 1)
+    assert measured < clip_total, "every transition overlaps two shots, shortening the film"
+    assert measured == pytest.approx(clip_total - overlap, abs=0.5)
 
 
 def test_budget_exhaustion_mid_generation_reviews_rather_than_fails(

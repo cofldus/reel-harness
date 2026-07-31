@@ -143,6 +143,46 @@ class Settings(BaseSettings):
     # here when it lands. Selection only for now.
     cinematic_provider: str = Field(
         "fake", validation_alias=_llm_alias("REEL_HARNESS_CINEMATIC_PROVIDER", "CINEMATIC_PROVIDER"))
+    cinematic_model: str = Field(
+        "veo-3.1-fast-generate-001", validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_MODEL", "CINEMATIC_MODEL"))
+    # Published list price per generated SECOND. Configurable rather than
+    # hardcoded for the same reason as the image price -- a vendor's
+    # tariff is not this project's to promise. Unset it and estimates
+    # report unknown, which makes a budgeted project refuse to run.
+    cinematic_price_per_second_usd: float | None = Field(
+        0.15, validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_PRICE_PER_SECOND_USD", "CINEMATIC_PRICE_PER_SECOND_USD"))
+    # Veo generates native audio. Left on by default because a silent
+    # clip is a worse default than one with sound the editor can mute.
+    cinematic_generate_audio: bool = Field(
+        True, validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_GENERATE_AUDIO", "CINEMATIC_GENERATE_AUDIO"))
+    # Film assembly (media.film_editor). "cut" is the default because a
+    # hard cut is a lossless stream COPY -- every other option blends
+    # pixels and therefore costs a full re-encode.
+    fable_transition: str = Field(
+        "cut", validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TRANSITION", "FABLE_TRANSITION"))
+    fable_transition_seconds: float = Field(
+        0.5, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TRANSITION_SECONDS", "FABLE_TRANSITION_SECONDS"))
+    fable_fade_in_seconds: float = Field(
+        0.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_FADE_IN_SECONDS", "FABLE_FADE_IN_SECONDS"))
+    fable_fade_out_seconds: float = Field(
+        0.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_FADE_OUT_SECONDS", "FABLE_FADE_OUT_SECONDS"))
+    # Muting is an explicit editorial choice. Veo generates native audio,
+    # and silently dropping it would be a surprising default.
+    fable_mute_audio: bool = Field(
+        False, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_MUTE_AUDIO", "FABLE_MUTE_AUDIO"))
+    # A transition-bearing assembly re-encodes every frame; the default
+    # subprocess timeout is sized for a stream copy, not for that.
+    fable_render_timeout_seconds: float = Field(
+        1800.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_RENDER_TIMEOUT_SECONDS", "FABLE_RENDER_TIMEOUT_SECONDS"))
     # Narrative Director (story -> shot plan). "openai-compatible" reuses
     # the REEL_HARNESS_LLM_* endpoint/credentials above -- adaptation is a
     # chat-completions call against the same kind of endpoint, so a second
@@ -476,15 +516,39 @@ def _validate_tts_settings(settings: Settings) -> None:
 
 
 def _validate_cinematic_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import CINEMATIC_VIDEO_PROVIDERS
+
     name = normalize_provider_name(settings.cinematic_provider)
-    if name == "fake":
+    if name not in CINEMATIC_VIDEO_PROVIDERS:
+        raise ProviderConfigurationError(
+            f"unknown cinematic provider {settings.cinematic_provider!r} "
+            f"(supported: {', '.join(sorted(CINEMATIC_VIDEO_PROVIDERS))})"
+        )
+    if name != "google":
         return
-    # No demo/real cinematic adapter exists yet (Fable F3/F5) -- refuse
-    # anything else loudly rather than accepting a name that would only
-    # fail later at resolution time.
-    raise ProviderConfigurationError(
-        f"unknown cinematic provider {settings.cinematic_provider!r} (supported: fake)"
-    )
+    # Selecting the real adapter without a way to authenticate -- or
+    # pinned to a region the model is not served from -- fails HERE, at
+    # startup, with the exact variable names. Never at first use, halfway
+    # through a paid generation run.
+    from reel_harness.providers.google_cinematic_video import SUPPORTED_LOCATION
+
+    if settings.google_use_vertex:
+        if not settings.google_project:
+            raise ProviderConfigurationError(
+                f"cinematic provider {name!r} is selected but credentials are not "
+                "configured: missing REEL_HARNESS_GOOGLE_PROJECT"
+            )
+        if settings.google_location != SUPPORTED_LOCATION:
+            raise ProviderConfigurationError(
+                f"{settings.cinematic_model} is only served from "
+                f"{SUPPORTED_LOCATION!r}, but REEL_HARNESS_GOOGLE_LOCATION is "
+                f"{settings.google_location!r}"
+            )
+    elif not settings.google_api_key.get_secret_value():
+        raise ProviderConfigurationError(
+            f"cinematic provider {name!r} is selected but credentials are not "
+            "configured: missing REEL_HARNESS_GOOGLE_API_KEY"
+        )
 
 
 def _validate_narrative_settings(settings: Settings) -> None:
@@ -511,6 +575,42 @@ def _validate_narrative_settings(settings: Settings) -> None:
             f"narrative provider {name!r} is selected but credentials are not "
             "configured: missing " + ", ".join(missing)
         )
+
+
+def _validate_edit_plan(settings: Settings) -> None:
+    """A malformed edit plan fails at STARTUP rather than after every shot
+    has been generated and paid for -- the final render is the very last
+    step, and discovering an unsupported transition there would waste the
+    whole run."""
+    from reel_harness.media.film_editor import SUPPORTED_TRANSITIONS, EditPlan, validate_plan
+
+    if settings.fable_transition not in SUPPORTED_TRANSITIONS:
+        raise ProviderConfigurationError(
+            f"unsupported fable transition {settings.fable_transition!r} "
+            f"(supported: {', '.join(sorted(SUPPORTED_TRANSITIONS))})"
+        )
+    plan = edit_plan_from_settings(settings)
+    try:
+        # Validated against a nominal 8s clip pair -- the real durations
+        # are re-checked at render time against the actual footage.
+        validate_plan(plan, [8.0, 8.0])
+    except ValueError as exc:
+        raise ProviderConfigurationError(f"invalid fable edit plan: {exc}") from exc
+    assert isinstance(plan, EditPlan)
+
+
+def edit_plan_from_settings(settings: Settings):
+    """The one place settings become an EditPlan, so the startup check and
+    the renderer can never disagree about what was configured."""
+    from reel_harness.media.film_editor import EditPlan
+
+    return EditPlan(
+        transition=settings.fable_transition,
+        transition_sec=settings.fable_transition_seconds,
+        fade_in_sec=settings.fable_fade_in_seconds,
+        fade_out_sec=settings.fable_fade_out_seconds,
+        mute_audio=settings.fable_mute_audio,
+    )
 
 
 def _validate_takes_per_shot(settings: Settings) -> None:
@@ -738,6 +838,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_narrative_settings(settings)
     _validate_reference_image_settings(settings)
     _validate_takes_per_shot(settings)
+    _validate_edit_plan(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)

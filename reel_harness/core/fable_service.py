@@ -46,6 +46,7 @@ from reel_harness.db.cinematic_models import (
     FableTake,
     StoryProject,
 )
+from reel_harness.media.film_editor import EditPlan, FilmEditError, edit_film_argv
 from reel_harness.pipeline.reference_prompt import (
     DEFAULT_REFERENCE_RESOLUTION,
     REFERENCE_ASPECT_RATIO,
@@ -69,6 +70,7 @@ class FableService:
         narrative_director_resolver=None, cinematic_provider_resolver=None,
         allow_paid_generation: bool = False, reference_provider=None,
         reference_provider_resolver=None, takes_per_shot: int = 1,
+        edit_plan: EditPlan | None = None, render_timeout_seconds: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -97,6 +99,14 @@ class FableService:
         # for generation. Both must agree, or the gate approves a
         # fraction of the real bill.
         self._default_takes_per_shot = takes_per_shot
+        # How the final film is assembled. A hard cut by default, because
+        # it is lossless and needs no re-encode; anything else is an
+        # explicit editorial choice that costs an encode.
+        self._edit_plan = edit_plan or EditPlan()
+        # A transition-bearing assembly re-encodes every frame, which on a
+        # long film takes far longer than a stream copy -- the default
+        # subprocess timeout is sized for the copy path.
+        self._render_timeout_seconds = render_timeout_seconds
 
     # -- creation / read -------------------------------------------------
 
@@ -858,11 +868,19 @@ class FableService:
 
     # -- final render ----------------------------------------------------
 
-    def render_final(self, project_id: str) -> Path:
-        """EDITING: concatenates the selected takes in scene/shot order
-        into final/final.mp4 under the project's storage root (hard cuts
-        -- F5's film editor adds transitions/mixing/grading), validates
-        with ffprobe, then advances to FINAL_REVIEW."""
+    def render_final(self, project_id: str, plan=None) -> Path:
+        """EDITING: assembles the selected takes in scene/shot order into
+        final/final.mp4 under the project's storage root, validates with
+        ffprobe, then advances to FINAL_REVIEW.
+
+        Two assembly paths, and which one runs is decided by the plan
+        rather than by a flag: a plan that needs no pixel mixing (hard
+        cuts, no fades, audio untouched) takes F1's stream-COPY path,
+        which is lossless and fast. Anything that blends -- a dissolve, a
+        fade, a mute -- cannot be done by copy at all, so it goes through
+        media.film_editor's filtergraph and pays for a re-encode. Paying
+        that price for a cut that could have been a copy would be a
+        strictly worse default, which is why the default plan is a cut."""
         from reel_harness.core.errors import DependencyError, ValidationFailedError
         from reel_harness.media import ffmpeg_render
         from reel_harness.media.deps import check_ffmpeg_available
@@ -893,14 +911,30 @@ class FableService:
                 raise DependencyError("ffmpeg/ffprobe are required for the final render")
             assert deps.ffmpeg.path is not None and deps.ffprobe.path is not None
 
+            plan = plan if plan is not None else self._edit_plan
             final_dir = self._storage.path_for(project_id, "final")
             final_dir.mkdir(parents=True, exist_ok=True)
-            concat_list = final_dir / "concat.txt"
-            ffmpeg_render.write_concat_list(selected_paths, concat_list)
             final_path = final_dir / "final.mp4"
-            result = run(ffmpeg_render.concat_clips_argv(deps.ffmpeg.path, concat_list, final_path))
+
+            if plan.needs_reencode:
+                durations = self._clip_durations(deps.ffprobe.path, selected_paths)
+                try:
+                    argv = edit_film_argv(
+                        deps.ffmpeg.path, selected_paths, durations, final_path, plan,
+                    )
+                except FilmEditError as exc:
+                    # A plan that cannot work is refused BEFORE the encode,
+                    # so the operator reads the reason instead of an ffmpeg
+                    # filtergraph error minutes later.
+                    raise InvalidActionError(str(exc)) from exc
+            else:
+                concat_list = final_dir / "concat.txt"
+                ffmpeg_render.write_concat_list(selected_paths, concat_list)
+                argv = ffmpeg_render.concat_clips_argv(deps.ffmpeg.path, concat_list, final_path)
+
+            result = run(argv, timeout=self._render_timeout_seconds)
             if result.returncode != 0:
-                raise ValidationFailedError(f"final concat failed: {result.stderr[-300:]}")
+                raise ValidationFailedError(f"final assembly failed: {result.stderr[-300:]}")
 
             probe = run(build_ffprobe_argv(deps.ffprobe.path, final_path))
             if probe.returncode != 0:
@@ -932,6 +966,23 @@ class FableService:
             session.refresh(project)
             session.expunge(project)
             return project
+
+    def _clip_durations(self, ffprobe_path: Path, paths: list[Path]) -> list[float]:
+        """Real measured durations, never the planned ones. A transition's
+        offset is computed from where each clip ACTUALLY ends, and a
+        provider that returned 7.9s for an 8s request would otherwise put
+        every later transition in the wrong place."""
+        from reel_harness.core.errors import ValidationFailedError
+        from reel_harness.media.ffprobe_validate import build_ffprobe_argv, parse_ffprobe_output
+        from reel_harness.media.runner import run
+
+        durations: list[float] = []
+        for path in paths:
+            probe = run(build_ffprobe_argv(ffprobe_path, path))
+            if probe.returncode != 0:
+                raise ValidationFailedError(f"ffprobe failed on {path.name}: {probe.stderr[-200:]}")
+            durations.append(parse_ffprobe_output(probe.stdout).duration_sec)
+        return durations
 
     # -- shared helpers --------------------------------------------------
 

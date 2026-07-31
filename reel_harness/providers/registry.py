@@ -507,11 +507,31 @@ def _build_fake_cinematic_video(settings: Settings | None) -> CinematicVideoProv
     return FakeCinematicVideoProvider()
 
 
-# Fable cinematic generation (Phase F1): fake only for now -- the demo tier
-# lands in F3 and the first real adapter in F5, both registered HERE and
-# nowhere else, per the same vendor-name discipline as every other family.
+def _build_google_cinematic_video(settings: Settings | None) -> CinematicVideoProvider:
+    if settings is None:
+        raise NotImplementedError(
+            "the google cinematic provider requires application settings"
+        )
+    from reel_harness.providers.google_cinematic_video import GoogleCinematicVideoProvider
+
+    return GoogleCinematicVideoProvider(
+        project=settings.google_project,
+        location=settings.google_location,
+        api_key=settings.google_api_key.get_secret_value(),
+        use_vertex=settings.google_use_vertex,
+        model=settings.cinematic_model,
+        price_per_second_usd=settings.cinematic_price_per_second_usd,
+        generate_audio=settings.cinematic_generate_audio,
+    )
+
+
+# Fable cinematic generation. "google" IS a concrete vendor -- video
+# generation with typed character references has no protocol-shaped
+# standard -- so the name lives here and nowhere else, exactly like
+# "pexels" and the reference-image family.
 CINEMATIC_VIDEO_PROVIDERS: dict[str, Callable[[Settings | None], CinematicVideoProvider]] = {
     "fake": _build_fake_cinematic_video,
+    "google": _build_google_cinematic_video,
 }
 
 
@@ -727,11 +747,11 @@ def resolve_cinematic_video_for_snapshot(
             normalize_provider_name(settings.cinematic_provider) if settings else "fake", settings,
         )
     name = normalize_provider_name(snapshot.get("cinematic_provider"))
-    if name == "fake":
-        return _build_fake_cinematic_video(settings)
-    return _UnconfiguredCinematicVideoProvider(
-        f"project is pinned to cinematic provider {name!r}, which is not registered"
-    )
+    if name not in CINEMATIC_VIDEO_PROVIDERS:
+        return _UnconfiguredCinematicVideoProvider(
+            f"project is pinned to cinematic provider {name!r}, which is not registered"
+        )
+    return CINEMATIC_VIDEO_PROVIDERS[name](settings)
 
 
 # A neutral, maximally-restrictive placeholder -- _UnconfiguredPublisher is

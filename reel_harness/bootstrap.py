@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from reel_harness.config import Settings, load_settings, validate_provider_settings
+from reel_harness.config import (
+    Settings,
+    edit_plan_from_settings,
+    load_settings,
+    validate_provider_settings,
+)
 from reel_harness.core.publish_service import PublicationService
 from reel_harness.core.service import JobService
 from reel_harness.db.schema import create_engine_from_url, init_db, make_session_factory
@@ -58,6 +63,8 @@ class AppContext:
             allow_paid_generation=self.settings.allow_paid_generation,
             reference_provider_resolver=self.reference_provider_for_project,
             takes_per_shot=self.settings.fable_takes_per_shot,
+            edit_plan=edit_plan_from_settings(self.settings),
+            render_timeout_seconds=self.settings.fable_render_timeout_seconds,
         )
         self._secret_store = None
 
