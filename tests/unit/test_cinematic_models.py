@@ -25,8 +25,8 @@ _FABLE_TABLES = {
 }
 
 
-def test_schema_version_is_8() -> None:
-    assert SCHEMA_VERSION == 8
+def test_schema_version_is_9() -> None:
+    assert SCHEMA_VERSION == 9
 
 
 def test_init_db_creates_all_fable_tables(engine) -> None:

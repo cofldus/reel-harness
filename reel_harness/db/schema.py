@@ -33,7 +33,7 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # existing dev databases keep working without data loss. Only nullable column
 # additions are allowed through this path -- anything destructive or shaped
 # differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -82,6 +82,10 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     # v8: no new columns -- the Fable cinematic tables (db.cinematic_models)
     # are brand-new, which create_all() already handles for both fresh and
     # existing databases; same shape as v5's publications tables.
+    # v9: Fable F2 adaptation idempotency -- see
+    # core.fable_service.adapt_project. First additive column added since
+    # the migration mechanism became dialect-portable (6A-1).
+    ("fable_projects", "adaptation_fingerprint", String(), True, None),
 ]
 
 

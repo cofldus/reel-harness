@@ -19,6 +19,7 @@ from reel_harness.media.deps import check_ffmpeg_available
 from reel_harness.media.ffprobe_validate import build_ffprobe_argv, parse_ffprobe_output
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
 from reel_harness.storage.local import LocalFilesystemStorage
 from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
 
@@ -29,7 +30,9 @@ pytestmark = pytest.mark.skipif(not FFMPEG_PRESENT, reason="requires real ffmpeg
 def test_fable_vertical_slice_reaches_completed_final_film(session_factory, tmp_path) -> None:
     storage = LocalFilesystemStorage(tmp_path / "fable_projects")
     fable = FableService(
-        session_factory, storage=storage, provider_snapshot={"cinematic_provider": "fake"},
+        session_factory, storage=storage,
+        provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
+        narrative_director=FakeNarrativeDirector(),
     )
 
     # 1. Create + adapt (stub) + walk every review gate explicitly.
@@ -105,7 +108,9 @@ def test_fable_slice_survives_a_restart_between_generation_and_selection(
     then a brand-new service/daemon 'process' (same DB file) picks up
     review + selection + render -- nothing depends on in-memory state."""
     storage = LocalFilesystemStorage(tmp_path / "fable_projects")
-    fable = FableService(session_factory, storage=storage)
+    fable = FableService(
+        session_factory, storage=storage, narrative_director=FakeNarrativeDirector(),
+    )
     project, _ = fable.create_project(
         title="t", source_text="짧은 이야기.", idempotency_key="fable-restart",
     )
@@ -125,7 +130,9 @@ def test_fable_slice_survives_a_restart_between_generation_and_selection(
     assert daemon.run() == 0
 
     # "Restart": a brand-new FableService against the same session factory.
-    restarted = FableService(session_factory, storage=storage)
+    restarted = FableService(
+        session_factory, storage=storage, narrative_director=FakeNarrativeDirector(),
+    )
     assert restarted.get_project(project.id).status == "TAKE_REVIEW"
     for shot in restarted.project_shots(project.id):
         takes = restarted.shot_takes(shot.id)

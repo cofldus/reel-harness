@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 from reel_harness.core.fable_service import FableService
 from reel_harness.db.cinematic_models import FableShot
+from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
 from reel_harness.worker.fable_lease import (
     assert_shot_lease,
     find_orphaned_active_shots,
@@ -21,7 +22,7 @@ from reel_harness.worker.fable_lease import (
 
 def _ready_project(session_factory):
     """A project with 4 READY shots, walked through the real gates."""
-    fable = FableService(session_factory)
+    fable = FableService(session_factory, narrative_director=FakeNarrativeDirector())
     project, _ = fable.create_project(title="t", source_text="s", idempotency_key="lease-test")
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
@@ -153,7 +154,7 @@ def test_project_advances_to_take_review_only_when_no_shot_is_pending(session_fa
         # Shots are all READY -- generation not done, no advance.
         assert maybe_advance_project_after_generation(session, project.id) is False
 
-    fable = FableService(session_factory)
+    fable = FableService(session_factory, narrative_director=FakeNarrativeDirector())
     with session_factory() as session:
         for shot in fable.project_shots(project.id):
             db_shot = session.get(FableShot, shot.id)

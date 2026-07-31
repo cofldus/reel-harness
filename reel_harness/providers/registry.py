@@ -125,6 +125,22 @@ class _UnconfiguredCinematicVideoProvider:
         raise ProviderNotConfiguredError(self._reason)
 
 
+class _UnconfiguredNarrativeDirector:
+    """Narrative counterpart of _UnconfiguredLLMProvider: any adaptation
+    attempt fails with PROVIDER_NOT_CONFIGURED."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def adapt_story(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def repair_adaptation(self, request, previous_raw, errors):
+        raise ProviderNotConfiguredError(self._reason)
+
+
 def _build_openai_compatible_llm(
     settings: Settings | None,
     *,
@@ -498,13 +514,75 @@ def resolve_cinematic_video_provider(name: str, settings: Settings | None = None
         raise NotImplementedError(f"Cinematic video provider '{name}' is not registered yet") from exc
 
 
+def _build_fake_narrative_director(settings: Settings | None):
+    from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+
+    return FakeNarrativeDirector()
+
+
+# Narrative Director (Fable F2). The openai-compatible adapter is
+# registered by the next commit; until then only the fake tier exists and
+# any other name fails loudly rather than resolving to nothing.
+NARRATIVE_DIRECTORS: dict[str, Callable[[Settings | None], object]] = {
+    "fake": _build_fake_narrative_director,
+}
+
+
+def resolve_narrative_director(name: str, settings: Settings | None = None):
+    try:
+        return NARRATIVE_DIRECTORS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Narrative director '{name}' is not registered yet") from exc
+
+
 def cinematic_provider_snapshot(settings: Settings | None) -> dict:
     """Per-project provider snapshot block (Fable) -- same pinning
-    discipline as llm/tts/asset_provider_snapshot: provider id only for
-    now; the real adapter (F5) adds model + safe base-URL host here.
-    Never a credential."""
-    name = normalize_provider_name(settings.cinematic_provider) if settings else "fake"
-    return {"cinematic_provider": name}
+    discipline as llm/tts/asset_provider_snapshot: provider ids, model,
+    safe base-URL host, and the prompt version that shaped the
+    adaptation. Never a credential."""
+    from reel_harness.providers.narrative_prompts import NARRATIVE_PROMPT_VERSION
+
+    cinematic = normalize_provider_name(settings.cinematic_provider) if settings else "fake"
+    narrative = normalize_provider_name(settings.narrative_provider) if settings else "fake"
+    snapshot = {
+        "cinematic_provider": cinematic,
+        "narrative_provider": narrative,
+        "narrative_prompt_version": NARRATIVE_PROMPT_VERSION,
+    }
+    if narrative == "openai-compatible" and settings is not None:
+        snapshot["narrative_model"] = settings.llm_model
+        snapshot["narrative_base_url_host"] = urlsplit(settings.llm_base_url).netloc
+    return snapshot
+
+
+def resolve_narrative_director_for_snapshot(snapshot: dict | None, settings: Settings | None):
+    """Resolves the director a project's adaptation must run with,
+    honoring its creation-time snapshot -- identical fail-loud ladder as
+    the other families, no silent fallback to a different provider."""
+    if not snapshot or "narrative_provider" not in snapshot:
+        return resolve_narrative_director(
+            normalize_provider_name(settings.narrative_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("narrative_provider"))
+    if name == "fake":
+        return _build_fake_narrative_director(settings)
+    if name not in NARRATIVE_DIRECTORS:
+        return _UnconfiguredNarrativeDirector(
+            f"project is pinned to narrative provider {name!r}, which is not registered"
+        )
+    if settings is None or not settings.llm_base_url or not settings.llm_api_key.get_secret_value():
+        return _UnconfiguredNarrativeDirector(
+            "project is pinned to the openai-compatible narrative director but "
+            "REEL_HARNESS_LLM_BASE_URL / REEL_HARNESS_LLM_API_KEY are not configured"
+        )
+    pinned_host = snapshot.get("narrative_base_url_host")
+    current_host = urlsplit(settings.llm_base_url).netloc
+    if pinned_host and current_host != pinned_host:
+        return _UnconfiguredNarrativeDirector(
+            f"configured llm endpoint host {current_host!r} does not match the project's "
+            f"pinned host {pinned_host!r}"
+        )
+    return NARRATIVE_DIRECTORS[name](settings)
 
 
 def resolve_cinematic_video_for_snapshot(

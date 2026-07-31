@@ -19,6 +19,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from reel_harness.core.adaptation_service import run_adaptation
 from reel_harness.core.cinematic_state import (
     FableProjectStatus,
     FableShotStatus,
@@ -34,12 +35,8 @@ from reel_harness.db.cinematic_models import (
     FableTake,
     StoryProject,
 )
+from reel_harness.providers.base import AdaptationRequest
 from reel_harness.storage.base import StorageBackend
-
-# The fake provider supports {2.0, 4.0, 6.0, 8.0}s -- the stub plans 2s
-# shots so the offline slice stays fast. F2's real adaptation plans real
-# durations against the selected provider's capabilities.
-_STUB_SHOT_DURATION_SEC = 2.0
 
 
 class FableProjectNotFoundError(JobNotFoundError):
@@ -49,11 +46,19 @@ class FableProjectNotFoundError(JobNotFoundError):
 class FableService:
     def __init__(
         self, session_factory, storage: StorageBackend | None = None,
-        provider_snapshot: dict | None = None,
+        provider_snapshot: dict | None = None, narrative_director=None,
+        narrative_director_resolver=None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._provider_snapshot = provider_snapshot
+        # Two ways in, by design: AppContext passes a RESOLVER so each
+        # project's adaptation honors its own creation-time snapshot
+        # (pinning discipline); tests pass a director instance directly.
+        # Neither present means adapt_project refuses explicitly rather
+        # than silently falling back to anything.
+        self._narrative_director = narrative_director
+        self._narrative_director_resolver = narrative_director_resolver
 
     # -- creation / read -------------------------------------------------
 
@@ -130,76 +135,181 @@ class FableService:
                 session.expunge(take)
             return takes
 
-    # -- adaptation (F1 stub) --------------------------------------------
+    # -- adaptation ------------------------------------------------------
 
-    def adapt_project(self, project_id: str) -> StoryProject:
-        """DRAFT -> ADAPTING -> STORY_REVIEW, populating the story bible,
-        characters, locations, scenes, and shots. F1's adaptation is a
-        deterministic stub (no LLM); the states and review gates are the
-        real ones."""
+    def adaptation_fingerprint(self, project: StoryProject) -> str:
+        """Deterministic identity of the adaptation INPUT. Changing the
+        source text, any adaptation parameter, or the prompt version
+        yields a different fingerprint; re-running with the same one is a
+        replay, not a second paid call."""
+        from reel_harness.providers.narrative_prompts import NARRATIVE_PROMPT_VERSION
+
+        parts = [
+            project.source_text, project.language, project.genre or "", project.tone or "",
+            str(project.target_duration_sec), project.aspect_ratio, NARRATIVE_PROMPT_VERSION,
+        ]
+        return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:32]
+
+    def adapt_project(self, project_id: str, director=None) -> StoryProject:
+        """DRAFT -> ADAPTING -> STORY_REVIEW via the real Narrative
+        Director (core.adaptation_service's bounded repair loop).
+
+        Ordering is deliberate: ADAPTING is committed BEFORE any network
+        call, so a crash mid-adaptation is visible as ADAPTING with no
+        children, and re-running this method resumes it. The adaptation's
+        own writes (bible + characters + locations + scenes + shots +
+        fingerprint + STORY_REVIEW) all land in ONE transaction -- a
+        partially-written adaptation can never be observed.
+
+        Idempotency: an already-adapted project whose stored fingerprint
+        matches the current input replays (no director call). A DIFFERENT
+        fingerprint on an already-adapted project is refused -- the
+        STORY_REVIEW reject path is how a re-adaptation is requested, so
+        input drift can never silently discard an approved adaptation."""
         with self._session_factory() as session:
             project = session.get(StoryProject, project_id)
             if project is None:
                 raise FableProjectNotFoundError(project_id)
-            apply_project_transition(project, FableProjectStatus.ADAPTING)
-            session.commit()
+            if director is None:
+                director = (
+                    self._narrative_director_resolver(project)
+                    if self._narrative_director_resolver is not None
+                    else self._narrative_director
+                )
+            if director is None:
+                raise InvalidActionError(
+                    "no narrative director is configured -- set REEL_HARNESS_NARRATIVE_PROVIDER "
+                    "(fake or openai-compatible)"
+                )
+            fingerprint = self.adaptation_fingerprint(project)
+            # "Already adapted" means adaptation FINISHED (STORY_REVIEW or
+            # beyond) with real children. DRAFT has never adapted, and
+            # ADAPTING is either a crashed run or a rejection-triggered
+            # re-adaptation -- both must proceed, not be refused.
+            already_adapted = project.status not in (
+                FableProjectStatus.DRAFT.value, FableProjectStatus.ADAPTING.value,
+            ) and bool(self._scenes_for_project(session, project_id))
+            if already_adapted:
+                if project.adaptation_fingerprint == fingerprint:
+                    session.expunge(project)
+                    return project  # replay: no second paid call
+                raise InvalidActionError(
+                    "this project was already adapted from different input -- reject the story "
+                    "review to re-adapt instead of changing the source mid-flight"
+                )
+            if project.status == FableProjectStatus.DRAFT.value:
+                apply_project_transition(project, FableProjectStatus.ADAPTING)
+                session.commit()
 
-            self._stub_adaptation(session, project)
+        request = self._adaptation_request(project)
+        outcome = run_adaptation(director, request)
+
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            assert project is not None
+            self._persist_adaptation(session, project, outcome.adaptation)
+            project.adaptation_fingerprint = fingerprint
             apply_project_transition(project, FableProjectStatus.STORY_REVIEW)
             session.commit()
             session.refresh(project)
             session.expunge(project)
             return project
 
-    def _stub_adaptation(self, session, project: StoryProject) -> None:
-        digest = hashlib.sha256(project.source_text.encode()).hexdigest()[:8]
+    def _adaptation_request(self, project: StoryProject) -> AdaptationRequest:
+        return AdaptationRequest(
+            source_text=project.source_text, language=project.language,
+            genre=project.genre, tone=project.tone,
+            target_duration_sec=project.target_duration_sec,
+            aspect_ratio=project.aspect_ratio,
+        )
+
+    def _persist_adaptation(self, session, project: StoryProject, adaptation) -> None:
+        """Writes the validated adaptation. Replaces any previous
+        adaptation's children (only reachable before GENERATING, so no
+        take history can be lost -- asserted here rather than assumed)."""
+        existing_scenes = self._scenes_for_project(session, project.id)
+        if existing_scenes:
+            existing_shots = self._shots_for_project(session, project.id)
+            if any(shot.takes for shot in existing_shots):
+                raise InvalidActionError(
+                    "refusing to replace an adaptation whose shots already have takes"
+                )
+            for shot in existing_shots:
+                session.delete(shot)
+            for scene in existing_scenes:
+                session.delete(scene)
+            for character in session.execute(
+                select(FableCharacter).where(FableCharacter.project_id == project.id)
+            ).scalars():
+                session.delete(character)
+            for location in session.execute(
+                select(FableLocation).where(FableLocation.project_id == project.id)
+            ).scalars():
+                session.delete(location)
+            session.flush()
+
+        bible = adaptation.story_bible
         project.story_bible = {
-            "premise": project.source_text.strip()[:200],
-            "theme": project.tone or "quiet tension",
-            "setting": "a small rented room on a rainy night",
-            "time_period": "present day",
-            "visual_style": "soft practical lighting, muted palette",
-            "color_language": {"palette": "cool neutrals", "contrast": "low", "grain": "subtle"},
-            "narrative_point_of_view": "third person",
-            "ending": "kept as written",
-            "prohibited_elements": ["real people", "minors", "explicit content"],
-            "stub_fingerprint": digest,
+            "logline": adaptation.logline,
+            "synopsis": adaptation.synopsis,
+            **bible.model_dump(),
         }
-        character = FableCharacter(
-            project_id=project.id, name="배우 A", role="protagonist", age_range="30s",
-            adult_confirmed=True,  # the stub authors this character AS an adult
-            bible={
-                "face": "oval face, calm eyes", "hair": "black short hair",
-                "wardrobe": "grey coat", "mannerisms": "slow deliberate movements",
-                "voice_profile": {"style": "low, restrained"},
-            },
-        )
-        location = FableLocation(
-            project_id=project.id, name="호텔 창가", description="a hotel window at night, rain outside",
-            continuity={"lighting": "soft practicals", "time_of_day": "night", "weather": "rain"},
-        )
-        session.add_all([character, location])
+
+        # adult_confirmed is set from the VALIDATED schema (is_adult is
+        # Literal[True] and age_range is whitelisted), never trusted from
+        # free text -- see pipeline.adaptation_schema.
+        characters = {
+            model.name: FableCharacter(
+                project_id=project.id, name=model.name, role=model.role,
+                age_range=model.age_range, adult_confirmed=True,
+                bible={
+                    "appearance": model.appearance, "wardrobe": model.wardrobe,
+                    "hair": model.hair, "mannerisms": model.mannerisms,
+                    "voice_profile": {"style": model.voice_style},
+                    "fixed_identity": model.fixed_identity or {
+                        "appearance": model.appearance, "hair": model.hair,
+                        "wardrobe": model.wardrobe,
+                    },
+                },
+            )
+            for model in adaptation.characters
+        }
+        locations = {
+            model.name: FableLocation(
+                project_id=project.id, name=model.name, description=model.description,
+                continuity={
+                    "lighting": model.lighting, "time_of_day": model.time_of_day,
+                    "weather": model.weather,
+                },
+            )
+            for model in adaptation.locations
+        }
+        session.add_all([*characters.values(), *locations.values()])
         session.flush()
 
-        beats = [
-            ("도입", "looking out the window"),
-            ("전환", "turning slowly toward the door"),
-        ]
-        for scene_index, (purpose, action) in enumerate(beats, start=1):
+        for scene_model in adaptation.scenes:
+            location = locations.get(scene_model.location_name)
             scene = FableScene(
-                project_id=project.id, scene_order=scene_index, location_id=location.id,
-                story_purpose=purpose, emotional_beat="restrained unease",
-                estimated_duration_sec=2 * _STUB_SHOT_DURATION_SEC,
+                project_id=project.id, scene_order=scene_model.scene_order,
+                location_id=location.id if location is not None else None,
+                story_purpose=scene_model.story_purpose,
+                emotional_beat=scene_model.emotional_beat,
+                continuity_notes={"source_beat": scene_model.source_beat},
+                dialogue={"lines": [d.model_dump() for d in scene_model.dialogue]},
+                estimated_duration_sec=sum(s.duration_sec for s in scene_model.shots),
             )
             session.add(scene)
             session.flush()
-            for shot_index, shot_size in enumerate(("medium", "medium_close_up"), start=1):
+            for shot_model in scene_model.shots:
                 session.add(FableShot(
-                    scene_id=scene.id, shot_order=shot_index, shot_size=shot_size,
-                    camera_angle="eye_level", camera_movement="locked", lens_style="50mm",
-                    subject=character.name, action=action,
-                    expression="calm, faintly uneasy", lighting="soft practical",
-                    duration_sec=_STUB_SHOT_DURATION_SEC,
+                    scene_id=scene.id, shot_order=shot_model.shot_order,
+                    shot_size=shot_model.shot_size, camera_angle=shot_model.camera_angle,
+                    camera_movement=shot_model.camera_movement, lens_style=shot_model.lens_style,
+                    subject=shot_model.subject, action=shot_model.action,
+                    expression=shot_model.expression, blocking=shot_model.blocking,
+                    lighting=shot_model.lighting, duration_sec=shot_model.duration_sec,
+                    dialogue_line=shot_model.dialogue_line,
+                    continuity_requirements={"source_beat": scene_model.source_beat},
                 ))
         session.flush()
 
@@ -396,4 +506,10 @@ class FableService:
             .join(FableScene, FableShot.scene_id == FableScene.id)
             .where(FableScene.project_id == project_id)
             .order_by(FableScene.scene_order, FableShot.shot_order)
+        ).scalars())
+
+    def _scenes_for_project(self, session, project_id: str) -> list[FableScene]:
+        return list(session.execute(
+            select(FableScene).where(FableScene.project_id == project_id)
+            .order_by(FableScene.scene_order)
         ).scalars())

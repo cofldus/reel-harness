@@ -15,9 +15,12 @@ from reel_harness.storage.local import LocalFilesystemStorage
 
 @pytest.fixture
 def fable(session_factory, tmp_path):
+    from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+
     return FableService(
         session_factory, storage=LocalFilesystemStorage(tmp_path / "fable_projects"),
-        provider_snapshot={"cinematic_provider": "fake"},
+        provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
+        narrative_director=FakeNarrativeDirector(),
     )
 
 
@@ -49,7 +52,8 @@ def test_create_project_rejects_empty_story_and_bad_aspect(fable) -> None:
 
 def test_create_project_pins_the_provider_snapshot(fable) -> None:
     project = _create(fable)
-    assert project.provider_config == {"cinematic_provider": "fake"}
+    assert project.provider_config["cinematic_provider"] == "fake"
+    assert project.provider_config["narrative_provider"] == "fake"
 
 
 def test_adapt_populates_bible_characters_scenes_shots(fable) -> None:
@@ -62,7 +66,12 @@ def test_adapt_populates_bible_characters_scenes_shots(fable) -> None:
     shots = fable.project_shots(project.id)
     assert len(shots) == 4
     assert all(shot.status == "PLANNED" for shot in shots)
-    assert all(shot.camera_movement == "locked" for shot in shots)  # one movement per shot
+    # Every shot carries exactly one camera movement, validated against the
+    # grammar enum by the schema -- never a compound "pan and dolly".
+    from reel_harness.core.cinematic_state import CameraMovement
+
+    valid_movements = {m.value for m in CameraMovement}
+    assert all(shot.camera_movement in valid_movements for shot in shots)
 
 
 def test_review_gates_walk_in_order_and_never_skip(fable) -> None:

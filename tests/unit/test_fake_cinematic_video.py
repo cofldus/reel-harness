@@ -124,7 +124,11 @@ def test_registry_resolves_fake_and_rejects_unknown() -> None:
 
 def test_snapshot_and_resolution_ladder() -> None:
     snapshot = cinematic_provider_snapshot(None)
-    assert snapshot == {"cinematic_provider": "fake"}
+    assert snapshot["cinematic_provider"] == "fake"
+    # The snapshot also pins the narrative side (Fable F2) -- provider id
+    # and prompt version, never a credential.
+    assert snapshot["narrative_provider"] == "fake"
+    assert snapshot["narrative_prompt_version"]
 
     resolved = resolve_cinematic_video_for_snapshot(snapshot, None)
     assert resolved.provider_id == "fake"

@@ -47,6 +47,11 @@ class StoryProject(Base):
     # Provider snapshot at creation -- same pinning discipline as
     # Job.provider_config (provider id, model, safe host, never a key).
     provider_config: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # v9: deterministic identity of the adaptation INPUT (source text +
+    # parameters + prompt version). Re-running adapt_project with the same
+    # fingerprint on an already-adapted project is a no-op replay rather
+    # than a second paid LLM call -- see core.fable_service.adapt_project.
+    adaptation_fingerprint: Mapped[str | None] = mapped_column(default=None)
 
     status: Mapped[str] = mapped_column(default="DRAFT")
     failure_code: Mapped[str | None] = mapped_column(default=None)

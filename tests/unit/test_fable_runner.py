@@ -22,8 +22,12 @@ FFMPEG_PRESENT = check_ffmpeg_available().all_available
 
 @pytest.fixture
 def fable_env(session_factory, tmp_path):
+    from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+
     storage = LocalFilesystemStorage(tmp_path / "fable_projects")
-    fable = FableService(session_factory, storage=storage)
+    fable = FableService(
+        session_factory, storage=storage, narrative_director=FakeNarrativeDirector(),
+    )
     project, _ = fable.create_project(title="t", source_text="s", idempotency_key="runner-test")
     fable.adapt_project(project.id)
     fable.approve_story(project.id)

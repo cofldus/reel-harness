@@ -143,6 +143,12 @@ class Settings(BaseSettings):
     # here when it lands. Selection only for now.
     cinematic_provider: str = Field(
         "fake", validation_alias=_llm_alias("REEL_HARNESS_CINEMATIC_PROVIDER", "CINEMATIC_PROVIDER"))
+    # Narrative Director (story -> shot plan). "openai-compatible" reuses
+    # the REEL_HARNESS_LLM_* endpoint/credentials above -- adaptation is a
+    # chat-completions call against the same kind of endpoint, so a second
+    # set of connection settings would be duplication, not isolation.
+    narrative_provider: str = Field(
+        "fake", validation_alias=_llm_alias("REEL_HARNESS_NARRATIVE_PROVIDER", "NARRATIVE_PROVIDER"))
 
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
@@ -423,6 +429,32 @@ def _validate_cinematic_settings(settings: Settings) -> None:
     )
 
 
+def _validate_narrative_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import NARRATIVE_DIRECTORS
+
+    name = normalize_provider_name(settings.narrative_provider)
+    if name not in NARRATIVE_DIRECTORS:
+        raise ProviderConfigurationError(
+            f"unknown narrative provider {settings.narrative_provider!r} "
+            f"(supported: {', '.join(sorted(NARRATIVE_DIRECTORS))})"
+        )
+    if name == "fake":
+        return
+    # Adaptation reuses the LLM endpoint block -- report the exact vars.
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_LLM_BASE_URL", settings.llm_base_url),
+            ("REEL_HARNESS_LLM_MODEL", settings.llm_model),
+            ("REEL_HARNESS_LLM_API_KEY", settings.llm_api_key.get_secret_value()),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            f"narrative provider {name!r} is selected but credentials are not "
+            "configured: missing " + ", ".join(missing)
+        )
+
+
 def _validate_asset_settings(settings: Settings) -> None:
     if settings.asset_orientation not in ASSET_SUPPORTED_ORIENTATIONS:
         raise ProviderConfigurationError(
@@ -603,6 +635,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_llm_settings(settings)
     _validate_tts_settings(settings)
     _validate_cinematic_settings(settings)
+    _validate_narrative_settings(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)

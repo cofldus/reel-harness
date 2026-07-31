@@ -53,6 +53,7 @@ class AppContext:
         self.fable = FableService(
             self.session_factory, storage=self.fable_storage,
             provider_snapshot=cinematic_provider_snapshot(self.settings),
+            narrative_director_resolver=self.narrative_director_for_project,
         )
         self._secret_store = None
 
@@ -135,6 +136,16 @@ class AppContext:
             publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()),
             journal=self.publish_journal(),
         )
+
+    def narrative_director_for_project(self, project):
+        """The Narrative Director for one project, honoring its
+        creation-time snapshot -- an unsatisfiable snapshot yields a
+        director that fails with PROVIDER_NOT_CONFIGURED, never a silent
+        switch to a different model or endpoint."""
+        from reel_harness.providers.registry import resolve_narrative_director_for_snapshot
+
+        snapshot = getattr(project, "provider_config", None) if project is not None else None
+        return resolve_narrative_director_for_snapshot(snapshot, self.settings)
 
     def cinematic_provider_for_shot(self, shot):
         """The cinematic provider for one leased Fable shot, honoring the
