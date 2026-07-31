@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # phase6/** included so the postgres-parity job (which needs CI's real
+    # PostgreSQL service container -- the dev machine has none) verifies the
+    # dual-backend work BEFORE it merges to main, not only after.
+    branches: [main, "phase6/**"]
   pull_request:
 
 # No real credentials are configured anywhere in this workflow -- every
