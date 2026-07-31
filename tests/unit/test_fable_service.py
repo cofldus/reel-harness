@@ -11,16 +11,19 @@ from reel_harness.core.fable_service import FableProjectNotFoundError, FableServ
 from reel_harness.core.service import InvalidActionError
 from reel_harness.db.cinematic_models import FableCharacter, FableTake
 from reel_harness.storage.local import LocalFilesystemStorage
+from tests.conftest import walk_casting
 
 
 @pytest.fixture
 def fable(session_factory, tmp_path):
     from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+    from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
 
     return FableService(
         session_factory, storage=LocalFilesystemStorage(tmp_path / "fable_projects"),
         provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
         narrative_director=FakeNarrativeDirector(),
+        reference_provider=FakeReferenceImageProvider(),
     )
 
 
@@ -84,7 +87,13 @@ def test_review_gates_walk_in_order_and_never_skip(fable) -> None:
     with pytest.raises(InvalidFableTransitionError):
         fable.approve_shots(project.id)
 
-    assert fable.approve_story(project.id).status == "CHARACTER_REVIEW"
+    # Casting is a REAL stop (F3): approving the story lands in CASTING,
+    # and CHARACTER_REVIEW is only reached by actually generating the
+    # reference sheets.
+    assert fable.approve_story(project.id).status == "CASTING"
+    assert fable.generate_references(project.id).status == "CHARACTER_REVIEW"
+    for character in fable.project_characters(project.id):
+        fable.approve_reference(character.id)
     assert fable.approve_characters(project.id).status == "SHOT_REVIEW"
     generating = fable.approve_shots(project.id)
     assert generating.status == "GENERATING"
@@ -95,6 +104,7 @@ def test_character_gate_refuses_unconfirmed_adult(fable, session_factory) -> Non
     project = _create(fable)
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
 
     with session_factory() as session:
         from sqlalchemy import select
@@ -113,6 +123,7 @@ def test_select_take_enforces_single_selection(fable, session_factory) -> None:
     project = _create(fable)
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
     fable.approve_characters(project.id)
     fable.approve_shots(project.id)
 
@@ -167,12 +178,15 @@ def priced_fable(session_factory, tmp_path):
 
     def build(*, allow_paid_generation=False, provider=None):
         provider = provider or FakeCinematicVideoProvider()
+        from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
+
         return FableService(
             session_factory, storage=LocalFilesystemStorage(tmp_path / "fable_projects"),
             provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
             narrative_director=FakeNarrativeDirector(),
             cinematic_provider_resolver=lambda project: provider,
             allow_paid_generation=allow_paid_generation,
+            reference_provider=FakeReferenceImageProvider(),
         )
 
     return build
@@ -182,6 +196,7 @@ def _adapted_to_shot_review(fable: FableService, key: str = "budget-1") -> str:
     project = _create(fable, key)
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
     fable.approve_characters(project.id)
     return project.id
 
@@ -233,7 +248,11 @@ def test_approve_shots_refuses_when_the_estimate_exceeds_the_budget(priced_fable
     project cannot pay for all of them."""
     fable = priced_fable()
     project_id = _adapted_to_shot_review(fable)
-    fable.set_budget(project_id, 0.001, "FAKE")
+    # Casting already spent real money on the reference sheets, so the
+    # limit has to sit ABOVE that and below spend + the shot estimate.
+    spent = fable.budget_status(project_id).spent_amount
+    assert spent > 0, "casting should have recorded reference spend"
+    fable.set_budget(project_id, spent + 0.001, "FAKE")
     with pytest.raises(InvalidActionError, match="budget exhausted"):
         fable.approve_shots(project_id)
     # Nothing moved: still at the gate, still no claimable shot.
@@ -298,10 +317,12 @@ def test_estimate_cost_is_read_only(priced_fable) -> None:
     fable = priced_fable()
     project_id = _adapted_to_shot_review(fable)
     before = fable.get_project(project_id).status
+    spent_before = fable.budget_status(project_id).spent_amount
     estimate = fable.estimate_cost(project_id)
     assert estimate.known is True
     assert fable.get_project(project_id).status == before
-    assert fable.budget_status(project_id).spent_amount == 0.0
+    # Pricing moves nothing -- an estimate is not a charge.
+    assert fable.budget_status(project_id).spent_amount == spent_before
 
 
 def test_get_project_raises_for_unknown_id(fable) -> None:

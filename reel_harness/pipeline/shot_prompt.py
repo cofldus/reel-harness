@@ -41,7 +41,13 @@ _PROHIBITED_ARTIFACTS = (
 _IDENTITY_KEY_ORDER = ("face", "appearance", "hair", "wardrobe", "accessories")
 
 
-def _identity_values(character_bible: dict | None) -> list[str]:
+def fixed_identity_values(character_bible: dict | None) -> list[str]:
+    """The character's immutable appearance elements, in a stable order.
+
+    Public because the reference-sheet compiler (pipeline.reference_prompt)
+    must inject the SAME fragment: a reference still that describes a
+    different person from the shot prompts would defeat the entire point
+    of generating one."""
     if not character_bible:
         return []
     fixed = character_bible.get("fixed_identity") or {}
@@ -76,7 +82,7 @@ def compile_shot_prompt(
     # constant across shots), so emit it in slot 3 only when the identity
     # fragment doesn't already carry it -- repeating it verbatim adds no
     # information and dilutes the prompt.
-    identity_values = _identity_values(character_bible)
+    identity_values = fixed_identity_values(character_bible)
     wardrobe = str((character_bible or {}).get("wardrobe", ""))
     if wardrobe and wardrobe in identity_values:
         wardrobe = ""

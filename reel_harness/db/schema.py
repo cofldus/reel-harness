@@ -36,7 +36,7 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # and `publications.processing_poll_count`). Anything destructive -- a drop,
 # a rename, a type change, a backfill that needs to read other columns -- is
 # the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -104,6 +104,16 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     # (core.cost_service.recorded_spend) instead of being trusted.
     ("fable_takes", "cost_amount", Float(), True, None),
     ("fable_takes", "cost_currency", String(), True, None),
+    # v11: Fable F3 reference sheets -- the whole four-view sheet as one
+    # JSON doc (the face view stays in the pre-existing
+    # `reference_image_path`), plus why a sheet is missing when a
+    # content-policy refusal is the reason. See core.fable_service's
+    # generate_references.
+    ("fable_characters", "reference_images", JSON(), True, None),
+    ("fable_characters", "reference_failure_code", String(), True, None),
+    ("fable_characters", "reference_failure_summary", String(), True, None),
+    ("fable_characters", "reference_cost_amount", Float(), True, None),
+    ("fable_characters", "reference_cost_currency", String(), True, None),
 ]
 
 

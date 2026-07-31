@@ -96,9 +96,32 @@ class FableCharacter(Base):
 
     # F3: generated reference imagery (approval-gated before any paid
     # video generation may use it). Nullable until then.
+    #
+    # `reference_image_path` is the FACE portrait specifically -- the one
+    # view every other view was chained from, and the one a downstream
+    # video model gets when it accepts a single character reference.
+    # v11 `reference_images` carries the whole sheet as one JSON doc
+    # ({view: path}), following the same one-document convention as
+    # `bible`: written once by generation, read whole by whoever needs a
+    # view, never queried by parts.
     reference_image_path: Mapped[str | None] = mapped_column(default=None)
     reference_fingerprint: Mapped[str | None] = mapped_column(default=None)
     reference_approved: Mapped[bool] = mapped_column(default=False)
+    reference_images: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # v11: why the sheet is missing, when it is. A content-policy refusal
+    # is recorded HERE rather than failing the project: the operator sees
+    # which character was refused at the CHARACTER_REVIEW gate and edits
+    # the bible or rejects, which is the human decision the architecture
+    # rules require for an uncertain policy outcome.
+    reference_failure_code: Mapped[str | None] = mapped_column(default=None)
+    reference_failure_summary: Mapped[str | None] = mapped_column(default=None)
+    # v11: what this character's sheet ACTUALLY cost, summed across its
+    # views. The line item behind the project's running total, for the
+    # same reason FableTake carries one: reference images spend real
+    # money, so a spend audit that only counted takes would silently
+    # under-report every project that generated a cast.
+    reference_cost_amount: Mapped[float | None] = mapped_column(default=None)
+    reference_cost_currency: Mapped[str | None] = mapped_column(default=None)
 
     created_at: Mapped[datetime] = mapped_column(default=_now)
 

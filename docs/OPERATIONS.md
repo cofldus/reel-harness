@@ -944,7 +944,9 @@ mixed into `jobs/`.
 ```
 uv run reel-harness fable-create --title "비 오는 밤" --story-file story.txt
 uv run reel-harness fable-adapt <project_id>
-uv run reel-harness fable-approve <project_id> --step story
+uv run reel-harness fable-approve <project_id> --step story   # -> CASTING
+uv run reel-harness fable-generate-references <project_id>    # -> CHARACTER_REVIEW
+uv run reel-harness fable-reference <character_id>            # approve the sheet
 uv run reel-harness fable-approve <project_id> --step characters
 uv run reel-harness fable-estimate <project_id>                  # what it would cost
 uv run reel-harness fable-budget <project_id> --limit 5 --currency USD
@@ -961,6 +963,44 @@ explicit approval command; `--step shots` is the single entry into
 generation, which is the only phase that can cost money. `serve
 --fable-workers N` (default 0) runs the generation lane alongside the
 other workers.
+
+### Casting: character reference sheets
+
+`fable-generate-references` produces a four-view reference sheet per
+character — a face portrait, a three-quarter view, a full-body view, and
+a wardrobe detail — and moves the project `CASTING -> CHARACTER_REVIEW`.
+
+**The face is generated first, and the other three are generated from
+it.** Each later view is sent with the face image attached as a character
+reference. This is not an optimization: generating the four
+independently produces four different-looking people, and since every
+shot's footage imitates this sheet, that would make the film's lead
+change face between shots. The order lives in
+`pipeline/reference_prompt.py`, not in the caller.
+
+Generation is not approval. Each sheet arrives unapproved, and
+`fable-approve --step characters` refuses until every character's sheet
+has been approved with `fable-reference <character_id>`. Approving the
+cast means approving the actor you actually looked at.
+
+- `fable-reference <character_id> --reject` un-approves a sheet and
+  clears its fingerprint, so the next `fable-generate-references` run
+  regenerates it. The images stay on disk — they were paid for, and
+  deleting them would destroy the evidence of what was rejected.
+- Re-running `fable-generate-references` with an unchanged character
+  bible is a **replay**, not four more paid calls. Changing the bible
+  changes the sheet's fingerprint, which regenerates it *and* revokes any
+  previous approval — you are looking at a different actor now.
+- A **safety refusal** does not fail the project. The reason is recorded
+  on the character (`reference_failure_code`), whatever views were
+  generated are kept, and the project still reaches `CHARACTER_REVIEW` so
+  you meet every refusal at once and decide there: edit the character
+  bible and regenerate, or drop the character. An incomplete sheet cannot
+  be approved.
+- Reference images cost money like any other generation: the same double
+  gate applies, the whole cast is priced up front (affording half a cast
+  is not affording it), and each character's sheet is a line item in the
+  spend audit.
 
 ### Cost, budgets, and the paid-generation gate
 

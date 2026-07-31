@@ -20,8 +20,10 @@ from reel_harness.media.ffprobe_validate import build_ffprobe_argv, parse_ffprob
 from reel_harness.media.runner import run
 from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
 from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
 from reel_harness.storage.local import LocalFilesystemStorage
 from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
+from tests.conftest import walk_casting
 
 FFMPEG_PRESENT = check_ffmpeg_available().all_available
 pytestmark = pytest.mark.skipif(not FFMPEG_PRESENT, reason="requires real ffmpeg for real clips")
@@ -33,6 +35,7 @@ def test_fable_vertical_slice_reaches_completed_final_film(session_factory, tmp_
         session_factory, storage=storage,
         provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
         narrative_director=FakeNarrativeDirector(),
+        reference_provider=FakeReferenceImageProvider(),
     )
 
     # 1. Create + adapt (stub) + walk every review gate explicitly.
@@ -41,7 +44,8 @@ def test_fable_vertical_slice_reaches_completed_final_film(session_factory, tmp_
         idempotency_key="fable-e2e",
     )
     assert fable.adapt_project(project.id).status == "STORY_REVIEW"
-    assert fable.approve_story(project.id).status == "CHARACTER_REVIEW"
+    assert fable.approve_story(project.id).status == "CASTING"
+    walk_casting(fable, project.id)
     assert fable.approve_characters(project.id).status == "SHOT_REVIEW"
     assert fable.approve_shots(project.id).status == "GENERATING"
 
@@ -110,12 +114,14 @@ def test_fable_slice_survives_a_restart_between_generation_and_selection(
     storage = LocalFilesystemStorage(tmp_path / "fable_projects")
     fable = FableService(
         session_factory, storage=storage, narrative_director=FakeNarrativeDirector(),
+        reference_provider=FakeReferenceImageProvider(),
     )
     project, _ = fable.create_project(
         title="t", source_text="짧은 이야기.", idempotency_key="fable-restart",
     )
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
     fable.approve_characters(project.id)
     fable.approve_shots(project.id)
 

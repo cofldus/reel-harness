@@ -489,6 +489,7 @@ def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
             # non-zero count means `spent_amount` is a lower bound.
             "unpriced_take_count": budget.unpriced_take_count,
         },
+        "characters": [_character_payload(c) for c in ctx.fable.project_characters(args.project_id)],
         "shots": [
             {
                 "shot_id": shot.id, "status": shot.status, "order": shot.shot_order,
@@ -509,6 +510,64 @@ def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
         ],
     }
     print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_fable_generate_references(args: argparse.Namespace, ctx: AppContext) -> int:
+    """CASTING -> CHARACTER_REVIEW, generating each character's four-view
+    reference sheet (face first, the rest chained off it)."""
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        project = ctx.fable.generate_references(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except PipelineError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps({
+        "project_id": project.id,
+        "status": project.status,
+        "characters": [_character_payload(c) for c in ctx.fable.project_characters(project.id)],
+    }, indent=2))
+    return 0
+
+
+def _character_payload(character) -> dict:
+    return {
+        "character_id": character.id,
+        "name": character.name,
+        "adult_confirmed": character.adult_confirmed,
+        "reference_approved": character.reference_approved,
+        "reference_images": character.reference_images or {},
+        # Present when a safety filter refused a view -- the sheet stays
+        # incomplete and unapprovable until the bible is edited.
+        "reference_failure_code": character.reference_failure_code,
+        "reference_failure_summary": character.reference_failure_summary,
+    }
+
+
+def cmd_fable_reference(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Approve or reject one character's reference sheet."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    action = ctx.fable.reject_reference if args.reject else ctx.fable.approve_reference
+    try:
+        character = action(args.character_id)
+    except FableProjectNotFoundError:
+        print(f"fable character not found: {args.character_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(_character_payload(character), indent=2))
     return 0
 
 
@@ -3355,6 +3414,23 @@ def build_parser() -> argparse.ArgumentParser:
     fable_status = sub.add_parser("fable-status", help="Project status with per-shot/take detail (JSON)")
     fable_status.add_argument("project_id")
     fable_status.set_defaults(func=cmd_fable_status)
+
+    fable_generate_references = sub.add_parser(
+        "fable-generate-references",
+        help="Generate every character's reference sheet (CASTING -> CHARACTER_REVIEW)",
+    )
+    fable_generate_references.add_argument("project_id")
+    fable_generate_references.set_defaults(func=cmd_fable_generate_references)
+
+    fable_reference = sub.add_parser(
+        "fable-reference", help="Approve (default) or --reject one character's reference sheet",
+    )
+    fable_reference.add_argument("character_id")
+    fable_reference.add_argument(
+        "--reject", action="store_true",
+        help="Un-approve and clear the fingerprint so the next generation run regenerates it",
+    )
+    fable_reference.set_defaults(func=cmd_fable_reference)
 
     fable_budget = sub.add_parser(
         "fable-budget", help="Set or show a project's spending limit (no flags = show only)",

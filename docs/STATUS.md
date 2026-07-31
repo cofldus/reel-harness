@@ -28,26 +28,16 @@ F4 and F5 not started.**
   canonical shot-prompt compiler. **Live-verified against gpt-4o.**
 - **F3 (in progress)** — reference images, cost/budget, demo + google
   image adapters, multiple candidate takes. Commits 1 (reference provider
-  contract) and 2 (cost/budget, schema v10) are done and pushed.
+  contract), 2 (cost/budget, schema v10) and 3 (casting gate + reference
+  sheets, schema v11) are done and pushed.
 - **F4 (not started)** — web UI + `/v1/fable/*` API.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
 ## F3 remaining commits (the immediate work)
 
-Commits 1 and 2 of 6 are done and pushed. Remaining, in order:
+Commits 1, 2 and 3 of 6 are done and pushed. Remaining, in order:
 
-3. **`feat: add reference generation workflow and casting gate`** —
-   `approve_story` currently walks straight through `CASTING`; split it
-   so `CASTING` is a real stop. New `generate_references(project_id)`
-   generates the face portrait FIRST, then feeds it back as a character
-   reference for the three-quarter, full-body and wardrobe views (chained,
-   never independent — independent generation yields four different
-   actors). Per-character `approve_reference` / `reject_reference`;
-   `approve_characters` must additionally require every character's
-   `reference_approved`. New CLI commands. Same crash-safety discipline as
-   F2's adaptation (transition committed before any network call, results
-   written atomically, fingerprint-based replay).
 4. **`feat: add demo and google reference image adapters`** — demo tier
    (local sample images, `DEMO_TEST_LICENSE`, no network, never presented
    as real AI output) and the real adapter using `google-genai` with
@@ -150,6 +140,29 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   New `fable-budget` / `fable-estimate` CLI commands, budget block in
   `fable-status`, a `paid_generation_feature_flag` preflight check, and
   `allow_paid_generation` in the config fingerprint.
+- **Commit 3 — reference generation workflow and casting gate**: schema
+  **v11**. `approve_story` now lands in `CASTING` and STOPS; casting is
+  real work rather than a passthrough. `generate_references` compiles
+  four views per character (`pipeline/reference_prompt.py`, the sibling
+  of `shot_prompt.py`, sharing its `fixed_identity_values` so the sheet
+  and the footage describe one actor) and generates the FACE from text
+  first, then the other three WITH that image attached as a character
+  reference — chaining encoded in `REFERENCE_VIEWS`' order rather than
+  left to the caller, because independent generation yields four
+  different people. The fingerprint is sheet-level for the same reason: a
+  change that alters the face invalidates the three chained off it.
+  Per-character `approve_reference` / `reject_reference`, and
+  `approve_characters` now refuses any character without an approved
+  sheet. A content-policy refusal records the reason on the character,
+  keeps whatever views were already paid for, and still reaches
+  `CHARACTER_REVIEW` — the human decision an uncertain policy outcome
+  requires — while leaving the sheet unapprovable because it is
+  incomplete. Regeneration always revokes a previous approval. Reference
+  spend is a per-character line item (`reference_cost_amount`), found
+  necessary while building: without it `recorded_spend` audited only
+  takes and would have under-reported every project that generated a
+  cast. New `fable-generate-references` / `fable-reference` CLI commands;
+  characters now appear in `fable-status`.
 - **A real pre-existing defect found and fixed while building this**:
   `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
   failure BEFORE submission (an unconfigured provider refusing to quote
@@ -158,10 +171,14 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   `FableDaemon`'s error isolation — a routine "provider not configured"
   would have killed the worker lane rather than failing one shot. Found
   by the new cost gate's regression test, not by inspection; predates F3.
-- **F3 honesty notes so far**: no reference images are generated yet
-  (commit 3), the only registered cinematic/image providers are still the
-  free fake tiers, so the paid gate has been exercised only against a
-  provider id stubbed as paid — never against a real billed call. The
+- **F3 honesty notes so far**: the only registered cinematic/image
+  providers are still the free fake tiers, so the paid gate has been
+  exercised only against a provider id stubbed as paid — never against a
+  real billed call, and no real reference image has ever been generated.
+  The chaining is verified by asserting on the requests the fake provider
+  received, which proves the mechanism is wired correctly but says
+  nothing about whether a real model actually keeps a face consistent.
+  That question needs commit 4's adapter and real credentials. The
   budget arithmetic rounds at a fixed scale (6 dp) specifically so float
   accumulation cannot refuse a generation the operator paid for; that is
   a deliberate tradeoff, not exact decimal money handling.

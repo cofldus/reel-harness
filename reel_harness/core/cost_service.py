@@ -37,7 +37,13 @@ from reel_harness.core.errors import (
     BudgetExceededError,
     PaidGenerationNotAllowedError,
 )
-from reel_harness.db.cinematic_models import FableScene, FableShot, FableTake, StoryProject
+from reel_harness.db.cinematic_models import (
+    FableCharacter,
+    FableScene,
+    FableShot,
+    FableTake,
+    StoryProject,
+)
 from reel_harness.providers.base import CinematicCostEstimate, CinematicGenerationRequest
 from reel_harness.providers.registry import provider_charges_money
 
@@ -236,10 +242,14 @@ def record_spend(project: StoryProject, amount: float | None, currency: str | No
 
 
 def recorded_spend(session, project_id: str) -> tuple[float, str | None, int]:
-    """Recomputes spend from the take rows themselves: (amount, currency,
+    """Recomputes spend from the line items themselves: (amount, currency,
     unpriced_take_count). This is the audit path -- `budget_spent_amount`
     is a running total, and a running total nobody can check against its
-    own line items is a number to be suspicious of."""
+    own line items is a number to be suspicious of.
+
+    BOTH kinds of charge are counted: reference sheets (per character,
+    from casting) and takes (per shot, from generation). Counting only
+    takes would under-report every project that generated a cast."""
     takes = session.execute(
         select(FableTake)
         .join(FableShot, FableTake.shot_id == FableShot.id)
@@ -259,6 +269,15 @@ def recorded_spend(session, project_id: str) -> tuple[float, str | None, int]:
             continue
         total += take.cost_amount
         currency = currency or take.cost_currency
+
+    characters = session.execute(
+        select(FableCharacter).where(FableCharacter.project_id == project_id)
+    ).scalars().all()
+    for character in characters:
+        if character.reference_cost_amount is None:
+            continue
+        total += character.reference_cost_amount
+        currency = currency or character.reference_cost_currency
     return _round(total), currency, unpriced
 
 

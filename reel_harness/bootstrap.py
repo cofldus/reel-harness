@@ -56,6 +56,7 @@ class AppContext:
             narrative_director_resolver=self.narrative_director_for_project,
             cinematic_provider_resolver=self.cinematic_provider_for_project,
             allow_paid_generation=self.settings.allow_paid_generation,
+            reference_provider_resolver=self.reference_provider_for_project,
         )
         self._secret_store = None
 
@@ -177,6 +178,15 @@ class AppContext:
 
         snapshot = getattr(project, "provider_config", None) if project is not None else None
         return resolve_cinematic_video_for_snapshot(snapshot, self.settings)
+
+    def reference_provider_for_project(self, project):
+        """The reference-image provider a project's casting must use,
+        honoring its creation-time snapshot -- same fail-loud ladder as
+        every other family, no silent fallback."""
+        from reel_harness.providers.registry import resolve_reference_image_for_snapshot
+
+        snapshot = getattr(project, "provider_config", None) if project is not None else None
+        return resolve_reference_image_for_snapshot(snapshot, self.settings)
 
     def channel_niche_for_job(self, job) -> str | None:
         if job is None:

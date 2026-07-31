@@ -18,6 +18,7 @@ from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvid
 from reel_harness.storage.local import LocalFilesystemStorage
 from reel_harness.worker.fable_lease import lease_next_shot
 from reel_harness.worker.fable_runner import compile_prompt_for_shot, run_shot
+from tests.conftest import walk_casting
 
 FFMPEG_PRESENT = check_ffmpeg_available().all_available
 
@@ -25,14 +26,17 @@ FFMPEG_PRESENT = check_ffmpeg_available().all_available
 @pytest.fixture
 def fable_env(session_factory, tmp_path):
     from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+    from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
 
     storage = LocalFilesystemStorage(tmp_path / "fable_projects")
     fable = FableService(
         session_factory, storage=storage, narrative_director=FakeNarrativeDirector(),
+        reference_provider=FakeReferenceImageProvider(),
     )
     project, _ = fable.create_project(title="t", source_text="s", idempotency_key="runner-test")
     fable.adapt_project(project.id)
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
     fable.approve_characters(project.id)
     fable.approve_shots(project.id)
     return session_factory, storage, project
@@ -182,6 +186,9 @@ def test_completed_take_records_real_cost_and_accumulates_project_spend(fable_en
         db_project.budget_limit_amount = 100.0
         db_project.budget_currency = "FAKE"
         session.commit()
+        # Casting already spent on reference sheets, so the take's effect
+        # is a DELTA on the running total, not the whole of it.
+        spent_before = db_project.budget_spent_amount
 
     provider = FakeCinematicVideoProvider()
     with session_factory() as session:
@@ -193,7 +200,7 @@ def test_completed_take_records_real_cost_and_accumulates_project_spend(fable_en
         db_project = session.get(StoryProject, project.id)
         assert take.cost_amount is not None
         assert take.cost_currency == "FAKE"
-        assert db_project.budget_spent_amount == pytest.approx(take.cost_amount)
+        assert db_project.budget_spent_amount - spent_before == pytest.approx(take.cost_amount)
 
 
 @pytest.mark.skipif(not FFMPEG_PRESENT, reason="fake provider materializes a real mp4 via ffmpeg")
@@ -207,6 +214,7 @@ def test_spend_is_the_reported_cost_not_the_estimate(fable_env, monkeypatch) -> 
         db_project.budget_limit_amount = 100.0
         db_project.budget_currency = "FAKE"
         session.commit()
+        spent_before = db_project.budget_spent_amount
 
     provider = FakeCinematicVideoProvider()
     monkeypatch.setattr(
@@ -220,8 +228,8 @@ def test_spend_is_the_reported_cost_not_the_estimate(fable_env, monkeypatch) -> 
     with session_factory() as session:
         take = session.query(FableTake).filter(FableTake.shot_id == shot.id).one()
         db_project = session.get(StoryProject, project.id)
-        assert db_project.budget_spent_amount == pytest.approx(take.cost_amount)
-        assert db_project.budget_spent_amount != 99.0
+        assert db_project.budget_spent_amount - spent_before == pytest.approx(take.cost_amount)
+        assert db_project.budget_spent_amount - spent_before != 99.0
 
 
 def test_fenced_out_worker_stops_publishing(fable_env) -> None:

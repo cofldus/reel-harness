@@ -90,6 +90,46 @@ def test_estimate_prices_the_project_without_approving_it(monkeypatch, tmp_path,
     assert status["budget"]["spent_amount"] == 0.0
 
 
+def test_casting_commands_walk_the_gate(monkeypatch, tmp_path, capsys) -> None:
+    """fable-generate-references / fable-reference through the real CLI:
+    casting is a stop, the sheet arrives unapproved, approving it opens
+    the character gate."""
+    project_id = _adapted_project(monkeypatch, tmp_path, capsys)
+    assert cli_main.main(["fable-approve", project_id, "--step", "story"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "CASTING"
+
+    assert cli_main.main(["fable-generate-references", project_id]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "CHARACTER_REVIEW"
+    character = payload["characters"][0]
+    assert set(character["reference_images"]) == {
+        "face", "three_quarter", "full_body", "wardrobe",
+    }
+    assert character["reference_approved"] is False
+
+    # The character gate refuses until the sheet is explicitly approved.
+    assert cli_main.main(["fable-approve", project_id, "--step", "characters"]) == 2
+    assert "no approved reference sheet" in capsys.readouterr().err
+
+    assert cli_main.main(["fable-reference", character["character_id"]]) == 0
+    assert json.loads(capsys.readouterr().out)["reference_approved"] is True
+    assert cli_main.main(["fable-approve", project_id, "--step", "characters"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "SHOT_REVIEW"
+
+
+def test_reference_reject_reopens_generation(monkeypatch, tmp_path, capsys) -> None:
+    project_id = _adapted_project(monkeypatch, tmp_path, capsys)
+    assert cli_main.main(["fable-approve", project_id, "--step", "story"]) == 0
+    capsys.readouterr()
+    assert cli_main.main(["fable-generate-references", project_id]) == 0
+    character_id = json.loads(capsys.readouterr().out)["characters"][0]["character_id"]
+
+    assert cli_main.main(["fable-reference", character_id]) == 0
+    capsys.readouterr()
+    assert cli_main.main(["fable-reference", character_id, "--reject"]) == 0
+    assert json.loads(capsys.readouterr().out)["reference_approved"] is False
+
+
 def test_status_reports_the_budget_block(monkeypatch, tmp_path, capsys) -> None:
     project_id = _adapted_project(monkeypatch, tmp_path, capsys)
     assert cli_main.main(["fable-budget", project_id, "--limit", "2.5", "--currency", "FAKE"]) == 0

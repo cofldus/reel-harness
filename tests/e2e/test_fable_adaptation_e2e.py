@@ -24,6 +24,7 @@ from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvid
 from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
 from reel_harness.storage.local import LocalFilesystemStorage
 from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
+from tests.conftest import walk_casting
 
 FFMPEG_PRESENT = check_ffmpeg_available().all_available
 pytestmark = pytest.mark.skipif(not FFMPEG_PRESENT, reason="requires real ffmpeg for real clips")
@@ -36,10 +37,13 @@ STORY = (
 
 
 def _service(session_factory, storage, director=None) -> FableService:
+    from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
+
     return FableService(
         session_factory, storage=storage,
         provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
         narrative_director=director or FakeNarrativeDirector(),
+        reference_provider=FakeReferenceImageProvider(),
     )
 
 
@@ -82,6 +86,7 @@ def test_adaptation_to_final_film_end_to_end(session_factory, tmp_path) -> None:
 
     # 2. Gates, then the REAL worker lane with the REAL prompt compiler.
     fable.approve_story(project.id)
+    walk_casting(fable, project.id)
     fable.approve_characters(project.id)
     fable.approve_shots(project.id)
 

@@ -33,6 +33,7 @@ from reel_harness.core.cost_service import (
     assert_within_budget,
     budget_status,
     estimate_project_cost,
+    record_spend,
 )
 from reel_harness.core.errors import BudgetExceededError, PaidGenerationNotAllowedError
 from reel_harness.core.service import InvalidActionError, JobNotFoundError
@@ -44,7 +45,15 @@ from reel_harness.db.cinematic_models import (
     FableTake,
     StoryProject,
 )
-from reel_harness.providers.base import AdaptationRequest
+from reel_harness.pipeline.reference_prompt import (
+    DEFAULT_REFERENCE_RESOLUTION,
+    REFERENCE_ASPECT_RATIO,
+    REFERENCE_VIEWS,
+    ReferenceView,
+    compile_reference_prompt,
+    reference_fingerprint,
+)
+from reel_harness.providers.base import AdaptationRequest, ReferenceImageRequest
 from reel_harness.storage.base import StorageBackend
 
 
@@ -57,7 +66,8 @@ class FableService:
         self, session_factory, storage: StorageBackend | None = None,
         provider_snapshot: dict | None = None, narrative_director=None,
         narrative_director_resolver=None, cinematic_provider_resolver=None,
-        allow_paid_generation: bool = False,
+        allow_paid_generation: bool = False, reference_provider=None,
+        reference_provider_resolver=None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -76,6 +86,11 @@ class FableService:
         # Settings.allow_paid_generation. False by default so a service
         # built without an opinion can never authorize spending.
         self._allow_paid_generation = allow_paid_generation
+        # Reference-image generation (F3 casting). Same two ways in as the
+        # narrative director: a resolver from AppContext honoring the
+        # project's snapshot, or an instance from a test.
+        self._reference_provider = reference_provider
+        self._reference_provider_resolver = reference_provider_resolver
 
     # -- creation / read -------------------------------------------------
 
@@ -399,20 +414,258 @@ class FableService:
                 ))
         session.flush()
 
+    # -- casting: reference sheets ---------------------------------------
+
+    def generate_references(self, project_id: str, provider=None) -> StoryProject:
+        """CASTING -> CHARACTER_REVIEW, generating each character's
+        four-view reference sheet on the way.
+
+        The chaining is the point. The FACE portrait is generated from
+        text alone; the other three views are then generated WITH that
+        image fed back as a character reference. Generating the four
+        independently yields four different actors, which is the exact
+        failure a reference sheet exists to prevent -- so this is not a
+        loop over four equal calls, it is one call followed by three
+        dependent ones (pipeline.reference_prompt owns the order).
+
+        Crash-safety mirrors F2's adaptation exactly: CASTING is already
+        committed before any network call, each character's sheet is
+        written in its own transaction once complete, and a re-run replays
+        any character whose stored fingerprint still matches instead of
+        paying again. A crash therefore loses at most the character in
+        flight, never a finished sheet, and never leaves a half-written
+        one visible.
+
+        A content-policy refusal does NOT fail the project. It is recorded
+        on the character and the walk continues, so the operator meets
+        every refusal at once at the CHARACTER_REVIEW gate and decides
+        there -- the human decision an uncertain policy outcome requires,
+        per .claude/rules/architecture.md."""
+        from reel_harness.core.errors import ContentPolicyRefusedError
+
+        if self._storage is None:
+            raise InvalidActionError("no fable storage configured")
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            if project is None:
+                raise FableProjectNotFoundError(project_id)
+            if project.status != FableProjectStatus.CASTING.value:
+                raise InvalidActionError(
+                    f"project is {project.status}, not CASTING -- approve the story review first"
+                )
+            provider = provider or self._resolve_reference_provider(project)
+            characters = self._characters_for_project(session, project_id)
+            if not characters:
+                raise InvalidActionError("project has no characters to cast")
+            # Both cost gates before the first call, over the whole cast:
+            # a partially-generated cast is worth nothing, so affording
+            # half of it is not affording it.
+            self._assert_references_affordable(project, characters, provider)
+            character_ids = [character.id for character in characters]
+
+        for character_id in character_ids:
+            self._generate_character_sheet(
+                project_id, character_id, provider, ContentPolicyRefusedError,
+            )
+
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            assert project is not None
+            apply_project_transition(project, FableProjectStatus.CHARACTER_REVIEW)
+            session.commit()
+            session.refresh(project)
+            session.expunge(project)
+            return project
+
+    def _generate_character_sheet(
+        self, project_id: str, character_id: str, provider, refusal_error,
+    ) -> None:
+        """One character's four chained views, in its own session so a
+        finished sheet is durable the moment it is finished."""
+        assert self._storage is not None
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            character = session.get(FableCharacter, character_id)
+            assert project is not None and character is not None
+            fingerprint = reference_fingerprint(character, project)
+            if character.reference_fingerprint == fingerprint and character.reference_images:
+                return  # replay: this sheet already describes this bible
+            prompts = {
+                view: compile_reference_prompt(view, character, project)
+                for view in REFERENCE_VIEWS
+            }
+            # Approval never survives regeneration: a re-run means the
+            # operator is looking at a different actor than the one they
+            # approved.
+            character.reference_approved = False
+            character.reference_failure_code = None
+            character.reference_failure_summary = None
+            session.commit()
+
+        dest_dir = self._storage.path_for(project_id, f"references/{character_id}")
+        images: dict[str, str] = {}
+        face_path = None
+        cost_amount = 0.0
+        cost_currency: str | None = None
+        failure: tuple[str, str] | None = None
+
+        for index, view in enumerate(REFERENCE_VIEWS):
+            request = ReferenceImageRequest(
+                prompt=prompts[view],
+                aspect_ratio=REFERENCE_ASPECT_RATIO,
+                resolution=DEFAULT_REFERENCE_RESOLUTION,
+                # Index 0 (the face) has no reference; every later view
+                # chains off it. This list IS the consistency mechanism.
+                character_reference_paths=[face_path] if face_path is not None else [],
+                seed=None,
+                correlation_id=f"{project_id}:{character_id}:{view.value}:{fingerprint}",
+            )
+            try:
+                result = provider.generate_reference(request, dest_dir)
+            except refusal_error as exc:
+                failure = (exc.code, str(exc))
+                break
+            images[view.value] = str(result.image_path)
+            if index == 0:
+                face_path = result.image_path
+            if result.cost_amount is not None:
+                cost_amount += result.cost_amount
+                cost_currency = cost_currency or result.cost_currency
+
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            character = session.get(FableCharacter, character_id)
+            assert project is not None and character is not None
+            if failure is not None:
+                character.reference_failure_code, character.reference_failure_summary = (
+                    failure[0], failure[1][:500],
+                )
+            # Whatever WAS generated is recorded even on a refusal -- those
+            # images were paid for, and hiding them would make the spend
+            # unauditable. The sheet just stays unapprovable until it is
+            # complete.
+            character.reference_images = images or None
+            character.reference_image_path = images.get(ReferenceView.FACE.value)
+            character.reference_fingerprint = fingerprint if failure is None else None
+            # The line item and the running total move together, in one
+            # transaction, exactly as a take's cost does.
+            if cost_amount:
+                character.reference_cost_amount = cost_amount
+                character.reference_cost_currency = cost_currency
+                record_spend(project, cost_amount, cost_currency)
+            session.commit()
+
+    def approve_reference(self, character_id: str) -> FableCharacter:
+        """Marks one character's reference sheet as the actor this film
+        will use. Refuses an incomplete sheet: approving three of four
+        views would let a shot request a view that does not exist."""
+        with self._session_factory() as session:
+            character = session.get(FableCharacter, character_id)
+            if character is None:
+                raise FableProjectNotFoundError(character_id)
+            missing = [
+                view.value for view in REFERENCE_VIEWS
+                if view.value not in (character.reference_images or {})
+            ]
+            if missing:
+                detail = (
+                    f" (generation was refused: {character.reference_failure_code})"
+                    if character.reference_failure_code else ""
+                )
+                raise InvalidActionError(
+                    f"character {character.name!r} has an incomplete reference sheet -- "
+                    f"missing {missing}{detail}"
+                )
+            character.reference_approved = True
+            session.commit()
+            session.refresh(character)
+            session.expunge(character)
+            return character
+
+    def reject_reference(self, character_id: str) -> FableCharacter:
+        """Un-approves a sheet and clears its fingerprint, so the next
+        generate_references run regenerates it rather than replaying.
+        The images themselves are left on disk: they were paid for, and
+        deleting them would destroy the evidence of what was rejected."""
+        with self._session_factory() as session:
+            character = session.get(FableCharacter, character_id)
+            if character is None:
+                raise FableProjectNotFoundError(character_id)
+            character.reference_approved = False
+            character.reference_fingerprint = None
+            session.commit()
+            session.refresh(character)
+            session.expunge(character)
+            return character
+
+    def project_characters(self, project_id: str) -> list[FableCharacter]:
+        with self._session_factory() as session:
+            characters = self._characters_for_project(session, project_id)
+            for character in characters:
+                session.expunge(character)
+            return characters
+
+    def _characters_for_project(self, session, project_id: str) -> list[FableCharacter]:
+        return list(session.execute(
+            select(FableCharacter).where(FableCharacter.project_id == project_id)
+            .order_by(FableCharacter.created_at, FableCharacter.id)
+        ).scalars())
+
+    def _resolve_reference_provider(self, project: StoryProject):
+        if self._reference_provider_resolver is not None:
+            return self._reference_provider_resolver(project)
+        if self._reference_provider is not None:
+            return self._reference_provider
+        raise InvalidActionError(
+            "no reference image provider is configured -- set "
+            "REEL_HARNESS_REFERENCE_IMAGE_PROVIDER"
+        )
+
+    def _assert_references_affordable(
+        self, project: StoryProject, characters: list[FableCharacter], provider,
+    ) -> None:
+        """The casting-phase twin of _assert_generation_affordable. Same
+        double gate, same refusal shape; the unit priced is one image
+        rather than one shot."""
+        try:
+            assert_paid_generation_allowed(
+                project, provider.provider_id, self._allow_paid_generation,
+            )
+        except PaidGenerationNotAllowedError as exc:
+            raise InvalidActionError(str(exc)) from exc
+        if project.budget_limit_amount is None:
+            return
+        estimate = provider.estimate_cost(ReferenceImageRequest(
+            prompt="", aspect_ratio=REFERENCE_ASPECT_RATIO,
+            resolution=DEFAULT_REFERENCE_RESOLUTION,
+        ))
+        if not estimate.known or estimate.amount is None:
+            raise InvalidActionError(
+                f"project has a budget limit but {provider.provider_id} publishes no price "
+                f"for reference images -- refusing an unbounded charge"
+            )
+        total = estimate.amount * len(characters) * len(REFERENCE_VIEWS)
+        try:
+            assert_within_budget(project, total, estimate.currency)
+        except BudgetExceededError as exc:
+            raise InvalidActionError(str(exc)) from exc
+
     # -- review gates ----------------------------------------------------
 
     def approve_story(self, project_id: str) -> StoryProject:
-        """STORY_REVIEW -> CASTING -> CHARACTER_REVIEW. F1 has no
-        reference-image generation (that's F3), so casting is a
-        passthrough -- but the CHARACTER_REVIEW gate still requires its
-        own explicit approval before storyboarding, keeping the state
-        walk identical to what F3 will slot reference generation into."""
+        """STORY_REVIEW -> CASTING, and it STOPS there.
+
+        F1/F2 walked straight through CASTING to CHARACTER_REVIEW because
+        there was nothing to cast. F3 makes casting real work
+        (generate_references), so this gate now hands off to it rather
+        than skipping past: a project sitting in CASTING has an approved
+        story and no reference sheet yet, which is a genuinely distinct
+        state and now says so."""
         with self._session_factory() as session:
             project = session.get(StoryProject, project_id)
             if project is None:
                 raise FableProjectNotFoundError(project_id)
             apply_project_transition(project, FableProjectStatus.CASTING)
-            apply_project_transition(project, FableProjectStatus.CHARACTER_REVIEW)
             session.commit()
             session.refresh(project)
             session.expunge(project)
@@ -421,7 +674,12 @@ class FableService:
     def approve_characters(self, project_id: str) -> StoryProject:
         """CHARACTER_REVIEW -> STORYBOARDING -> SHOT_REVIEW. Refuses if any
         character is not adult-confirmed -- virtual adult actors only,
-        checked at the gate rather than trusted from creation."""
+        checked at the gate rather than trusted from creation -- or if any
+        character's reference sheet has not been explicitly approved.
+
+        Both checks are at the gate rather than trusted from earlier: the
+        reference sheet is what every shot's footage will imitate, so
+        approving the cast means approving the actor you actually saw."""
         with self._session_factory() as session:
             project = session.get(StoryProject, project_id)
             if project is None:
@@ -435,6 +693,21 @@ class FableService:
             if unconfirmed is not None:
                 raise InvalidActionError(
                     f"character {unconfirmed.name!r} is not confirmed as a virtual adult actor"
+                )
+            unapproved = session.execute(
+                select(FableCharacter).where(
+                    FableCharacter.project_id == project_id,
+                    FableCharacter.reference_approved.is_(False),
+                )
+            ).scalars().first()
+            if unapproved is not None:
+                detail = (
+                    f" (reference generation was refused: {unapproved.reference_failure_code})"
+                    if unapproved.reference_failure_code else ""
+                )
+                raise InvalidActionError(
+                    f"character {unapproved.name!r} has no approved reference sheet{detail} -- "
+                    f"run fable-generate-references, then fable-approve-reference"
                 )
             apply_project_transition(project, FableProjectStatus.STORYBOARDING)
             apply_project_transition(project, FableProjectStatus.SHOT_REVIEW)

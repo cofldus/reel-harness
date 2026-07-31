@@ -150,3 +150,17 @@ def channel(job_service):
 @pytest.fixture
 def fake_providers():
     return ProviderBundle(llm=FakeLLMProvider(), tts=FakeTTSProvider(), stock_media=FakeStockMediaProvider())
+
+
+def walk_casting(fable, project_id: str) -> None:
+    """Drive a Fable project through F3's casting phase: generate every
+    character's reference sheet, then approve each one.
+
+    A shared helper rather than copy-paste because casting is now a real
+    stop between STORY_REVIEW and CHARACTER_REVIEW (F3 commit 3), and
+    every test that walks the gates has to pass through it. Tests that are
+    ABOUT casting call the service methods directly instead -- this is
+    only for the ones whose subject is further downstream."""
+    fable.generate_references(project_id)
+    for character in fable.project_characters(project_id):
+        fable.approve_reference(character.id)
