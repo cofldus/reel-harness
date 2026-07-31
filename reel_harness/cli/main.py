@@ -572,6 +572,129 @@ def cmd_fable_reference(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+def cmd_fable_reference_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
+    """One REAL reference-image chain against the configured provider.
+
+    Exists to answer, with actual bytes rather than documentation, two
+    questions the test suite structurally cannot: does the real adapter
+    work end to end, and does the model accept its own generated image
+    back as a character reference (the chaining the whole reference sheet
+    depends on)?
+
+    It spends real money on a real provider, so it is opt-in twice over
+    and it says up front what it will cost. Against a free tier it is
+    simply a cheap wiring check."""
+    import tempfile
+
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.pipeline.reference_prompt import (
+        DEFAULT_REFERENCE_RESOLUTION,
+        REFERENCE_ASPECT_RATIO,
+    )
+    from reel_harness.providers.base import ReferenceImageRequest
+    from reel_harness.providers.registry import (
+        provider_charges_money,
+        resolve_reference_image_provider,
+    )
+
+    provider = resolve_reference_image_provider(
+        ctx.settings.reference_image_provider, ctx.settings,
+    )
+    paid = provider_charges_money(provider.provider_id)
+    estimate = provider.estimate_cost(ReferenceImageRequest(
+        prompt="", aspect_ratio=REFERENCE_ASPECT_RATIO, resolution=DEFAULT_REFERENCE_RESOLUTION,
+    ))
+    # Two images: the face, then one view chained off it. That is the
+    # smallest run that actually tests the chaining rather than just the
+    # transport.
+    projected = estimate.amount * 2 if estimate.known and estimate.amount is not None else None
+
+    if paid and not args.confirm_paid_generation:
+        print(json.dumps({
+            "status": "NOT RUN",
+            "reason": "would spend real money -- re-run with --confirm-paid-generation",
+            "provider": provider.provider_id,
+            "model": getattr(provider, "model_id", None),
+            "images": 2,
+            "projected_cost": projected,
+            "projected_cost_currency": estimate.currency,
+            "projected_cost_known": estimate.known,
+        }, indent=2))
+        return 4
+
+    prompt = (
+        "a single fictional adult actor, 30s adult, plain neutral background, "
+        "head-and-shoulders portrait, facing camera directly, neutral expression, "
+        "even soft lighting, photorealistic reference photograph, "
+        "not a real or recognizable person"
+    )
+    with tempfile.TemporaryDirectory(prefix="reel-harness-reference-smoke-") as scratch:
+        dest = Path(scratch)
+        try:
+            face = provider.generate_reference(ReferenceImageRequest(
+                prompt=prompt, aspect_ratio=REFERENCE_ASPECT_RATIO,
+                resolution=DEFAULT_REFERENCE_RESOLUTION,
+                correlation_id="reference-smoke:face",
+            ), dest)
+            chained = provider.generate_reference(ReferenceImageRequest(
+                prompt=prompt.replace(
+                    "head-and-shoulders portrait, facing camera directly",
+                    "three-quarter view from the waist up, head turned 45 degrees from camera",
+                ),
+                aspect_ratio=REFERENCE_ASPECT_RATIO,
+                resolution=DEFAULT_REFERENCE_RESOLUTION,
+                character_reference_paths=[face.image_path],
+                correlation_id="reference-smoke:three_quarter",
+            ), dest)
+        except PipelineError as exc:
+            print(json.dumps({
+                "status": "FAIL", "provider": provider.provider_id,
+                "failure_code": exc.code, "failure_summary": str(exc)[:500],
+            }, indent=2))
+            return 3
+
+        payload = {
+            "status": "PASS",
+            "provider": provider.provider_id,
+            "model": face.model_id,
+            "face_bytes": face.image_path.stat().st_size,
+            "chained_bytes": chained.image_path.stat().st_size,
+            "face_checksum_sha256": face.checksum_sha256,
+            "chained_checksum_sha256": chained.checksum_sha256,
+            # The point of the second call: the model accepted its own
+            # generated image back as a character reference.
+            "chained_reference_accepted": True,
+            "watermark": chained.watermark,
+            "license": chained.license,
+            "cost_amount": (
+                (face.cost_amount or 0.0) + (chained.cost_amount or 0.0)
+                if face.cost_amount is not None else None
+            ),
+            "cost_currency": face.cost_currency,
+            # Stated in the output itself so a copied-and-pasted result can
+            # never be read as more than it is.
+            "proves": [
+                "the adapter reaches the provider and returns real image bytes",
+                "the provider accepts a previously generated image as a character reference",
+            ],
+            "does_not_prove": [
+                "that the two images depict a recognizably identical person "
+                "(no automated check judges that; look at them)",
+                "that Veo accepts a watermarked image as character-reference input "
+                "(open question -- F5's video adapter is what will answer it)",
+            ],
+        }
+        if args.keep_output:
+            kept = Path(args.keep_output)
+            kept.mkdir(parents=True, exist_ok=True)
+            for result, name in ((face, "face"), (chained, "three_quarter")):
+                target = kept / f"{name}{result.image_path.suffix}"
+                target.write_bytes(result.image_path.read_bytes())
+            payload["output_dir"] = str(kept)
+        print(json.dumps(payload, indent=2))
+    return 0
+
+
 def cmd_fable_budget(args: argparse.Namespace, ctx: AppContext) -> int:
     """Sets or reports a project's spending ceiling. With no --limit/--clear
     it is purely a report, so checking a budget can never change one."""
@@ -3438,6 +3561,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Un-approve and clear the fingerprint so the next generation run regenerates it",
     )
     fable_reference.set_defaults(func=cmd_fable_reference)
+
+    fable_reference_smoke = sub.add_parser(
+        "fable-reference-smoke",
+        help="Generate one REAL reference image chain against the configured provider",
+    )
+    fable_reference_smoke.add_argument(
+        "--confirm-paid-generation", action="store_true",
+        help="Required when the configured provider charges money (2 images).",
+    )
+    fable_reference_smoke.add_argument(
+        "--keep-output", default=None,
+        help="Directory to copy the two images into, for looking at them yourself.",
+    )
+    fable_reference_smoke.set_defaults(func=cmd_fable_reference_smoke)
 
     fable_budget = sub.add_parser(
         "fable-budget", help="Set or show a project's spending limit (no flags = show only)",

@@ -1051,8 +1051,33 @@ result. Google applies it to all generated imagery with no removal
 option. Whether Veo accepts SynthID-watermarked images as
 character-reference input is an **open question no documentation
 answers** — if it does not, the whole consistency strategy needs
-rethinking. That is what `fable-reference-smoke` exists to find out
-before F5 builds on it.
+rethinking.
+
+### `fable-reference-smoke`
+
+```
+uv run reel-harness fable-reference-smoke --keep-output ./smoke
+uv run reel-harness fable-reference-smoke --confirm-paid-generation   # real provider
+```
+
+One real reference-image chain — a face, then a three-quarter view
+generated *from* it — against whichever provider is configured. It
+answers with actual bytes what the test suite structurally cannot: that
+the adapter reaches the provider, and that the model accepts its own
+generated image back as a character reference.
+
+It spends real money on a real tier, so it refuses without
+`--confirm-paid-generation` and tells you what it would cost first
+(exit code 4). Against `fake`/`demo` it is a free wiring check.
+
+The output states its own limits in a `does_not_prove` field, so a pasted
+result can never be read as more than it is. In particular it does **not**
+establish that the two images depict a recognizably identical person —
+nothing automated judges that, so look at them (`--keep-output`) — and it
+does not answer the Veo/SynthID question, which needs F5's video adapter.
+
+Run it as soon as GCP credentials exist. It is the cheapest way to find
+out whether the consistency strategy holds before F5 builds on it.
 
 ### Multiple candidate takes per shot
 

@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-07-31 (Fable F3 in progress, on branch
+Last updated: 2026-08-01 (Fable F3 complete, F4 next, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
@@ -16,7 +16,7 @@ with origin — if it is not, inspect before doing anything else.
 
 ## Where the work stands
 
-Fable is a five-sub-phase build: **F1 done, F2 done, F3 in progress,
+Fable is a five-sub-phase build: **F1 done, F2 done, F3 done,
 F4 and F5 not started.**
 
 - **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
@@ -26,21 +26,29 @@ F4 and F5 not started.**
 - **F2 (done)** — real Narrative Director: strict schema, whole-document
   validation, bounded repair loop, fake + openai-compatible adapters,
   canonical shot-prompt compiler. **Live-verified against gpt-4o.**
-- **F3 (in progress)** — reference images, cost/budget, demo + google
+- **F3 (done)** — reference images, cost/budget, demo + google
   image adapters, multiple candidate takes. Commits 1 (reference provider
   contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
-  sheets, schema v11), 4 (demo + google adapters) and 5 (multiple takes,
-  schema v12) are done and pushed.
+  sheets, schema v11), 4 (demo + google adapters), 5 (multiple takes,
+  schema v12) and 6 (e2e + reference smoke) are all done and pushed.
 - **F4 (not started)** — web UI + `/v1/fable/*` API.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
-## F3 remaining commits (the immediate work)
+## The immediate work (F4)
 
-Commits 1-5 of 6 are done and pushed. Remaining, in order:
+F3 is complete. **F4 has not been planned yet** and, per this project's
+working agreements, gets an approval-gated plan before implementation.
+Its scope from the original five-sub-phase split: a web UI for the Fable
+project lifecycle plus a `/v1/fable/*` API, following the Phase 5A/5B
+patterns already established (FastAPI + Jinja2 + HTMX, server-rendered,
+CSRF double-submit, no new domain logic -- every route calls the same
+`FableService` methods the CLI already uses).
 
-6. **`test: add fable reference and budget e2e`** — offline e2e through
-   the fake tier, plus a `fable-reference-smoke` CLI command and docs.
+The one thing worth doing BEFORE F4, if credentials appear: run
+`fable-reference-smoke --confirm-paid-generation`. It costs about $0.13
+and is the cheapest available answer to whether the reference-chaining
+strategy actually holds against a real model.
 
 ## Provider decisions already researched (do not re-litigate)
 
@@ -95,9 +103,12 @@ Commits 1-5 of 6 are done and pushed. Remaining, in order:
 
 ---
 
-## Fable F3 (in progress) — references, cost/budget, demo+google adapters
+## Fable F3 — references, cost/budget, demo+google adapters, multiple takes
 
-Two of six commits have landed on `phase6/fable-cinematic-engine`.
+All six commits are on `phase6/fable-cinematic-engine`. Schema went v9 ->
+v12. Casting became real work with its own review gate, generation became
+budgeted, and a shot can now produce several candidates to choose
+between.
 
 - **Commit 1 — character reference provider contract**: the
   `CharacterReferenceProvider` Protocol (synchronous by contract: every
@@ -200,6 +211,22 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   be interrupted at any phase of any take). Pricing multiplies by the
   project's own take count, because a gate that priced one take would
   approve a quarter of the real bill.
+- **Commit 6 — e2e and the reference smoke command**: an offline e2e
+  driving the whole F3 slice through the real gates and the real daemon
+  (casting refused by a too-small budget, then generated and approved;
+  two candidate takes per shot with distinct seeds; selection retaining
+  rejected siblings; final film; and the books balancing -- the running
+  total equals the sum of its own line items, which is the assertion that
+  makes the budget worth trusting), plus a second e2e proving that
+  running out of money mid-generation leaves every shot REVIEW_REQUIRED
+  with no takes and no charge, and that raising the limit re-queues them
+  through the same path a rejected take uses. New
+  `fable-reference-smoke`: one REAL face-then-chained-view pair against
+  the configured provider, refusing to spend without
+  `--confirm-paid-generation` and reporting the projected cost first. Its
+  output carries its own `does_not_prove` list, so a pasted result cannot
+  be read as establishing either visual identity (nothing automated judges
+  that) or the Veo/SynthID question (F5's adapter answers that).
 - **A real pre-existing defect found and fixed while building this**:
   `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
   failure BEFORE submission (an unconfigured provider refusing to quote

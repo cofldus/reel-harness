@@ -130,6 +130,40 @@ def test_reference_reject_reopens_generation(monkeypatch, tmp_path, capsys) -> N
     assert json.loads(capsys.readouterr().out)["reference_approved"] is False
 
 
+def test_reference_smoke_runs_against_a_free_tier(monkeypatch, tmp_path, capsys) -> None:
+    """Against the fake tier it is a cheap wiring check -- and it reports
+    what it does and does not prove, so a pasted result can never be read
+    as more than it is."""
+    _isolate(monkeypatch, tmp_path)
+    assert cli_main.main(["fable-reference-smoke"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "PASS"
+    assert payload["chained_reference_accepted"] is True
+    assert payload["face_checksum_sha256"] != payload["chained_checksum_sha256"]
+    assert any("Veo" in line for line in payload["does_not_prove"])
+
+
+def test_reference_smoke_refuses_to_spend_without_confirmation(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("REEL_HARNESS_REFERENCE_IMAGE_PROVIDER", "google")
+    monkeypatch.setenv("REEL_HARNESS_GOOGLE_API_KEY", "test-key")
+    assert cli_main.main(["fable-reference-smoke"]) == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "NOT RUN"
+    assert payload["images"] == 2
+    assert payload["projected_cost"] is not None  # says what it would cost
+
+
+def test_reference_smoke_keeps_output_when_asked(monkeypatch, tmp_path, capsys) -> None:
+    _isolate(monkeypatch, tmp_path)
+    kept = tmp_path / "kept"
+    assert cli_main.main(["fable-reference-smoke", "--keep-output", str(kept)]) == 0
+    capsys.readouterr()
+    assert sorted(p.name for p in kept.iterdir()) == ["face.png", "three_quarter.png"]
+
+
 def test_status_reports_the_budget_block(monkeypatch, tmp_path, capsys) -> None:
     project_id = _adapted_project(monkeypatch, tmp_path, capsys)
     assert cli_main.main(["fable-budget", project_id, "--limit", "2.5", "--currency", "FAKE"]) == 0
