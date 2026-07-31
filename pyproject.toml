@@ -38,6 +38,15 @@ demo = [
 e2e-browser = [
     "playwright>=1.40",
 ]
+# PostgreSQL backend only (see reel_harness/db/schema.py::create_engine_from_url).
+# SQLite stays the zero-config default; this is never required for the
+# local/Demo Mode experience. psycopg (v3), not psycopg2 (legacy,
+# maintenance-only) or asyncpg (async-only -- this codebase is fully sync
+# SQLAlchemy) -- [binary] ships prebuilt wheels for Windows and Linux, no
+# C compiler or pg_config needed on the dev machine.
+postgres = [
+    "psycopg[binary]>=3.1",
+]
 
 [build-system]
 requires = ["hatchling"]

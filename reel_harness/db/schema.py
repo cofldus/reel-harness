@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from reel_harness.db.models import Base
+
+SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 
 # Migration policy until Alembic is introduced (see docs/ARCHITECTURE.md):
 # `create_all` builds the full current schema for new databases, and
@@ -53,9 +56,55 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
 ]
 
 
-def create_engine_from_url(database_url: str) -> Engine:
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    return create_engine(database_url, connect_args=connect_args)
+def create_engine_from_url(
+    database_url: str, *, pool_size: int = 5, max_overflow: int = 10,
+    statement_timeout_seconds: float | None = None,
+) -> Engine:
+    """Dialect-aware engine construction. SQLite keeps its existing
+    single-file settings unchanged (`check_same_thread=False`, SQLAlchemy's
+    default `SingletonThreadPool`-adjacent pooling for a file DB -- never a
+    real connection pool, since there is only ever one underlying file
+    handle model to reason about). PostgreSQL gets a real bounded
+    connection pool with a pre-ping health check (`pool_pre_ping=True` --
+    verifies a pooled connection is still alive before handing it out,
+    rather than surfacing a stale-connection error mid-request) and,
+    optionally, a server-side statement timeout via a `-c
+    statement_timeout=<ms>` libpq connection option. SQLite has no
+    equivalent to a statement timeout, so `statement_timeout_seconds` is
+    simply never applied there rather than faked.
+
+    `pool_size`/`max_overflow`/`statement_timeout_seconds` are keyword-only
+    with SQLite-harmless defaults so every existing call site that only
+    ever passed a bare `database_url` keeps working unchanged; real values
+    come from `Settings.db_pool_size`/`db_pool_max_overflow`/
+    `db_statement_timeout_seconds` (see bootstrap.AppContext).
+
+    A bare `postgresql://...` URL (no `+driver` suffix -- the shape most
+    managed-Postgres providers hand out) is normalized to
+    `postgresql+psycopg://...` so the operator never needs to know which
+    driver this project bundles (`psycopg`, the modern v3 driver -- see the
+    `postgres` optional-dependency group in pyproject.toml). A URL that
+    already names an explicit driver (e.g. `postgresql+psycopg2://`) is
+    left alone -- never silently overridden."""
+    url = make_url(database_url)
+    backend = url.get_backend_name()
+    if backend == "sqlite":
+        return create_engine(database_url, connect_args={"check_same_thread": False})
+    if backend == "postgresql":
+        if url.drivername == "postgresql":  # bare scheme, no explicit +driver
+            url = url.set(drivername="postgresql+psycopg")
+        connect_args: dict = {}
+        if statement_timeout_seconds is not None:
+            timeout_ms = int(statement_timeout_seconds * 1000)
+            connect_args["options"] = f"-c statement_timeout={timeout_ms}"
+        return create_engine(
+            url, pool_pre_ping=True, pool_size=pool_size, max_overflow=max_overflow,
+            connect_args=connect_args,
+        )
+    raise ValueError(
+        f"unsupported database backend {backend!r} (from {database_url!r}) -- "
+        f"reel-harness supports: {', '.join(sorted(SUPPORTED_DATABASE_BACKENDS))}"
+    )
 
 
 def _ensure_column(conn, table: str, column: str, ddl_type: str) -> None:

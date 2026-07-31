@@ -28,7 +28,11 @@ class AppContext:
         register_secret(self.settings.tiktok_client_secret.get_secret_value())
         register_secret(self.settings.instagram_app_secret.get_secret_value())
         self._log_startup_fingerprint()
-        self.engine = create_engine_from_url(self.settings.database_url)
+        self.engine = create_engine_from_url(
+            self.settings.database_url, pool_size=self.settings.db_pool_size,
+            max_overflow=self.settings.db_pool_max_overflow,
+            statement_timeout_seconds=self.settings.db_statement_timeout_seconds,
+        )
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
         self.storage = LocalFilesystemStorage(self.settings.jobs_dir)
