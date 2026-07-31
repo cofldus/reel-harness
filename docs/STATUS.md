@@ -1,16 +1,92 @@
 # Status
 
-Last updated: 2026-07-31 (Fable F1, on branch
+Last updated: 2026-07-31 (Fable F2, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
 Fable cinematic engine is the active track and owns `v0.5.0rc1`.
 
+## Fable F2 — Narrative Director
+
+Replaces F1's stub adaptation with a real, provider-neutral story ->
+shot-plan pipeline. The states, review gates, worker lane, and CLI are
+unchanged; what changed is that the adaptation is now genuinely
+generated and genuinely validated.
+
+- **Contract** (`providers/base.py`): `NarrativeDirector` Protocol
+  (`adapt_story` + `repair_adaptation`) with `AdaptationRequest` /
+  `AdaptationResult`. Separate from `LLMProvider` because the short-form
+  script call's shapes are semantically wrong for film adaptation.
+  Adapters return raw text; validation is downstream, matching the
+  existing script-generation discipline.
+- **Strict schema** (`pipeline/adaptation_schema.py`) enforces the hard
+  rules at the earliest possible point: adult-only characters via
+  `Literal[True]` plus an age-bracket whitelist (a minor-looking
+  character fails parsing before anything is persisted), shot grammar
+  validated against the F1 enums with exactly one camera movement per
+  shot by construction, one filmable action per shot (bounded length +
+  a documented chained-action heuristic), and structural limits (1-2
+  characters, 1-3 locations, 1-6 scenes, 4-15 shots).
+- **Whole-document validation** (`pipeline/adaptation_parser.py`):
+  one bounded lenient-JSON-extraction pass, then subject/location
+  reference integrity, dialogue-line ownership, shot/reverse-shot
+  alternation in multi-speaker scenes, contiguous ordering, and a
+  source-fidelity heuristic that rejects fabricated citations by matching
+  each scene's `source_beat` back into the real source text. Every
+  failure collects the FULL error list -- that list is the repair loop's
+  input contract.
+- **Bounded repair loop** (`core/adaptation_service.py`): max 2 repairs
+  (3 director calls total), each carrying the exact validation errors
+  back to the director. A refusal or empty response is not repaired at
+  all -- re-asking with the same source only burns quota -- so it fails
+  immediately instead of consuming the budget. Exhaustion raises
+  `SCHEMA_INVALID`, so the existing stage-retry classification applies
+  unchanged.
+- **Persistence and idempotency**: `ADAPTING` commits before any network
+  call and the adaptation's own writes land in ONE transaction, so a
+  partial adaptation is never observable and a crash is resumable by
+  re-running the same command. `adaptation_fingerprint` (source +
+  parameters + prompt version; schema v9 additive column -- the first use
+  of the now dialect-portable migration path) makes an unchanged re-run a
+  replay rather than a second paid call, while changed input on an
+  already-adapted project is refused so drift cannot silently discard an
+  approved adaptation. Re-adaptation replaces children and refuses
+  outright if any shot already has takes.
+- **Adapters**: `FakeNarrativeDirector` is deterministic and produces a
+  COMPLETE document that passes the real parser and validators -- its
+  scene beats are genuine quotes from the caller's own source text, so
+  the fidelity check is exercised meaningfully rather than vacuously; its
+  modes drive the repair, exhaustion, adult-rejection, and transient
+  paths. `OpenAICompatibleNarrativeDirector` subclasses the existing
+  OpenAI-compatible LLM provider to inherit its transport contract
+  verbatim (bounded retries, Retry-After, auth never retried and never
+  echoing the credential, bodies never logged), differing only in prompt
+  and output budget (`REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS`,
+  `REEL_HARNESS_NARRATIVE_READ_TIMEOUT`). It reuses the
+  `REEL_HARNESS_LLM_*` endpoint block -- adaptation is a
+  chat-completions call against the same kind of endpoint.
+- **Canonical prompt compiler** (`pipeline/shot_prompt.py`): fifteen
+  slots in fixed order, provider-neutral (vendor dialects are an adapter
+  concern in F5). The character's fixed identity is injected into EVERY
+  shot -- the only mechanism keeping one virtual actor recognizable
+  across separately-generated clips. `prompt_fingerprint` is versioned,
+  and it is what makes paid take generation idempotent via
+  `FableTake`'s unique constraint.
+- **F2 honesty notes**: the fidelity check only rejects obvious drift
+  (fabricated citations, a dropped ending); real semantic faithfulness
+  stays the STORY_REVIEW gate's human decision and nothing claims more.
+  The MockTransport adapter tests prove protocol conformance only --
+  **live adaptation against a real LLM endpoint has NOT been run** (no
+  credentials configured in this environment) and is not claimed.
+
+## Fable F1 — Cinematic domain + fake vertical slice
+
 ## Fable F1 — Cinematic domain + fake vertical slice
 
 First of five Fable sub-phases (F1 domain/fake slice, F2 narrative
 director, F3 references/demo/budget, F4 web UI, F5 real Veo 3.1 adapter +
-film editor + release). F1 ships the complete offline vertical slice:
+film editor + release). F1 ships the complete offline vertical slice
+(its stub adaptation was replaced by the real pipeline in F2):
 story text -> stub adaptation -> explicit review gates -> shot generation
 through a real worker lane -> take selection -> hard-cut final render ->
 COMPLETED, all against the fake provider with zero network.

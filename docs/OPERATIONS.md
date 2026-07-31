@@ -933,6 +933,91 @@ upload, analytics collection, comments management, a web dashboard (now
 exists — Phase 5A/5B), PostgreSQL (now exists — Phase 6A-1), a cloud
 queue, a forced cloud-storage vendor, and arbitrary tunneling software.
 
+## Fable cinematic projects (F1/F2)
+
+A separate pipeline from the short-form job flow: a story becomes a shot
+plan, each shot is generated as a video clip, you pick takes, and the
+selected takes are cut into a film. Artifacts live under
+`REEL_HARNESS_FABLE_PROJECTS_DIR` (default `./fable_projects`), never
+mixed into `jobs/`.
+
+```
+uv run reel-harness fable-create --title "비 오는 밤" --story-file story.txt
+uv run reel-harness fable-adapt <project_id>
+uv run reel-harness fable-approve <project_id> --step story
+uv run reel-harness fable-approve <project_id> --step characters
+uv run reel-harness fable-approve <project_id> --step shots      # cost gate
+uv run reel-harness fable-worker-run --idle-exit-after 5
+uv run reel-harness fable-status <project_id>
+uv run reel-harness fable-select-take <take_id>
+uv run reel-harness fable-render <project_id>
+uv run reel-harness fable-approve <project_id> --step final
+```
+
+**Nothing advances without you.** Every `*_REVIEW` state requires an
+explicit approval command; `--step shots` is the single entry into
+generation, which is the only phase that can cost money. `serve
+--fable-workers N` (default 0) runs the generation lane alongside the
+other workers.
+
+### Choosing the Narrative Director
+
+`REEL_HARNESS_NARRATIVE_PROVIDER`:
+
+- **`fake`** (default) — deterministic, no network. Produces a complete
+  adaptation that passes every real validator; useful for exercising the
+  whole flow offline. Never presented as a real adaptation.
+- **`openai-compatible`** — a real LLM. Reuses the
+  `REEL_HARNESS_LLM_BASE_URL` / `_MODEL` / `_API_KEY` block (adaptation
+  is a chat-completions call against the same kind of endpoint), with its
+  own output budget and read timeout since a shot plan is much larger
+  than a short-form script:
+  `REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS` (default 6000),
+  `REEL_HARNESS_NARRATIVE_READ_TIMEOUT` (default 120s).
+
+Selecting `openai-compatible` without those credentials fails at startup
+with the exact missing variable names, never at first use.
+
+### What the adaptation is checked against
+
+The model's output is validated before anything is persisted; a failure
+returns the exact errors to the model for at most **two** repair attempts
+(three calls total) and then fails the stage. A refusal or empty response
+is not repaired at all — re-asking with the same source only burns quota.
+
+- Characters must be fictional **adults** (age bracket whitelist plus an
+  explicit adult flag). A minor-looking character fails parsing outright.
+- One filmable action per shot; exactly one camera movement per shot;
+  shot size/angle/movement must be real film-grammar values.
+- 1–2 characters, 1–3 locations, 1–6 scenes, 4–15 shots, 2–8s per shot.
+- Every scene must quote the **actual source text** it dramatizes;
+  fabricated citations are rejected.
+- Multi-speaker scenes must alternate subjects (shot/reverse-shot).
+
+**Scope of the automated fidelity check**: it catches obvious drift —
+invented source quotes, a dropped ending. It does **not** judge whether
+the adaptation is a *good* reading of your story. That is what the
+STORY_REVIEW gate is for; approve it yourself before casting.
+
+### Idempotency and recovery
+
+Re-running `fable-adapt` with unchanged input replays the stored
+adaptation instead of paying for a second call. Changing the source text
+of an already-adapted project is refused — reject the story review to
+re-adapt instead. If adaptation crashes mid-flight, the project stays in
+`ADAPTING` with no children written; simply re-run `fable-adapt`.
+Re-adaptation refuses outright once any shot has takes, so generated
+footage can never be orphaned by a plan change.
+
+### Live verification status
+
+The real-provider adapter is covered by contract tests against a mock
+transport (protocol conformance, retries, rate-limit handling, auth
+failures that never echo the credential). **Live adaptation against a
+real LLM endpoint is reported as `NOT RUN` unless credentials were
+configured and a real call was actually made** — contract-test success is
+never reported as live success.
+
 ## Cancelling a job
 
 `reel-harness job-cancel <id>` / `POST /v1/jobs/{id}/cancel` share one
