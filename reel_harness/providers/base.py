@@ -231,6 +231,135 @@ class ProcessingStatusResult:
     request_id: str | None = None
 
 
+@dataclass(frozen=True)
+class CinematicCapabilities:
+    """What one cinematic video adapter actually supports -- checked by
+    the Fable service/UI instead of scattering vendor conditionals through
+    domain code, mirroring PublisherCapabilities. A capability the
+    provider's OFFICIAL docs don't confirm is False/absent here, and the
+    feature is hidden rather than imitated (Fable spec rule: never fake an
+    unsupported provider feature)."""
+
+    text_to_video: bool
+    image_to_video: bool
+    first_frame: bool
+    last_frame: bool
+    character_reference: bool
+    multiple_references: bool
+    video_reference: bool
+    native_audio: bool
+    lip_sync: bool
+    supports_seed: bool
+    supports_negative_prompt: bool
+    supported_durations_sec: frozenset[float]
+    supported_aspect_ratios: frozenset[str]
+    supported_resolutions: frozenset[str]
+    max_concurrent_jobs: int | None
+
+
+@dataclass
+class CinematicGenerationRequest:
+    """One shot-generation request, provider-agnostic. The compiled
+    prompt text arrives here already assembled (F2's ShotPromptCompiler
+    owns prompt construction); reference images are local paths whose
+    upload/encoding is the adapter's concern. Never contains credentials."""
+
+    prompt: str
+    duration_sec: float
+    aspect_ratio: str
+    resolution: str
+    reference_image_paths: list[Path] = field(default_factory=list)
+    first_frame_path: Path | None = None
+    negative_prompt: str | None = None
+    seed: int | None = None
+    # Deterministic idempotency identity: project + shot + take attempt +
+    # prompt/reference fingerprints -- the adapter includes it in provider
+    # correlation metadata where supported, and callers use it to avoid
+    # duplicate paid generations (see db.cinematic_models.FableTake).
+    correlation_id: str = ""
+
+
+@dataclass
+class CinematicGenerationHandle:
+    """What create_generation returns. `provider_job_reference` is the
+    provider's own job/operation id (safe to persist); signed URLs and
+    tokens never appear here."""
+
+    provider_job_reference: str
+    provider_id: str
+    request_id: str | None = None
+
+
+@dataclass
+class CinematicGenerationStatus:
+    """Polling result. `state` is normalized across providers:
+    "generating" | "succeeded" | "failed" | "moderated" | "cancelled".
+    "moderated" is deliberately distinct from "failed": a moderation
+    block routes to REVIEW_REQUIRED (a human decision), never a blind
+    retry of the same prompt."""
+
+    state: str
+    failure_reason: str | None = None
+    moderation_reason: str | None = None
+    request_id: str | None = None
+
+
+@dataclass
+class CinematicVideoResult:
+    """A downloaded, locally-persisted generated clip -- same shape
+    discipline as TTSResult: local path + real measured properties +
+    provenance, never a raw provider response."""
+
+    video_path: Path
+    duration_sec: float
+    provider_id: str
+    model_id: str
+    license: str
+    checksum_sha256: str | None = None
+    generation_seed: int | None = None
+    request_id: str | None = None
+    # Cost as officially reported/derivable, or None when the provider's
+    # docs give no per-generation figure -- never an invented estimate.
+    cost_amount: float | None = None
+    cost_currency: str | None = None
+
+
+@dataclass
+class CinematicCostEstimate:
+    """Pre-generation estimate. `known` is False when official pricing
+    can't be applied to this request -- callers show "unknown"/credits,
+    never a guessed number (Fable spec rule)."""
+
+    known: bool
+    amount: float | None = None
+    currency: str | None = None
+    detail: str | None = None
+
+
+class CinematicVideoProvider(Protocol):
+    """Async-generation contract (submit -> poll -> download), shaped
+    after the real APIs surveyed for Fable (all are job-submit + poll,
+    none synchronous). Vendor names live only in adapters and the
+    registry, per this project's provider discipline."""
+
+    provider_id: str
+    capabilities: CinematicCapabilities
+
+    def validate_request(self, request: CinematicGenerationRequest) -> None: ...
+
+    def estimate_cost(self, request: CinematicGenerationRequest) -> CinematicCostEstimate: ...
+
+    def create_generation(self, request: CinematicGenerationRequest) -> CinematicGenerationHandle: ...
+
+    def get_generation_status(self, handle: CinematicGenerationHandle) -> CinematicGenerationStatus: ...
+
+    def cancel_generation(self, handle: CinematicGenerationHandle) -> None: ...
+
+    def download_result(
+        self, handle: CinematicGenerationHandle, dest_dir: Path,
+    ) -> CinematicVideoResult: ...
+
+
 class LLMProvider(Protocol):
     provider_id: str
 

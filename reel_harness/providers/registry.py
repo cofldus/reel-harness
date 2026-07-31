@@ -9,6 +9,9 @@ from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSI
 from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
 from reel_harness.providers.base import (
     ChannelContext,
+    CinematicGenerationHandle,
+    CinematicGenerationRequest,
+    CinematicVideoProvider,
     CreatorInfo,
     LLMProvider,
     ProcessingStatusResult,
@@ -78,6 +81,47 @@ class _UnconfiguredStockMediaProvider:
         raise ProviderNotConfiguredError(self._reason)
 
     def download(self, candidate, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
+class _UnconfiguredCinematicVideoProvider:
+    """Cinematic counterpart of _UnconfiguredLLMProvider: any generation
+    attempt fails with PROVIDER_NOT_CONFIGURED. `capabilities` is a
+    maximally-restrictive placeholder (everything False/empty) so
+    capability-gate checks that run before any method call stay
+    structurally valid without ever enabling a feature."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        from reel_harness.providers.base import CinematicCapabilities
+
+        self._reason = reason
+        self.capabilities = CinematicCapabilities(
+            text_to_video=False, image_to_video=False, first_frame=False, last_frame=False,
+            character_reference=False, multiple_references=False, video_reference=False,
+            native_audio=False, lip_sync=False, supports_seed=False,
+            supports_negative_prompt=False, supported_durations_sec=frozenset(),
+            supported_aspect_ratios=frozenset(), supported_resolutions=frozenset(),
+            max_concurrent_jobs=None,
+        )
+
+    def validate_request(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def estimate_cost(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def create_generation(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def get_generation_status(self, handle: CinematicGenerationHandle):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def cancel_generation(self, handle: CinematicGenerationHandle):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def download_result(self, handle: CinematicGenerationHandle, dest_dir):
         raise ProviderNotConfiguredError(self._reason)
 
 
@@ -412,6 +456,20 @@ STOCK_MEDIA_PROVIDERS: dict[str, Callable[[Settings | None], StockMediaProvider]
 }
 
 
+def _build_fake_cinematic_video(settings: Settings | None) -> CinematicVideoProvider:
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+
+    return FakeCinematicVideoProvider()
+
+
+# Fable cinematic generation (Phase F1): fake only for now -- the demo tier
+# lands in F3 and the first real adapter in F5, both registered HERE and
+# nowhere else, per the same vendor-name discipline as every other family.
+CINEMATIC_VIDEO_PROVIDERS: dict[str, Callable[[Settings | None], CinematicVideoProvider]] = {
+    "fake": _build_fake_cinematic_video,
+}
+
+
 def resolve_llm_provider(name: str, settings: Settings | None = None) -> LLMProvider:
     try:
         return LLM_PROVIDERS[normalize_provider_name(name)](settings)
@@ -431,6 +489,40 @@ def resolve_stock_media_provider(name: str, settings: Settings | None = None) ->
         return STOCK_MEDIA_PROVIDERS[normalize_provider_name(name)](settings)
     except KeyError as exc:
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
+
+
+def resolve_cinematic_video_provider(name: str, settings: Settings | None = None) -> CinematicVideoProvider:
+    try:
+        return CINEMATIC_VIDEO_PROVIDERS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Cinematic video provider '{name}' is not registered yet") from exc
+
+
+def cinematic_provider_snapshot(settings: Settings | None) -> dict:
+    """Per-project provider snapshot block (Fable) -- same pinning
+    discipline as llm/tts/asset_provider_snapshot: provider id only for
+    now; the real adapter (F5) adds model + safe base-URL host here.
+    Never a credential."""
+    name = normalize_provider_name(settings.cinematic_provider) if settings else "fake"
+    return {"cinematic_provider": name}
+
+
+def resolve_cinematic_video_for_snapshot(
+    snapshot: dict | None, settings: Settings | None,
+) -> CinematicVideoProvider:
+    """Resolves the cinematic provider a leased shot must generate with,
+    honoring the project's creation-time snapshot -- identical fail-loud
+    ladder as the other families, no silent fallback."""
+    if not snapshot or "cinematic_provider" not in snapshot:
+        return resolve_cinematic_video_provider(
+            normalize_provider_name(settings.cinematic_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("cinematic_provider"))
+    if name == "fake":
+        return _build_fake_cinematic_video(settings)
+    return _UnconfiguredCinematicVideoProvider(
+        f"project is pinned to cinematic provider {name!r}, which is not registered"
+    )
 
 
 # A neutral, maximally-restrictive placeholder -- _UnconfiguredPublisher is

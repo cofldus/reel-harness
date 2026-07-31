@@ -129,6 +129,13 @@ class Settings(BaseSettings):
     tts_retry_backoff_seconds: float = Field(
         2.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_RETRY_BACKOFF", "TTS_RETRY_BACKOFF_SECONDS"))
 
+    # Cinematic video generation provider (Fable, Phase F1). Same
+    # conventions as the other provider blocks: "fake" needs nothing and is
+    # the default; the real adapter (F5) will add its base-url/key fields
+    # here when it lands. Selection only for now.
+    cinematic_provider: str = Field(
+        "fake", validation_alias=_llm_alias("REEL_HARNESS_CINEMATIC_PROVIDER", "CINEMATIC_PROVIDER"))
+
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
     # to the real Pexels Video API, the API key is a SecretStr registered for
@@ -396,6 +403,18 @@ def _validate_tts_settings(settings: Settings) -> None:
         )
 
 
+def _validate_cinematic_settings(settings: Settings) -> None:
+    name = normalize_provider_name(settings.cinematic_provider)
+    if name == "fake":
+        return
+    # No demo/real cinematic adapter exists yet (Fable F3/F5) -- refuse
+    # anything else loudly rather than accepting a name that would only
+    # fail later at resolution time.
+    raise ProviderConfigurationError(
+        f"unknown cinematic provider {settings.cinematic_provider!r} (supported: fake)"
+    )
+
+
 def _validate_asset_settings(settings: Settings) -> None:
     if settings.asset_orientation not in ASSET_SUPPORTED_ORIENTATIONS:
         raise ProviderConfigurationError(
@@ -575,6 +594,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_database_url(settings)
     _validate_llm_settings(settings)
     _validate_tts_settings(settings)
+    _validate_cinematic_settings(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)
