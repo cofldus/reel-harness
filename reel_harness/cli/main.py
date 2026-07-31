@@ -403,6 +403,155 @@ def cmd_job_list(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+# --- Fable cinematic projects (Phase F1) -----------------------------------
+
+
+def cmd_fable_create(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.service import InvalidActionError
+
+    if args.story_file:
+        source_text = Path(args.story_file).read_text(encoding="utf-8")
+    else:
+        source_text = args.story or ""
+    idempotency_key = args.idempotency_key or str(uuid.uuid4())
+    try:
+        project, replay = ctx.fable.create_project(
+            title=args.title, source_text=source_text, idempotency_key=idempotency_key,
+            language=args.language, genre=args.genre, tone=args.tone,
+            target_duration_sec=args.duration, aspect_ratio=args.aspect_ratio,
+        )
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": project.id, "status": project.status, "idempotent_replay": replay,
+    }, indent=2))
+    return 0
+
+
+def cmd_fable_adapt(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.adapt_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
+def cmd_fable_approve(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    actions = {
+        "story": ctx.fable.approve_story,
+        "characters": ctx.fable.approve_characters,
+        "shots": ctx.fable.approve_shots,
+        "final": ctx.fable.approve_final,
+    }
+    try:
+        project = actions[args.step](args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
+def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.get_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    shots = ctx.fable.project_shots(args.project_id)
+    payload = {
+        "project_id": project.id,
+        "title": project.title,
+        "status": project.status,
+        "aspect_ratio": project.aspect_ratio,
+        "failure_code": project.failure_code,
+        "failure_summary": project.failure_summary,
+        "shots": [
+            {
+                "shot_id": shot.id, "status": shot.status, "order": shot.shot_order,
+                "action": shot.action, "duration_sec": shot.duration_sec,
+                "takes": [
+                    {
+                        "take_id": take.id, "status": take.status, "selected": take.selected,
+                        "attempt_number": take.attempt_number,
+                    }
+                    for take in ctx.fable.shot_takes(shot.id)
+                ],
+            }
+            for shot in shots
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_fable_list(args: argparse.Namespace, ctx: AppContext) -> int:
+    rows = [
+        {"project_id": p.id, "title": p.title, "status": p.status}
+        for p in ctx.fable.list_projects()
+    ]
+    print(json.dumps(rows, indent=2))
+    return 0
+
+
+def cmd_fable_select_take(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        shot = ctx.fable.select_take(args.take_id)
+    except FableProjectNotFoundError:
+        print(f"fable take not found: {args.take_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"shot_id": shot.id, "status": shot.status}, indent=2))
+    return 0
+
+
+def cmd_fable_render(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        final_path = ctx.fable.render_final(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except (InvalidActionError, PipelineError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"project_id": args.project_id, "final_path": str(final_path)}, indent=2))
+    return 0
+
+
+def cmd_fable_cancel(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.cancel_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
 def cmd_job_approve(args: argparse.Namespace, ctx: AppContext) -> int:
     try:
         job = ctx.jobs.approve(args.job_id)
@@ -3075,6 +3224,47 @@ def build_parser() -> argparse.ArgumentParser:
     job_retry.add_argument("job_id")
     job_retry.add_argument("--stage", required=True, help="Stage enum value to resume from")
     job_retry.set_defaults(func=cmd_job_retry)
+
+    fable_create = sub.add_parser("fable-create", help="Create a Fable cinematic project from a story")
+    fable_create.add_argument("--title", required=True)
+    story_source = fable_create.add_mutually_exclusive_group(required=True)
+    story_source.add_argument("--story", help="Story text inline")
+    story_source.add_argument("--story-file", help="Path to a UTF-8 text file containing the story")
+    fable_create.add_argument("--language", default="ko")
+    fable_create.add_argument("--genre", default=None)
+    fable_create.add_argument("--tone", default=None)
+    fable_create.add_argument("--duration", type=int, default=60, help="Target duration in seconds")
+    fable_create.add_argument("--aspect-ratio", default="9:16", choices=("9:16", "16:9"))
+    fable_create.add_argument("--idempotency-key", default=None)
+    fable_create.set_defaults(func=cmd_fable_create)
+
+    fable_adapt = sub.add_parser("fable-adapt", help="Run story adaptation (DRAFT -> STORY_REVIEW)")
+    fable_adapt.add_argument("project_id")
+    fable_adapt.set_defaults(func=cmd_fable_adapt)
+
+    fable_approve = sub.add_parser("fable-approve", help="Approve the current review gate")
+    fable_approve.add_argument("project_id")
+    fable_approve.add_argument("--step", required=True, choices=("story", "characters", "shots", "final"))
+    fable_approve.set_defaults(func=cmd_fable_approve)
+
+    fable_status = sub.add_parser("fable-status", help="Project status with per-shot/take detail (JSON)")
+    fable_status.add_argument("project_id")
+    fable_status.set_defaults(func=cmd_fable_status)
+
+    fable_list = sub.add_parser("fable-list")
+    fable_list.set_defaults(func=cmd_fable_list)
+
+    fable_select_take = sub.add_parser("fable-select-take", help="Select one take for its shot")
+    fable_select_take.add_argument("take_id")
+    fable_select_take.set_defaults(func=cmd_fable_select_take)
+
+    fable_render = sub.add_parser("fable-render", help="Concatenate selected takes into the final film")
+    fable_render.add_argument("project_id")
+    fable_render.set_defaults(func=cmd_fable_render)
+
+    fable_cancel = sub.add_parser("fable-cancel")
+    fable_cancel.add_argument("project_id")
+    fable_cancel.set_defaults(func=cmd_fable_cancel)
 
     worker_run_once = sub.add_parser("worker-run-once")
     worker_run_once.add_argument("--worker-id", default="cli-worker")

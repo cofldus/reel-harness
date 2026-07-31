@@ -48,6 +48,14 @@ class Settings(BaseSettings):
         validation_alias=_llm_alias("REEL_HARNESS_DB_STATEMENT_TIMEOUT_SECONDS", "DB_STATEMENT_TIMEOUT_SECONDS"),
     )
     jobs_dir: Path = Path("./jobs")
+    # Fable cinematic projects get their own storage root (a second
+    # LocalFilesystemStorage instance on AppContext) -- project artifacts
+    # live under fable_projects/{project_id}/..., never mixed into
+    # jobs/{job_id}/... The same UUID-only/path-traversal rules apply.
+    fable_projects_dir: Path = Field(
+        Path("./fable_projects"),
+        validation_alias=_llm_alias("REEL_HARNESS_FABLE_PROJECTS_DIR", "FABLE_PROJECTS_DIR"),
+    )
     app_api_key: str = "changeme-local-dev-key"
     # `serve --host` defaults from this (a CLI flag still overrides for a
     # one-off run) so ops.preflight's public-bind check and the running

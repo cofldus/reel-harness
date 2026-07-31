@@ -36,6 +36,10 @@ class AppContext:
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
         self.storage = LocalFilesystemStorage(self.settings.jobs_dir)
+        # Fable cinematic projects: a SECOND storage instance with its own
+        # root -- same backend class, same UUID/path-traversal enforcement,
+        # different directory tree (fable_projects/{project_id}/...).
+        self.fable_storage = LocalFilesystemStorage(self.settings.fable_projects_dir)
         from reel_harness.providers.registry import provider_snapshot
 
         self.jobs = JobService(
@@ -43,6 +47,13 @@ class AppContext:
             provider_snapshot=provider_snapshot(self.settings),
         )
         self.publications = PublicationService(self.session_factory, self.storage)
+        from reel_harness.core.fable_service import FableService
+        from reel_harness.providers.registry import cinematic_provider_snapshot
+
+        self.fable = FableService(
+            self.session_factory, storage=self.fable_storage,
+            provider_snapshot=cinematic_provider_snapshot(self.settings),
+        )
         self._secret_store = None
 
     def config_fingerprint(self) -> dict:

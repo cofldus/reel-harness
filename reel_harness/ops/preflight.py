@@ -135,10 +135,18 @@ def _check_storage(checker: _Checker, settings: Settings) -> None:
     else:
         checker.add("storage_root", "WARN", f"{root} does not exist yet -- will be created on first use")
     _check_write_permission(checker, "storage_root_writable", root)
-    # LocalFilesystemStorage is currently the only StorageBackend; "jobs
-    # root" and "storage root" are the same directory today (see
-    # docs/ARCHITECTURE.md's extension-point note on S3CompatibleStorage).
-    checker.add("jobs_root", "PASS", f"same as storage_root ({root}) -- no separate jobs root exists yet")
+    # LocalFilesystemStorage is the only StorageBackend; the reel jobs root
+    # IS the storage root, and Fable cinematic projects use a second
+    # instance rooted at settings.fable_projects_dir (checked below).
+    checker.add("jobs_root", "PASS", f"same as storage_root ({root})")
+    fable_root = settings.fable_projects_dir.resolve()
+    if fable_root.is_dir():
+        checker.add("fable_projects_root", "PASS", str(fable_root))
+    else:
+        checker.add(
+            "fable_projects_root", "WARN",
+            f"{fable_root} does not exist yet -- will be created on first use",
+        )
 
     try:
         usage = shutil.disk_usage(root if root.is_dir() else root.parent)
