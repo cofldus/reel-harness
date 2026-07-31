@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import make_url
 
 from reel_harness.db.schema import _ADDITIVE_COLUMNS, SCHEMA_VERSION
 
@@ -30,10 +31,15 @@ class RestoreRefusedError(DbToolsError):
 
 
 def sqlite_path_from_url(database_url: str) -> Path:
+    """Only the SQLite-file-path operations (backup/restore, the PID-lockfile
+    migration lock) route through here -- schema migration and status/verify
+    are already dialect-portable (see db.schema.create_engine_from_url and
+    this module's _integrity_check/_foreign_key_violations). PostgreSQL
+    backup/restore gets its own dedicated implementation, not a path through
+    this function -- see docs/OPERATIONS.md."""
     if not database_url.startswith("sqlite"):
         raise DbToolsError(
-            f"this command only supports SQLite database URLs, got {database_url!r} -- "
-            "see docs/OPERATIONS.md's Phase 4A scope (PostgreSQL is explicitly out of scope)"
+            f"this operation only supports SQLite database URLs, got {database_url!r}"
         )
     # sqlite:///relative/path.db or sqlite:////absolute/path.db (4 slashes)
     raw = database_url.split("///", 1)[1]
@@ -75,10 +81,11 @@ class DbStatus:
 
 
 def _pending_column_migrations(conn) -> list[str]:
+    inspector = inspect(conn)
     pending = []
-    for table, column, _ddl in _ADDITIVE_COLUMNS:
+    for table, column, *_rest in _ADDITIVE_COLUMNS:
         try:
-            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            existing = {col["name"] for col in inspector.get_columns(table)}
         except Exception:  # noqa: BLE001 - table may not exist yet on a brand-new DB
             existing = set()
         if existing and column not in existing:
@@ -86,11 +93,36 @@ def _pending_column_migrations(conn) -> list[str]:
     return pending
 
 
+def _integrity_check(conn) -> str:
+    """SQLite's `PRAGMA integrity_check` scans the whole file for
+    structural corruption -- PostgreSQL has no equivalent reachable over a
+    normal SQL connection (its durability story is WAL + optional page
+    checksums, checked by the server itself, not something a client
+    queries on demand). A live connection successfully executing a query
+    is the only signal available at this layer for PostgreSQL; deeper
+    corruption detection there is an operator/infrastructure concern, not
+    this command's job."""
+    if conn.dialect.name != "sqlite":
+        conn.execute(text("SELECT 1"))
+        return "ok"
+    return conn.execute(text("PRAGMA integrity_check")).scalar_one()
+
+
+def _foreign_key_violations(conn) -> list:
+    """SQLite's `PRAGMA foreign_keys` enforcement is opt-in and can be off
+    while rows are written, so an existing row can genuinely violate a
+    foreign key -- `PRAGMA foreign_key_check` finds those. PostgreSQL
+    enforces every foreign key constraint synchronously on every write;
+    a row violating one can never be committed in the first place, so
+    there is nothing to scan for after the fact."""
+    if conn.dialect.name != "sqlite":
+        return []
+    return list(conn.execute(text("PRAGMA foreign_key_check")))
+
+
 def db_status(engine, database_url: str) -> DbStatus:
     with engine.connect() as conn:
-        has_migrations_table = conn.execute(text(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-        )).first()
+        has_migrations_table = inspect(conn).has_table("schema_migrations")
         current_version = None
         if has_migrations_table:
             current_version = conn.execute(text("SELECT version FROM schema_migrations")).scalar_one_or_none()
@@ -106,7 +138,7 @@ def db_status(engine, database_url: str) -> DbStatus:
             except Exception:  # noqa: BLE001 - table doesn't exist yet
                 row_counts[table] = 0
 
-        integrity_status = conn.execute(text("PRAGMA integrity_check")).scalar_one()
+        integrity_status = _integrity_check(conn)
 
     return DbStatus(
         current_schema_version=current_version, latest_schema_version=SCHEMA_VERSION,
@@ -150,6 +182,63 @@ class _MigrationLock:
             self._lock_path.unlink(missing_ok=True)
 
 
+# Arbitrary fixed key for this app's migration advisory lock -- any two
+# processes racing db-migrate against the same PostgreSQL database must
+# agree on the same key, so this is a constant, not derived from anything
+# per-run (ASCII "REEL" as an int, chosen only to be recognizable in
+# pg_locks output, no other significance).
+_POSTGRES_MIGRATION_LOCK_KEY = 0x5245454C
+
+
+class _PostgresMigrationLock:
+    """PostgreSQL-native session-scoped advisory lock, held on a dedicated
+    connection for the migration's duration. `pg_try_advisory_lock` (not
+    the blocking `pg_advisory_lock`) so a second concurrent db-migrate
+    fails fast with the same "already running" semantics as the SQLite PID
+    lockfile, rather than queueing silently. Unlike the PID lockfile, this
+    needs no crash-recovery cleanup step: PostgreSQL releases a
+    session-scoped advisory lock automatically when the holding connection
+    closes, even if this process crashes mid-migration."""
+
+    def __init__(self, engine) -> None:
+        self._engine = engine
+        self._conn = None
+
+    def __enter__(self) -> _PostgresMigrationLock:
+        conn = self._engine.connect()
+        acquired = conn.execute(
+            text("SELECT pg_try_advisory_lock(:key)"), {"key": _POSTGRES_MIGRATION_LOCK_KEY},
+        ).scalar_one()
+        if not acquired:
+            conn.close()
+            raise MigrationLockedError(
+                "PostgreSQL migration advisory lock is already held -- another db-migrate may be running"
+            )
+        self._conn = conn
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": _POSTGRES_MIGRATION_LOCK_KEY},
+                )
+            finally:
+                self._conn.close()
+
+
+def _migration_lock(engine, database_url: str):
+    """Dispatch point: SQLite gets the PID-lockfile `_MigrationLock`,
+    PostgreSQL gets the advisory-lock `_PostgresMigrationLock` -- same
+    fail-fast-if-already-locked contract, different mechanism because
+    SQLite has no advisory-lock primitive of its own (see `_MigrationLock`'s
+    docstring) and PostgreSQL has no equivalent to a plain PID lockfile
+    next to a single database file (there is no single file)."""
+    if make_url(database_url).get_backend_name() == "postgresql":
+        return _PostgresMigrationLock(engine)
+    return _MigrationLock(sqlite_path_from_url(database_url))
+
+
 def db_migrate(
     engine, database_url: str, dry_run: bool = False, backup_dir: Path | None = None,
 ) -> dict:
@@ -168,9 +257,8 @@ def db_migrate(
             "target_schema_version": SCHEMA_VERSION,
         }
 
-    db_path = sqlite_path_from_url(database_url)
     backup_result = None
-    with _MigrationLock(db_path):
+    with _migration_lock(engine, database_url):
         if not status_before.pending_migrations:
             return {
                 "applied": True, "dry_run": False, "backup_path": None, "pending_migrations": [],
@@ -420,8 +508,8 @@ def db_verify(engine, session_factory) -> DbVerifyResult:
     from reel_harness.worker.publish_lease import find_orphaned_active_publications
 
     with engine.connect() as conn:
-        integrity = conn.execute(text("PRAGMA integrity_check")).scalar_one()
-        fk_violations = list(conn.execute(text("PRAGMA foreign_key_check")))
+        integrity = _integrity_check(conn)
+        fk_violations = _foreign_key_violations(conn)
 
     with session_factory() as session:
         orphan_pub_ids = [

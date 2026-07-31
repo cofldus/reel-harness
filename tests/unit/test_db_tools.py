@@ -262,3 +262,119 @@ def test_db_backup_records_the_actual_source_schema_version_not_the_running_code
     result = db_backup(url, tmp_path / "backups")
     assert result["schema_version"] == 3
     assert result["schema_version"] != SCHEMA_VERSION
+
+
+def test_migration_lock_dispatches_by_dialect(tmp_path) -> None:
+    """SQLite gets the PID-lockfile _MigrationLock; PostgreSQL gets the
+    advisory-lock _PostgresMigrationLock. Only the dispatch is exercised
+    here (no real PostgreSQL connection is available in this environment)
+    -- the advisory lock's actual acquire/release behavior is covered by
+    the parametrized PostgreSQL test suite."""
+    from reel_harness.ops.db_tools import _migration_lock, _PostgresMigrationLock
+
+    sqlite_url = f"sqlite:///{tmp_path / 'lock.db'}"
+    engine = create_engine_from_url(sqlite_url)
+    init_db(engine)
+    lock = _migration_lock(engine, sqlite_url)
+    assert isinstance(lock, _MigrationLock)
+
+    pg_lock = _migration_lock(engine, "postgresql+psycopg://user:pass@localhost:5432/reel_harness")
+    assert isinstance(pg_lock, _PostgresMigrationLock)
+
+
+def test_ensure_column_is_dialect_portable_via_inspect(tmp_path) -> None:
+    """_ensure_column must use sqlalchemy.inspect() (portable) rather than
+    SQLite's PRAGMA table_info -- confirmed indirectly here by dropping a
+    column and letting init_db() re-add it via the real _ensure_column
+    path, then checking the new column round-trips a value correctly
+    (i.e. the ALTER TABLE ... ADD COLUMN DDL that inspect() drove was
+    actually valid, not just non-erroring)."""
+    from sqlalchemy import text
+
+    url = f"sqlite:///{tmp_path / 'ensure_column.db'}"
+    engine = create_engine_from_url(url)
+    init_db(engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs DROP COLUMN lease_token"))
+    engine.dispose()
+
+    engine = create_engine_from_url(url)
+    init_db(engine)  # must re-add lease_token without error
+    with engine.connect() as conn:
+        from sqlalchemy import inspect as sa_inspect
+
+        columns = {col["name"] for col in sa_inspect(conn).get_columns("jobs")}
+        assert "lease_token" in columns
+
+
+def test_ensure_column_boolean_default_is_dialect_correct_not_a_raw_int_string(tmp_path) -> None:
+    """The old hand-written "BOOLEAN NOT NULL DEFAULT 1" DDL string would
+    fail outright on PostgreSQL (no implicit int->boolean cast in a DEFAULT
+    clause) -- this confirms the new CreateColumn-based path produces a
+    real SQLAlchemy Boolean default (renders "1" on SQLite, "true" on
+    PostgreSQL) rather than reintroducing that hard-coded string, by
+    checking an existing row backfills to the SQLite-true representation."""
+    from sqlalchemy import text
+
+    url = f"sqlite:///{tmp_path / 'bool_default.db'}"
+    engine = create_engine_from_url(url)
+    init_db(engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE assets DROP COLUMN is_current"))
+    engine.dispose()
+
+    engine = create_engine_from_url(url)
+    init_db(engine)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO assets (id, job_id, scene_index, source_provider, local_path, checksum_sha256, "
+            "mime_type, downloaded_at, attempt_number) "
+            "VALUES (lower(hex(randomblob(16))), lower(hex(randomblob(16))), 0, 'fake', "
+            "'/tmp/x.mp4', 'deadbeef', 'video/mp4', CURRENT_TIMESTAMP, 1)"
+        ))
+        # A NOT NULL column with no explicit value on INSERT must have taken
+        # the server_default, not silently stayed NULL.
+        value = conn.execute(text("SELECT is_current FROM assets")).scalar_one()
+        assert value == 1
+
+
+def test_integrity_check_dispatches_to_postgresql_branch() -> None:
+    """PostgreSQL has no PRAGMA integrity_check equivalent reachable over a
+    normal connection -- confirm the dialect dispatch takes the "live
+    connection is the signal" branch instead of trying to run a
+    SQLite-only pragma against it (which would raise on real Postgres)."""
+    from reel_harness.ops.db_tools import _integrity_check
+
+    class _FakeDialect:
+        name = "postgresql"
+
+    class _FakeResult:
+        def scalar_one(self):
+            raise AssertionError("must not call scalar_one() on the PostgreSQL branch")
+
+    class _FakeConn:
+        dialect = _FakeDialect()
+
+        def execute(self, _stmt):
+            return _FakeResult()
+
+    assert _integrity_check(_FakeConn()) == "ok"
+
+
+def test_foreign_key_violations_dispatches_to_postgresql_branch() -> None:
+    """PostgreSQL enforces foreign keys synchronously on every write, so a
+    committed violation cannot exist -- confirm the dispatch short-circuits
+    to an empty list rather than attempting SQLite's PRAGMA
+    foreign_key_check against a connection that doesn't support it."""
+    from reel_harness.ops.db_tools import _foreign_key_violations
+
+    class _FakeDialect:
+        name = "postgresql"
+
+    class _FakeConn:
+        dialect = _FakeDialect()
+
+        def execute(self, _stmt):
+            raise AssertionError("must not execute a query on the PostgreSQL branch")
+
+    assert _foreign_key_violations(_FakeConn()) == []
