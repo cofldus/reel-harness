@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-01 (Fable F4 complete, F5 next, on branch
+Last updated: 2026-08-01 (Fable F1-F5 complete, v0.5.0rc1 ready to tag, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
@@ -16,8 +16,9 @@ with origin — if it is not, inspect before doing anything else.
 
 ## Where the work stands
 
-Fable is a five-sub-phase build: **F1 done, F2 done, F3 done, F4 done,
-F5 not started.**
+Fable is a five-sub-phase build: **all five are done.** The remaining
+work is not implementation -- it is LIVE VERIFICATION, which needs GCP
+credentials this machine does not have.
 
 - **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
   state machines, `CinematicVideoProvider` Protocol + fake tier, project
@@ -34,24 +35,68 @@ F5 not started.**
 - **F4 (done)** — `/v1/fable/*` API and the `/fable` web UI: the whole
   lifecycle by clicking, following the Phase 5A/5B patterns with no new
   domain logic.
-- **F5 (not started)** — real Veo adapter, film editor, audio, release
-  `v0.5.0rc1`.
+- **F5 (done)** — Vertex AI Veo adapter, film editor (dissolves, fades,
+  audio crossfade), and the `v0.5.0rc1` release. `release-check` reports
+  `ready_to_tag: True`; **the tag has not been created** -- see below.
 
-## The immediate work (F5)
+## The immediate work: live verification
 
-F1-F4 are complete. F5 is the last sub-phase and the one that needs real
-credentials: the Vertex AI Veo adapter, a film editor beyond F1's hard
-cuts, audio, and the `v0.5.0rc1` release.
+Everything is implemented. Nothing that talks to Google has ever been
+run against Google, because there are no credentials on this machine.
+In priority order:
 
-**Do this first, before building the Veo adapter**: run
-`fable-reference-smoke --confirm-paid-generation` as soon as GCP
-credentials exist. It costs about $0.13 and is the cheapest available
-answer to whether the reference-chaining strategy holds against a real
-model -- and F5's entire consistency approach is built on it.
+1. **`fable-reference-smoke --confirm-paid-generation`** (~$0.13). The
+   cheapest possible answer to "does the real image model accept its own
+   output back as a character reference, and do the two images look like
+   the same person?" The second half needs human eyes -- use
+   `--keep-output` and look.
+2. **One reference-driven Veo generation.** This is what answers the open
+   SynthID question below. If Veo rejects watermarked images as
+   character references, the consistency strategy needs rethinking, and
+   finding that out costs one 8s clip.
+3. **Tag `v0.5.0rc1`** once (1) and (2) either pass or have their results
+   recorded in the CHANGELOG's known-limitations section. The release
+   check already passes; the tag was deliberately NOT created by the
+   session that built this, because tagging a release whose two real
+   adapters have never made a single live call would be stamping a
+   version on something nobody has watched work.
 
-The open Veo/SynthID question (below) is the other thing to resolve
-early: if Veo rejects watermarked images as character references, the
-strategy needs rethinking BEFORE the adapter is written around it.
+## Fable F5 — Veo adapter, film editor, and the v0.5.0rc1 release
+
+- **Vertex AI Veo adapter** (`providers/google_cinematic_video.py`),
+  written against the INSTALLED SDK's real types
+  (`GenerateVideosConfig`, `VideoGenerationReferenceType.ASSET`,
+  `GenerateVideosOperation.done/.error/.response`,
+  `rai_media_filtered_count/_reasons`, `Video.video_bytes`) --
+  introspected, not recalled, the approach that caught the published docs
+  contradicting themselves during F3. Three documented constraints are
+  enforced BEFORE submission because each costs a generation to learn the
+  hard way: reference-driven runs are fixed at 8s/720p (asking otherwise
+  silently returns something else), max 3 reference images, and
+  `person_generation=allow_adult`. A safety-filtered result is
+  `moderated`, never `failed`. `us-central1` is enforced at startup, not
+  defaulted. Videos are downloaded immediately (they are deleted after
+  two days). `cancel_generation` is honest about being local-only -- the
+  SDK has no cancel for a video operation, and claiming otherwise would
+  leave an operator believing a paid generation stopped.
+- **Film editor** (`media/film_editor.py`). F1's `-c copy` concat can
+  only produce hard cuts, because stream copy cannot blend two clips.
+  This builds the xfade/acrossfade filtergraph that can. The arithmetic
+  is the reviewable part: a transition OVERLAPS the two clips it joins,
+  so each one shortens the film and shifts where the next lands --
+  offsets track the running duration rather than a fixed multiple, and
+  the fade-out is computed from the shortened total. `render_final` picks
+  its path from the plan: no pixel mixing keeps the lossless copy, and
+  only a dissolve/fade/mute pays for a re-encode. Clip durations are
+  re-measured with ffprobe at render time, because a provider returning
+  7.9s for an 8s request would otherwise misplace every later transition.
+  An impossible plan is refused at startup AND before ffmpeg runs, so it
+  cannot waste a whole paid run before surfacing at the last step.
+- **Verification**: 1529 passed / 9 skipped, mypy clean on both platforms,
+  ruff clean, `release-check` PASS. The editor is exercised against REAL
+  ffmpeg -- a dissolve renders and measures shorter than the clip sum,
+  and every transition name offered is confirmed to be one ffmpeg
+  actually implements. **The Veo adapter has never made a live call.**
 
 ## Fable F4 — web UI and the /v1/fable/* API
 
