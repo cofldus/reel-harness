@@ -12,10 +12,11 @@ import pytest
 from reel_harness.core.fable_service import FableService
 from reel_harness.db.cinematic_models import FableShot, FableTake
 from reel_harness.media.deps import check_ffmpeg_available
+from reel_harness.pipeline.shot_prompt import prompt_fingerprint
 from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
 from reel_harness.storage.local import LocalFilesystemStorage
 from reel_harness.worker.fable_lease import lease_next_shot
-from reel_harness.worker.fable_runner import compile_stub_prompt, prompt_fingerprint, run_shot
+from reel_harness.worker.fable_runner import compile_prompt_for_shot, run_shot
 
 FFMPEG_PRESENT = check_ffmpeg_available().all_available
 
@@ -40,14 +41,15 @@ def test_prompt_compilation_is_deterministic(fable_env) -> None:
     session_factory, _, project = fable_env
     with session_factory() as session:
         shot = lease_next_shot(session, worker_id="w")
-        from reel_harness.db.cinematic_models import StoryProject
+        from reel_harness.db.cinematic_models import FableScene, StoryProject
 
         db_project = session.get(StoryProject, project.id)
-        first = compile_stub_prompt(shot, db_project)
-        second = compile_stub_prompt(shot, db_project)
+        scene = session.get(FableScene, shot.scene_id)
+        first = compile_prompt_for_shot(session, shot, scene, db_project)
+        second = compile_prompt_for_shot(session, shot, scene, db_project)
         assert first == second
         assert prompt_fingerprint(first) == prompt_fingerprint(second)
-        assert "locked" in first  # camera grammar reaches the prompt
+        assert shot.camera_movement.replace("_", " ") in first  # grammar reaches the prompt
 
 
 @pytest.mark.skipif(not FFMPEG_PRESENT, reason="fake provider materializes a real mp4 via ffmpeg")

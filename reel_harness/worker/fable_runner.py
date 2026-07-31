@@ -15,13 +15,22 @@ shot to REVIEW_REQUIRED with the reason recorded -- a human decision,
 never an automatic retry of the same prompt."""
 from __future__ import annotations
 
-import hashlib
 import time
+
+from sqlalchemy import select
 
 from reel_harness.core.cinematic_state import FableShotStatus, apply_shot_transition
 from reel_harness.core.errors import PipelineError
-from reel_harness.db.cinematic_models import FableScene, FableShot, FableTake, StoryProject
+from reel_harness.db.cinematic_models import (
+    FableCharacter,
+    FableLocation,
+    FableScene,
+    FableShot,
+    FableTake,
+    StoryProject,
+)
 from reel_harness.observability import log_worker_event
+from reel_harness.pipeline.shot_prompt import compile_shot_prompt, prompt_fingerprint
 from reel_harness.providers.base import CinematicGenerationRequest, CinematicVideoProvider
 from reel_harness.storage.base import StorageBackend
 from reel_harness.worker.fable_lease import assert_shot_lease
@@ -40,25 +49,27 @@ def _fenced_commit(session, shot: FableShot, lease_token: str | None) -> bool:
     return True
 
 
-def compile_stub_prompt(shot: FableShot, project: StoryProject) -> str:
-    """F1 placeholder for F2's ShotPromptCompiler: subject + action +
-    grammar fields in a fixed order, deterministic for fingerprinting."""
-    bible = project.story_bible or {}
-    parts = [
-        shot.subject or "a virtual adult actor",
-        shot.action or "",
-        shot.expression or "",
-        shot.shot_size or "",
-        shot.camera_angle or "",
-        shot.camera_movement or "",
-        shot.lighting or "",
-        str(bible.get("visual_style", "")),
-    ]
-    return ", ".join(p for p in parts if p)
-
-
-def prompt_fingerprint(prompt: str) -> str:
-    return hashlib.sha256(prompt.encode()).hexdigest()[:32]
+def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project: StoryProject) -> str:
+    """Loads this shot's subject character and its scene's location, then
+    delegates to the canonical provider-neutral compiler
+    (pipeline.shot_prompt) -- the compiler itself stays a pure function."""
+    character = session.execute(
+        select(FableCharacter).where(
+            FableCharacter.project_id == project.id, FableCharacter.name == shot.subject,
+        )
+    ).scalars().first()
+    location_record = session.get(FableLocation, scene.location_id) if scene.location_id else None
+    location = (
+        {
+            "name": location_record.name, "description": location_record.description,
+            "continuity": location_record.continuity or {},
+        }
+        if location_record is not None else {}
+    )
+    return compile_shot_prompt(
+        shot, project, character_bible=(character.bible if character is not None else None),
+        location=location,
+    )
 
 
 def run_shot(
@@ -70,7 +81,7 @@ def run_shot(
     project = session.get(StoryProject, scene.project_id)
     assert project is not None
 
-    prompt = compile_stub_prompt(shot, project)
+    prompt = compile_prompt_for_shot(session, shot, scene, project)
     fingerprint = prompt_fingerprint(prompt)
     attempt_number = 1 + len([t for t in shot.takes if t.prompt_fingerprint == fingerprint])
     request = CinematicGenerationRequest(
