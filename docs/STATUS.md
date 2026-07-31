@@ -1,12 +1,65 @@
 # Status
 
-Last updated: 2026-07-31 (Phase 6A-1 dual DB backend, on branch
-`phase6/deployment-foundation`). Phase 2A through Phase 5B (Publishing Web
-UI) are merged into `main` as of `v0.4.0rc1`.
+Last updated: 2026-07-31 (Fable F1, on branch
+`phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
+sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
+The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
+Fable cinematic engine is the active track and owns `v0.5.0rc1`.
+
+## Fable F1 — Cinematic domain + fake vertical slice
+
+First of five Fable sub-phases (F1 domain/fake slice, F2 narrative
+director, F3 references/demo/budget, F4 web UI, F5 real Veo 3.1 adapter +
+film editor + release). F1 ships the complete offline vertical slice:
+story text -> stub adaptation -> explicit review gates -> shot generation
+through a real worker lane -> take selection -> hard-cut final render ->
+COMPLETED, all against the fake provider with zero network.
+
+- **Domain** (`db/cinematic_models.py`, schema v8 — new tables only):
+  `fable_projects` (story_bible as one JSON doc), `fable_characters`
+  (virtual adult actors only; `adult_confirmed`/`reference_approved`
+  default False), `fable_locations`, `fable_scenes`, `fable_shots` (the
+  leasable unit, same lease-fencing columns as Job/Publication),
+  `fable_takes` (append-only; `(shot_id, prompt_fingerprint,
+  attempt_number)` unique constraint is the duplicate-generation guard).
+- **State machines** (`core/cinematic_state.py`, the third pair by the
+  documented non-genericity precedent): project statuses with five
+  explicit `*_REVIEW` gates — `SHOT_REVIEW -> GENERATING` is the only
+  entry into paid generation; shot statuses with shot-level retry that
+  never fails the whole project. Shot grammar enums (one camera movement
+  per shot by construction).
+- **Provider layer**: `CinematicVideoProvider` Protocol (submit/poll/
+  download — the shape every surveyed real API has) + frozen
+  capabilities; a distinct `"moderated"` poll state routes to human
+  review, never a blind retry; cost estimates return unknown rather than
+  invented numbers. Fake provider is deterministic, renders REAL mp4s via
+  local ffmpeg (never bypasses BLOCKED_DEPENDENCY), stamps
+  FAKE_TEST_LICENSE. Registry/snapshot/fail-loud ladder identical to the
+  other provider families; `REEL_HARNESS_CINEMATIC_PROVIDER=fake` only.
+- **Worker lane**: third lease module + daemon
+  (`worker/fable_lease.py`/`fable_runner.py`/`fable_daemon.py`), fenced
+  commits on every status change, crash recovery through the state
+  machine with a bounded re-queue budget, project auto-advance
+  `GENERATING -> TAKE_REVIEW`. `serve --fable-workers N` (default 0) and
+  `fable-worker-run`.
+- **Service + CLI**: `FableService` (idempotent creation, every gate an
+  explicit approval, adult-confirmation enforced at the character gate,
+  single-selected-take with append-only retention, ffprobe-validated
+  final concat under the separate `fable_projects/` storage root); CLI
+  `fable-create/adapt/approve/status/list/select-take/render/cancel`.
+- **F1 honesty notes**: adaptation is a deterministic stub (real
+  NarrativeDirector is F2); no reference images yet (F3); no
+  transitions/audio mix/color (F5); provider polling is inline (a
+  dedicated poll lane comes with the real adapter). Provider research
+  (July 2026 official docs) selected Google Veo 3.1 for F5 — the only
+  surveyed API with first-class multi-image character reference — with
+  Runway as runner-up.
 
 ## Phase 6A-1 — Dual database backend (SQLite + PostgreSQL)
 
-First sub-phase of Phase 6A (production deployment foundation). SQLite
+## Phase 6A-1 — Dual database backend (SQLite + PostgreSQL) [merged to main]
+
+First sub-phase of the (now parked) deployment track. SQLite
 stays the zero-config default; PostgreSQL is now a fully-supported second
 backend. Deliberately the lowest-risk 6A sub-phase: purely additive, no
 security-critical surface, zero behavioral change for existing SQLite
