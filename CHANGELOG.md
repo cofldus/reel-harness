@@ -4,6 +4,61 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [0.4.0rc1] — 2026-07-31 — Publishing Web UI (first release candidate)
+
+### Added
+
+- **Real-platform publishing UI**: the Phase 5A web UI now covers
+  connecting a YouTube/TikTok/Instagram account and publishing a
+  completed job's video to it, entirely by clicking. New
+  `/publisher-accounts` screen (connect/disconnect, safe account
+  metadata only — never a token), `/jobs/{id}/publish` (platform/
+  account/privacy-range setup, gated on the job actually being
+  publish-eligible), `/publications` (list), `/publications/{id}`
+  (detail, self-terminating status polling), and cancel/retry/refresh/
+  reconcile actions on a publication.
+- **Browser-native OAuth connect flow**: a new
+  `POST /publisher-accounts/{provider}/connect` /
+  `GET /publisher-accounts/{provider}/callback` pair — the first HTTP
+  OAuth callback this project has (previously OAuth only worked via
+  `publisher-auth`'s CLI-driven loopback listener). PKCE verifier +
+  pending account reference are held in a new transient,
+  repository-external, single-use `OAuthFlowStore` (never a cookie,
+  never the database). `/callback` deliberately has no CSRF dependency
+  — the single-use `state` parameter is the correct defense for a
+  cross-site OAuth redirect, which a `SameSite=Strict` cookie would
+  never carry anyway.
+- **Additive `GET /v1/publications`** (paginated list, mirrors the
+  existing `GET /v1/jobs`) — existing `/v1/publications/*` routes
+  unchanged.
+
+### Fixed
+
+- `PublicationService.cancel_publication` crashed with a raw
+  `InvalidTransitionError` instead of a clean refusal when called on a
+  `FAILED` publication — the state machine only ever allowed
+  `FAILED` → `RETRY_WAIT`, never a direct cancel. Predates this
+  release; found by a new `can_cancel`-mirrors-the-real-precondition
+  test. `FAILED` is now refused explicitly, alongside
+  `PUBLISHED`/`CANCELLED`.
+
+### Known limitations
+
+- Platform-specific per-publication options (TikTok comment/duet/
+  stitch toggles, Instagram collaborators, etc.) are shown read-only
+  on the publish-setup screen, not editable — `PublicationService.
+  create_publication` has no parameter to accept a custom override yet,
+  so the worker always applies the same most-restrictive defaults the
+  CLI's `publish-job` already used.
+- No "check account status now" button — real per-account readiness
+  (e.g. whether a TikTok app has passed review) stays a CLI-only
+  action (`publisher-doctor --check-remote`, `live-verify`), never
+  triggered automatically by a page load.
+- Live provider credentials are not configured on the machine this
+  release candidate was built on — the OAuth connect flow is verified
+  against a real running server up to the real authorization-URL
+  redirect, but no live account has actually been connected.
+
 ## [0.3.0rc1] — 2026-07-30 — Local Web UI MVP (first release candidate)
 
 ### Added

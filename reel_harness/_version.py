@@ -10,4 +10,4 @@ tag for the same release prefixes it with "v" (e.g. "v0.1.0rc1") -- the
 same identifier, not a second format.
 """
 
-__version__ = "0.3.0rc1"
+__version__ = "0.4.0rc1"

@@ -10,9 +10,9 @@ from reel_harness._version import __version__ as version_module_value
 
 
 def test_version_is_pep440_release_candidate() -> None:
-    # "0.3.0rc1", not "0.3.0-rc.1" or "0.3.0.rc1" -- exactly one format used
+    # "0.4.0rc1", not "0.4.0-rc.1" or "0.4.0.rc1" -- exactly one format used
     # consistently everywhere a version string appears (see docs/STATUS.md).
-    assert version_module_value == "0.3.0rc1"
+    assert version_module_value == "0.4.0rc1"
 
 
 def test_package_version_matches_version_module() -> None:
