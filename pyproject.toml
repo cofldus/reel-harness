@@ -47,6 +47,16 @@ e2e-browser = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+# Fable reference-image generation against Google's real image models
+# (reel_harness/providers/google_reference_image.py) and, later, Veo video
+# generation -- one SDK and one credential for both, which is why this
+# vendor was chosen (see docs/STATUS.md's provider research). NEVER a hard
+# dependency: the fake and demo tiers run the entire Fable pipeline
+# offline, and the adapter fails with a clear install instruction rather
+# than an ImportError traceback when the extra is absent.
+google = [
+    "google-genai>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]

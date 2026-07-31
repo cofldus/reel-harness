@@ -28,23 +28,16 @@ F4 and F5 not started.**
   canonical shot-prompt compiler. **Live-verified against gpt-4o.**
 - **F3 (in progress)** — reference images, cost/budget, demo + google
   image adapters, multiple candidate takes. Commits 1 (reference provider
-  contract), 2 (cost/budget, schema v10) and 3 (casting gate + reference
-  sheets, schema v11) are done and pushed.
+  contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
+  sheets, schema v11) and 4 (demo + google adapters) are done and pushed.
 - **F4 (not started)** — web UI + `/v1/fable/*` API.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
 ## F3 remaining commits (the immediate work)
 
-Commits 1, 2 and 3 of 6 are done and pushed. Remaining, in order:
+Commits 1-4 of 6 are done and pushed. Remaining, in order:
 
-4. **`feat: add demo and google reference image adapters`** — demo tier
-   (local sample images, `DEMO_TEST_LICENSE`, no network, never presented
-   as real AI output) and the real adapter using `google-genai` with
-   `gemini-3.1-flash-image` (new optional extra `google`; never a hard
-   dependency). Safety refusals must surface as `ContentPolicyRefusedError`
-   → `REVIEW_REQUIRED`. Record the SynthID watermark on every result.
-   Contract tests only — no live calls in the suite.
 5. **`feat: add multiple candidate takes per shot`** — `Settings.
    fable_takes_per_shot` (1 / 2 / 4) plus per-project override; worker
    generates N takes with distinct seeds; each take's cost counts against
@@ -163,6 +156,31 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   takes and would have under-reported every project that generated a
   cast. New `fable-generate-references` / `fable-reference` CLI commands;
   characters now appear in `fable-status`.
+- **Commit 4 — demo and google reference-image adapters**. The demo tier
+  is deliberately SYNTHETIC rather than a bundled photo set: shipping
+  sample "people" with a local-first tool means shipping either a real
+  person's likeness or AI output the tier explicitly does not produce, so
+  it draws one hue per character in one shade per view instead --
+  enough to eyeball the casting workflow offline, impossible to mistake
+  for model output, stamped `DEMO_TEST_LICENSE`. The real adapter
+  (`google_reference_image.py`) uses `google-genai` with
+  `gemini-3.1-flash-image` behind a new optional `google` extra, imported
+  inside methods so a machine without the extra still runs everything
+  else. Its request/response mapping was written against the INSTALLED
+  SDK's real type definitions -- `ImageConfig(aspect_ratio, image_size,
+  person_generation)`, the full `FinishReason` set, `BlockedReason`,
+  `errors.ClientError.code`, `Part.from_bytes` -- introspected rather
+  than recalled, after the published docs turned out to disagree with
+  themselves about the config field name. Every refusal finish_reason
+  (SAFETY / PROHIBITED_CONTENT / IMAGE_SAFETY / IMAGE_PROHIBITED_CONTENT
+  / BLOCKLIST / SPII / RECITATION / IMAGE_RECITATION) and a blocked
+  prompt map to `ContentPolicyRefusedError` -> REVIEW_REQUIRED, while
+  NO_IMAGE stays transient -- calling it a policy refusal would strand a
+  shot in review for something a retry might fix. SynthID is recorded on
+  every result. 2K/4K are deliberately NOT offered (Veo caps
+  reference-driven runs at 720p, so they cost more and buy nothing), and
+  the per-image price is configurable rather than hardcoded, reporting
+  `known=False` when unset.
 - **A real pre-existing defect found and fixed while building this**:
   `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
   failure BEFORE submission (an unconfigured provider refusing to quote
@@ -178,7 +196,9 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   The chaining is verified by asserting on the requests the fake provider
   received, which proves the mechanism is wired correctly but says
   nothing about whether a real model actually keeps a face consistent.
-  That question needs commit 4's adapter and real credentials. The
+  **The google adapter has never been run against the live API** -- no
+  credentials exist on this machine; its tests are contract tests against
+  an injected fake client and prove protocol conformance only. The
   budget arithmetic rounds at a fixed scale (6 dp) specifically so float
   accumulation cannot refuse a generation the operator paid for; that is
   a deliberate tradeoff, not exact decimal money handling.

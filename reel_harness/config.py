@@ -163,6 +163,32 @@ class Settings(BaseSettings):
     reference_image_provider: str = Field(
         "fake", validation_alias=_llm_alias(
             "REEL_HARNESS_REFERENCE_IMAGE_PROVIDER", "REFERENCE_IMAGE_PROVIDER"))
+    reference_image_model: str = Field(
+        "gemini-3.1-flash-image", validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_MODEL", "REFERENCE_IMAGE_MODEL"))
+    # Published list price per generated image. Configurable rather than
+    # hardcoded because a vendor's price list is not this project's to
+    # promise -- set it to 0 to force `known=False` estimates (and so
+    # refuse to run under a budget) when the real tariff is unknown.
+    reference_image_price_usd: float | None = Field(
+        0.067, validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_PRICE_USD", "REFERENCE_IMAGE_PRICE_USD"))
+    # Google credentials, shared by the reference-image adapter and (F5)
+    # the Veo video adapter -- ONE SDK and ONE credential for both is why
+    # this vendor was chosen. Two auth paths: an API key against the
+    # Gemini Developer API, or Vertex AI with a project/location using
+    # ambient application-default credentials.
+    google_api_key: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_API_KEY", "GOOGLE_API_KEY"))
+    google_project: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_PROJECT", "GOOGLE_PROJECT"))
+    # us-central1 only for Veo's GA endpoint (docs/STATUS.md's research);
+    # the default matches so F5 needs no second decision.
+    google_location: str = Field(
+        "us-central1", validation_alias=_llm_alias(
+            "REEL_HARNESS_GOOGLE_LOCATION", "GOOGLE_LOCATION"))
+    google_use_vertex: bool = Field(
+        False, validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_USE_VERTEX", "GOOGLE_USE_VERTEX"))
 
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
@@ -488,6 +514,27 @@ def _validate_reference_image_settings(settings: Settings) -> None:
         raise ProviderConfigurationError(
             f"unknown reference image provider {settings.reference_image_provider!r} "
             f"(supported: {', '.join(sorted(REFERENCE_IMAGE_PROVIDERS))})"
+        )
+    if name != "google":
+        return
+    # Selecting the real adapter without a way to authenticate fails HERE,
+    # at startup, with the exact missing variable names -- never at first
+    # use, halfway through a paid casting run.
+    if settings.google_use_vertex:
+        missing = [
+            var for var, value in (
+                ("REEL_HARNESS_GOOGLE_PROJECT", settings.google_project),
+                ("REEL_HARNESS_GOOGLE_LOCATION", settings.google_location),
+            ) if not value
+        ]
+    else:
+        missing = [
+            "REEL_HARNESS_GOOGLE_API_KEY",
+        ] if not settings.google_api_key.get_secret_value() else []
+    if missing:
+        raise ProviderConfigurationError(
+            f"reference image provider {name!r} is selected but credentials are not "
+            "configured: missing " + ", ".join(missing)
         )
 
 

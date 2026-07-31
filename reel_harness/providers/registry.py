@@ -549,11 +549,37 @@ def _build_fake_reference_image(settings: Settings | None):
     return FakeReferenceImageProvider()
 
 
-# Reference-image generation (Fable F3). The demo tier and the real
-# Google adapter are registered by later commits; every vendor name stays
-# confined to this module.
+def _build_demo_reference_image(settings: Settings | None):
+    from reel_harness.providers.demo_reference_image import DemoReferenceImageProvider
+
+    return DemoReferenceImageProvider()
+
+
+def _build_google_reference_image(settings: Settings | None):
+    if settings is None:
+        raise NotImplementedError(
+            "the google reference-image provider requires application settings"
+        )
+    from reel_harness.providers.google_reference_image import GoogleReferenceImageProvider
+
+    return GoogleReferenceImageProvider(
+        api_key=settings.google_api_key.get_secret_value(),
+        project=settings.google_project,
+        location=settings.google_location,
+        use_vertex=settings.google_use_vertex,
+        model=settings.reference_image_model,
+        price_per_image_usd=settings.reference_image_price_usd,
+    )
+
+
+# Reference-image generation (Fable F3). "google" IS a concrete vendor --
+# image generation with typed character references has no protocol-shaped
+# standard the way chat completions does -- so the name lives here and
+# nowhere else, exactly like "pexels".
 REFERENCE_IMAGE_PROVIDERS: dict[str, Callable[[Settings | None], object]] = {
     "fake": _build_fake_reference_image,
+    "demo": _build_demo_reference_image,
+    "google": _build_google_reference_image,
 }
 
 

@@ -1002,6 +1002,58 @@ cast means approving the actor you actually looked at.
   is not affording it), and each character's sheet is a line item in the
   spend audit.
 
+### Choosing the reference-image provider
+
+`REEL_HARNESS_REFERENCE_IMAGE_PROVIDER`:
+
+- **`fake`** (default) — deterministic colour panels, no network. For
+  tests and for exercising the workflow.
+- **`demo`** — the same idea with a per-character palette so a sheet is
+  eyeball-able offline: one hue per character, one shade per view. Every
+  image is stamped `DEMO_TEST_LICENSE` and can never pass a publish gate.
+  Deliberately **synthetic rather than bundled photos**: shipping sample
+  "people" with a local-first tool would mean shipping either a real
+  person's likeness or AI output this tier explicitly does not produce.
+- **`google`** — the real thing: `gemini-3.1-flash-image` via the
+  `google-genai` SDK. Needs the optional extra
+  (`uv sync --extra google`) and a credential. Never a hard dependency —
+  the whole Fable pipeline runs offline on the other two tiers.
+
+Two auth paths, sharing one credential with F5's Veo adapter (the reason
+this vendor was chosen):
+
+```
+REEL_HARNESS_REFERENCE_IMAGE_PROVIDER=google
+REEL_HARNESS_GOOGLE_API_KEY=...                  # Gemini Developer API
+# ...or Vertex AI with application-default credentials:
+REEL_HARNESS_GOOGLE_USE_VERTEX=true
+REEL_HARNESS_GOOGLE_PROJECT=my-project
+REEL_HARNESS_GOOGLE_LOCATION=us-central1
+```
+
+Selecting `google` without a usable credential fails **at startup** with
+the exact missing variable names — never at first use, halfway through a
+paid casting run.
+
+Two deliberate limits on the real adapter:
+
+- **Only 512 and 1K resolutions are offered.** Veo caps reference-driven
+  runs at 720p, so a 2K or 4K reference costs more and buys nothing any
+  shot could use. Offering it would be a trap, not a feature.
+- **`REEL_HARNESS_REFERENCE_IMAGE_PRICE_USD`** (default `0.067`) is the
+  published list price, configurable because a vendor's tariff is not
+  this project's to promise. Unset it and estimates report `unknown`,
+  which makes a budgeted project refuse to run rather than spend against
+  a number nobody stands behind.
+
+**Every generated image carries a SynthID watermark**, recorded on the
+result. Google applies it to all generated imagery with no removal
+option. Whether Veo accepts SynthID-watermarked images as
+character-reference input is an **open question no documentation
+answers** — if it does not, the whole consistency strategy needs
+rethinking. That is what `fable-reference-smoke` exists to find out
+before F5 builds on it.
+
 ### Cost, budgets, and the paid-generation gate
 
 Generation is the only phase that spends money, and two independent
