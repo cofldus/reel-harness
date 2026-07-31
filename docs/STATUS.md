@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-01 (Fable F3 complete, F4 next, on branch
+Last updated: 2026-08-01 (Fable F4 complete, F5 next, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
@@ -16,8 +16,8 @@ with origin — if it is not, inspect before doing anything else.
 
 ## Where the work stands
 
-Fable is a five-sub-phase build: **F1 done, F2 done, F3 done,
-F4 and F5 not started.**
+Fable is a five-sub-phase build: **F1 done, F2 done, F3 done, F4 done,
+F5 not started.**
 
 - **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
   state machines, `CinematicVideoProvider` Protocol + fake tier, project
@@ -31,24 +31,63 @@ F4 and F5 not started.**
   contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
   sheets, schema v11), 4 (demo + google adapters), 5 (multiple takes,
   schema v12) and 6 (e2e + reference smoke) are all done and pushed.
-- **F4 (not started)** — web UI + `/v1/fable/*` API.
+- **F4 (done)** — `/v1/fable/*` API and the `/fable` web UI: the whole
+  lifecycle by clicking, following the Phase 5A/5B patterns with no new
+  domain logic.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
-## The immediate work (F4)
+## The immediate work (F5)
 
-F3 is complete. **F4 has not been planned yet** and, per this project's
-working agreements, gets an approval-gated plan before implementation.
-Its scope from the original five-sub-phase split: a web UI for the Fable
-project lifecycle plus a `/v1/fable/*` API, following the Phase 5A/5B
-patterns already established (FastAPI + Jinja2 + HTMX, server-rendered,
-CSRF double-submit, no new domain logic -- every route calls the same
-`FableService` methods the CLI already uses).
+F1-F4 are complete. F5 is the last sub-phase and the one that needs real
+credentials: the Vertex AI Veo adapter, a film editor beyond F1's hard
+cuts, audio, and the `v0.5.0rc1` release.
 
-The one thing worth doing BEFORE F4, if credentials appear: run
-`fable-reference-smoke --confirm-paid-generation`. It costs about $0.13
-and is the cheapest available answer to whether the reference-chaining
-strategy actually holds against a real model.
+**Do this first, before building the Veo adapter**: run
+`fable-reference-smoke --confirm-paid-generation` as soon as GCP
+credentials exist. It costs about $0.13 and is the cheapest available
+answer to whether the reference-chaining strategy holds against a real
+model -- and F5's entire consistency approach is built on it.
+
+The open Veo/SynthID question (below) is the other thing to resolve
+early: if Veo rejects watermarked images as character references, the
+strategy needs rethinking BEFORE the adapter is written around it.
+
+## Fable F4 — web UI and the /v1/fable/* API
+
+Two commits. Neither adds domain logic: every route in both layers calls
+the same `FableService` method the CLI already uses, so every gate that
+refuses the CLI refuses them identically (the tests assert those
+refusals over HTTP rather than assuming they carry over).
+
+- **API** (`/v1/fable/*`): create/list/read, shots with their takes,
+  characters with their reference-sheet state, budget get/set, a
+  read-only estimate, and every action (adapt, references, per-character
+  approve/reject, the four gates, take selection, render, cancel). One
+  uniform error contract -- 404 missing, 409 not-valid-now, 422
+  malformed, 502 provider failed -- so an out-of-order gate approval is a
+  refusal rather than a 500 with a transition traceback. Response models
+  are explicit rather than serialized ORM rows, and a test pins the exact
+  field set so a new column cannot leak.
+- **Web UI** (`/fable`): list, create form, detail page. Every `can_*`
+  mirrors the real service precondition, so a shown button is an accepted
+  one; a blocked character gate states which characters are unapproved
+  rather than silently hiding the button. Forms are disabled rather than
+  removed (hiding a form hides its CSRF field -- a real Phase 5A bug),
+  every mutating route is CSRF-gated and answers Post/Redirect/Get so a
+  refresh cannot re-submit a paid generation, and the status fragment
+  self-terminates its poll once a person is what's needed.
+- Hit the same FastAPI trap Phase 5A documented -- a route returning
+  `HTMLResponse | RedirectResponse` crashes the app at import time
+  because FastAPI tries to build a Pydantic model from a Union of
+  Starlette classes. `response_model=None`, same fix as POST /jobs.
+- **Verification**: 49 new tests, plus a real `serve` process smoke
+  (create -> adapt over the API, the detail page rendering the right
+  next-step button, the estimate pricing the plan, the CSRF cookie set,
+  an unauthenticated `/v1/fable/*` call refused 401). The Playwright
+  browser E2E was NOT extended to Fable -- Playwright is not installed on
+  this machine and those tests skip here, so adding a scenario that never
+  runs would be a claim without a check behind it.
 
 ## Provider decisions already researched (do not re-litigate)
 
