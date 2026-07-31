@@ -40,8 +40,12 @@ def is_reparse_point(path: Path) -> bool:
     if path.is_symlink():
         return True
     try:
-        attributes = os.lstat(path).st_file_attributes
-    except (AttributeError, OSError):
+        # getattr, not direct attribute access: st_file_attributes only
+        # exists on Windows (typeshed gates it behind sys.platform, so a
+        # direct access fails mypy --platform linux); 0 on POSIX means
+        # "no reparse attributes", which is exactly right there.
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
         return False
     return bool(attributes & 0x400)
 

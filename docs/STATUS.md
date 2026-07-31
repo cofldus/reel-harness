@@ -1,8 +1,54 @@
 # Status
 
-Last updated: 2026-07-30 (Phase 5B Publishing Web UI session, on branch
-`phase5/publishing-ui`). Phase 2A through Phase 5A (Local Web UI MVP) are
-merged into `main` as of `v0.3.0rc1`.
+Last updated: 2026-07-31 (Phase 6A-1 dual DB backend, on branch
+`phase6/deployment-foundation`). Phase 2A through Phase 5B (Publishing Web
+UI) are merged into `main` as of `v0.4.0rc1`.
+
+## Phase 6A-1 — Dual database backend (SQLite + PostgreSQL)
+
+First sub-phase of Phase 6A (production deployment foundation). SQLite
+stays the zero-config default; PostgreSQL is now a fully-supported second
+backend. Deliberately the lowest-risk 6A sub-phase: purely additive, no
+security-critical surface, zero behavioral change for existing SQLite
+users (the full pre-existing suite runs unchanged).
+
+- **Engine layer** (`db.schema.create_engine_from_url`): real dialect
+  detection via `make_url()` (replacing a `startswith("sqlite")` string
+  check), PostgreSQL connection pooling with `pool_pre_ping`, optional
+  server-side statement timeout, bare-`postgresql://`-to-`+psycopg`
+  normalization. New `Settings` fields `db_pool_size` /
+  `db_pool_max_overflow` / `db_statement_timeout_seconds` (SQLite-inert),
+  and `DATABASE_URL` scheme validation at startup. Driver: `psycopg` v3
+  via a new optional `postgres` dependency group — never a hard
+  dependency.
+- **Migration mechanism made dialect-portable**: `_ensure_column` now uses
+  `sqlalchemy.inspect()` instead of `PRAGMA table_info`, and
+  `_ADDITIVE_COLUMNS` holds real SQLAlchemy types rendered per-dialect via
+  `CreateColumn` (the old hand-written `"BOOLEAN NOT NULL DEFAULT 1"`
+  strings would fail outright on PostgreSQL). Migration lock dispatches by
+  backend: SQLite keeps the PID lockfile, PostgreSQL uses
+  `pg_try_advisory_lock` (auto-released by the server on crash).
+- **Backup/restore**: PostgreSQL path via `pg_dump --format=custom` /
+  `pg_restore --clean --if-exists --no-owner`, invoked through
+  `ProcessRunner`'s `list[str]` + `shell=False` discipline, producing the
+  same checksum + manifest-sidecar contract as the SQLite path so
+  `db_restore`'s safety checks apply uniformly.
+- **Verification**: new dual-backend parity suite
+  (`tests/integration/test_postgres_backend_parity.py`) parametrized via
+  `REEL_HARNESS_TEST_POSTGRES_URL` (skips cleanly when unset, matching the
+  `FFMPEG_PRESENT` convention), including a real two-thread concurrent
+  lease-claim race — the direct verification of the guarded-UPDATE claim
+  pattern under real PostgreSQL row-level locking that had previously only
+  been reasoned about. CI runs it against a real `postgres:16` service
+  container on every push.
+- **Deliberately deferred to 6A-2**: SQLite→PostgreSQL data transfer
+  (`db-transfer`) — it depends on the multi-user ownership model (who owns
+  migrated rows must be an explicit decision). PostgreSQL is for fresh
+  databases until then.
+- Remaining 6A sub-phases (each gets its own approval-gated planning pass
+  before implementation): 6A-2 multi-user auth + ownership, 6A-3 object
+  storage abstraction, 6A-4 worker process separation + Docker, 6A-5
+  production mode + reference deployment + `v0.5.0rc1`.
 
 ## Phase 5B — Publishing Web UI
 

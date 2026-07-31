@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # phase6/** included so the postgres-parity job (which needs CI's real
+    # PostgreSQL service container -- the dev machine has none) verifies the
+    # dual-backend work BEFORE it merges to main, not only after.
+    branches: [main, "phase6/**"]
   pull_request:
 
 # No real credentials are configured anywhere in this workflow -- every
@@ -54,8 +57,12 @@ jobs:
       - name: Verify the lockfile matches pyproject.toml
         run: uv lock --check
 
+      # --extra postgres: the driver only (psycopg) -- no PostgreSQL server in
+      # this job; it lets the engine-construction unit tests run instead of
+      # skipping (create_engine eagerly imports the DBAPI module). The real
+      # server-backed tests live in the postgres-parity job below.
       - name: Install dependencies
-        run: uv sync --extra dev --extra demo
+        run: uv sync --extra dev --extra demo --extra postgres
 
       - name: Import check
         run: uv run python -c "import reel_harness; import reel_harness.api.app; import reel_harness.cli.main"
@@ -95,6 +102,52 @@ jobs:
             exit 1
           fi
           echo "no stray job artifacts or database files"
+
+  postgres-parity:
+    name: postgres-parity (real PostgreSQL, dual-backend repository tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: reel_harness
+          POSTGRES_PASSWORD: reel_harness
+          POSTGRES_DB: reel_harness_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client (pg_dump/pg_restore)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.27"
+          python-version: "3.11"
+
+      - name: Install dependencies (with the postgres extra)
+        run: uv sync --extra dev --extra postgres
+
+      # Real end-to-end verification against a live PostgreSQL server: schema
+      # migration, db-status/db-verify, pg_dump/pg_restore backup/restore, and
+      # a real two-thread concurrent lease-claim race -- the direct
+      # verification the Phase 6A-1 architecture audit flagged as "reasoned
+      # about, never verified" for SQLite-only CI. Every other job in this
+      # workflow stays SQLite-only; this is the one place PostgreSQL is
+      # actually exercised for real.
+      - name: Repository-level tests against real PostgreSQL
+        env:
+          REEL_HARNESS_TEST_POSTGRES_URL: "postgresql+psycopg://reel_harness:reel_harness@localhost:5432/reel_harness_test"
+        run: uv run pytest tests/integration/test_postgres_backend_parity.py -v
 
   production-smoke:
     name: production-smoke (Ubuntu, real ffmpeg, 1080x1920)

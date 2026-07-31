@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "sqlite:///./reel_harness.db"
+    # PostgreSQL-only (create_engine_from_url ignores these for SQLite, which
+    # has no connection pool or server-side statement-timeout concept of its
+    # own) -- see db.schema.create_engine_from_url.
+    db_pool_size: int = Field(5, validation_alias=_llm_alias("REEL_HARNESS_DB_POOL_SIZE", "DB_POOL_SIZE"))
+    db_pool_max_overflow: int = Field(
+        10, validation_alias=_llm_alias("REEL_HARNESS_DB_POOL_MAX_OVERFLOW", "DB_POOL_MAX_OVERFLOW"),
+    )
+    db_statement_timeout_seconds: float | None = Field(
+        None,
+        validation_alias=_llm_alias("REEL_HARNESS_DB_STATEMENT_TIMEOUT_SECONDS", "DB_STATEMENT_TIMEOUT_SECONDS"),
+    )
     jobs_dir: Path = Path("./jobs")
     app_api_key: str = "changeme-local-dev-key"
     # `serve --host` defaults from this (a CLI flag still overrides for a
@@ -537,10 +548,31 @@ def validate_youtube_credentials_configured(settings: Settings) -> None:
         )
 
 
+_SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
+
+
+def _validate_database_url(settings: Settings) -> None:
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        backend = make_url(settings.database_url).get_backend_name()
+    except ArgumentError as exc:
+        raise ProviderConfigurationError(
+            f"DATABASE_URL is not a valid database URL: {settings.database_url!r} ({exc})"
+        ) from exc
+    if backend not in _SUPPORTED_DATABASE_BACKENDS:
+        raise ProviderConfigurationError(
+            f"unsupported database backend {backend!r} (from DATABASE_URL) -- reel-harness supports: "
+            f"{', '.join(sorted(_SUPPORTED_DATABASE_BACKENDS))}"
+        )
+
+
 def validate_provider_settings(settings: Settings) -> None:
     """Startup gate: selecting a real provider with incomplete or invalid
     configuration fails immediately with a clear message (no network is
     touched). The fake providers never require anything."""
+    _validate_database_url(settings)
     _validate_llm_settings(settings)
     _validate_tts_settings(settings)
     _validate_asset_settings(settings)
