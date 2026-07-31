@@ -1,10 +1,129 @@
 # Status
 
-Last updated: 2026-07-31 (Fable F2, on branch
+Last updated: 2026-07-31 (Fable F3 in progress, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
 Fable cinematic engine is the active track and owns `v0.5.0rc1`.
+
+---
+
+# HANDOFF — read this first if you are picking up mid-flight
+
+Branch: **`phase6/fable-cinematic-engine`** (always push here; `main`
+holds everything through 6A-1). Working tree should be clean and in sync
+with origin — if it is not, inspect before doing anything else.
+
+## Where the work stands
+
+Fable is a five-sub-phase build: **F1 done, F2 done, F3 in progress,
+F4 and F5 not started.**
+
+- **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
+  state machines, `CinematicVideoProvider` Protocol + fake tier, project
+  service + separate storage root + CLI, third worker/lease lane,
+  offline vertical slice e2e.
+- **F2 (done)** — real Narrative Director: strict schema, whole-document
+  validation, bounded repair loop, fake + openai-compatible adapters,
+  canonical shot-prompt compiler. **Live-verified against gpt-4o.**
+- **F3 (in progress)** — reference images, cost/budget, demo + google
+  image adapters, multiple candidate takes.
+- **F4 (not started)** — web UI + `/v1/fable/*` API.
+- **F5 (not started)** — real Veo adapter, film editor, audio, release
+  `v0.5.0rc1`.
+
+## F3 remaining commits (the immediate work)
+
+Commit 1 of 6 is done and pushed. Remaining, in order:
+
+2. **`feat: add cost estimation and project budget limits`** — schema
+   v10 additive columns on `fable_projects`
+   (`budget_limit_amount` / `budget_currency` / `budget_spent_amount`);
+   new `core/cost_service.py` with `estimate_project_cost`,
+   `assert_within_budget`, spend accumulation from real result
+   `cost_amount` values (never estimates), and honest `known=False` when
+   a provider publishes no price. **Double gate**: a paid provider runs
+   only when `Settings.allow_paid_generation` is true AND the project has
+   a budget limit set — mirroring the existing `allow_public_upload`
+   pattern. Budget exhaustion routes a shot to `REVIEW_REQUIRED`, never
+   `FAILED`, so a human raises the limit or stops.
+3. **`feat: add reference generation workflow and casting gate`** —
+   `approve_story` currently walks straight through `CASTING`; split it
+   so `CASTING` is a real stop. New `generate_references(project_id)`
+   generates the face portrait FIRST, then feeds it back as a character
+   reference for the three-quarter, full-body and wardrobe views (chained,
+   never independent — independent generation yields four different
+   actors). Per-character `approve_reference` / `reject_reference`;
+   `approve_characters` must additionally require every character's
+   `reference_approved`. New CLI commands. Same crash-safety discipline as
+   F2's adaptation (transition committed before any network call, results
+   written atomically, fingerprint-based replay).
+4. **`feat: add demo and google reference image adapters`** — demo tier
+   (local sample images, `DEMO_TEST_LICENSE`, no network, never presented
+   as real AI output) and the real adapter using `google-genai` with
+   `gemini-3.1-flash-image` (new optional extra `google`; never a hard
+   dependency). Safety refusals must surface as `ContentPolicyRefusedError`
+   → `REVIEW_REQUIRED`. Record the SynthID watermark on every result.
+   Contract tests only — no live calls in the suite.
+5. **`feat: add multiple candidate takes per shot`** — `Settings.
+   fable_takes_per_shot` (1 / 2 / 4) plus per-project override; worker
+   generates N takes with distinct seeds; each take's cost counts against
+   the budget; rejected takes are retained, never deleted on selection.
+6. **`test: add fable reference and budget e2e`** — offline e2e through
+   the fake tier, plus a `fable-reference-smoke` CLI command and docs.
+
+## Provider decisions already researched (do not re-litigate)
+
+- **Reference images: `gemini-3.1-flash-image` (Nano Banana 2)**, with
+  `gemini-3-pro-image` as a configurable escalation. Chosen because it is
+  the ONLY option sharing one SDK (`google-genai`) and one credential with
+  Veo, has typed character references (4), is GA, and costs ~$0.067/image
+  at 1K. **1K is sufficient** — Veo caps reference-driven runs at 720p, so
+  paying for 2K/4K buys nothing. **Do not build an Imagen adapter**:
+  Imagen shuts down 2026-08-17.
+- **Video (F5): Vertex AI `veo-3.1-fast-generate-001`**, region
+  `us-central1` only. GA (the Gemini-API Veo endpoints are preview and the
+  $300 GCP trial credit does not apply to them). Reference images force
+  8s / 720p, max 3 reference images of type `asset`, `personGeneration`
+  must be `allow_adult`. **Generated videos are deleted after 2 days** —
+  the adapter must download immediately.
+- **Open risk, unresolved by any documentation**: whether Veo accepts
+  SynthID-watermarked images as character-reference input. Google
+  watermarks all generated images with no removal option, so if Veo
+  rejects them the whole consistency strategy needs rethinking. F3's
+  `fable-reference-smoke` command exists to answer this BEFORE F5 builds
+  on it. Run it as soon as GCP credentials exist (~$0.32 for the
+  cheapest GA smoke).
+
+## Working agreements this project follows
+
+- Read `CLAUDE.md` and `.claude/rules/architecture.md` first; they are
+  binding (artifacts only under the job/project storage roots, state
+  changes only via the state machines, vendor names only in
+  `providers/registry.py`, subprocess always `list[str]` + `shell=False`,
+  ffmpeg absence must fail as `BLOCKED_DEPENDENCY`, fake assets always
+  `FAKE_TEST_LICENSE`, `uv` for everything).
+- Each sub-phase gets an approval-gated plan before implementation.
+- Each commit: targeted tests → `mypy` on BOTH platforms
+  (`python -m mypy` and `--platform linux`) → ruff → full suite → push.
+  Never batch commits; push each one as it lands.
+- **Never claim more than was verified.** Contract tests are not live
+  verification. If credentials are absent, report `NOT RUN` explicitly.
+  Where an automated check has limits (e.g. the adaptation fidelity
+  heuristic), say so in the docs rather than implying completeness.
+
+## Environment quirks on the original dev machine
+
+- `ruff.exe` and `pytest.exe` are blocked by a Windows Application
+  Control policy. Use `uv run --no-sync python -m pytest` and
+  `uvx ruff@0.14.14 check reel_harness tests`. On a different machine
+  plain `uv run ruff` may just work — try it first.
+- Local mypy defaults to the win32 platform; CI checks Linux. Always run
+  both, or Linux-only failures reach CI (this actually happened).
+- Tests must never read a developer's real `.env` — a conftest fixture
+  enforces this. Do not remove it.
+
+---
 
 ## Fable F2 — Narrative Director
 
