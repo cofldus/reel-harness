@@ -425,8 +425,8 @@ def test_db_backup_dispatches_to_postgres_and_writes_manifest(monkeypatch, tmp_p
     is verified separately against a real PostgreSQL instance."""
     from pathlib import Path
 
-    from reel_harness.ops import db_tools
     from reel_harness.media.runner import RunResult
+    from reel_harness.ops import db_tools
 
     calls = []
 
@@ -451,9 +451,9 @@ def test_db_backup_dispatches_to_postgres_and_writes_manifest(monkeypatch, tmp_p
 
 
 def test_db_backup_raises_on_pg_dump_failure(monkeypatch, tmp_path) -> None:
+    from reel_harness.media.runner import RunResult
     from reel_harness.ops import db_tools
     from reel_harness.ops.db_tools import DbToolsError
-    from reel_harness.media.runner import RunResult
 
     def _fake_run(argv, cwd=None, timeout=None):
         return RunResult(returncode=1, stdout="", stderr="connection refused")
@@ -475,8 +475,8 @@ def test_db_restore_dispatches_to_postgres_restore(monkeypatch, tmp_path, db) ->
     branch without needing a real PostgreSQL server."""
     from pathlib import Path
 
-    from reel_harness.ops import db_tools
     from reel_harness.media.runner import RunResult
+    from reel_harness.ops import db_tools
 
     _, _, session_factory = db
     pg_url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
@@ -510,9 +510,9 @@ def test_db_restore_dispatches_to_postgres_restore(monkeypatch, tmp_path, db) ->
 def test_db_restore_raises_on_pg_restore_failure(monkeypatch, tmp_path, db) -> None:
     from pathlib import Path
 
+    from reel_harness.media.runner import RunResult
     from reel_harness.ops import db_tools
     from reel_harness.ops.db_tools import DbToolsError
-    from reel_harness.media.runner import RunResult
 
     _, _, session_factory = db
     pg_url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
