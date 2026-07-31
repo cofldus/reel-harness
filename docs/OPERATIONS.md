@@ -946,6 +946,8 @@ uv run reel-harness fable-create --title "비 오는 밤" --story-file story.txt
 uv run reel-harness fable-adapt <project_id>
 uv run reel-harness fable-approve <project_id> --step story
 uv run reel-harness fable-approve <project_id> --step characters
+uv run reel-harness fable-estimate <project_id>                  # what it would cost
+uv run reel-harness fable-budget <project_id> --limit 5 --currency USD
 uv run reel-harness fable-approve <project_id> --step shots      # cost gate
 uv run reel-harness fable-worker-run --idle-exit-after 5
 uv run reel-harness fable-status <project_id>
@@ -959,6 +961,56 @@ explicit approval command; `--step shots` is the single entry into
 generation, which is the only phase that can cost money. `serve
 --fable-workers N` (default 0) runs the generation lane alongside the
 other workers.
+
+### Cost, budgets, and the paid-generation gate
+
+Generation is the only phase that spends money, and two independent
+switches must both be on before a cost-incurring provider will run:
+
+1. `REEL_HARNESS_ALLOW_PAID_GENERATION=true` — the operator-wide switch,
+   off by default.
+2. `fable-budget <project_id> --limit N --currency X` — that project's own
+   explicit ceiling.
+
+Neither implies the other, deliberately: the same shape as
+`REEL_HARNESS_ALLOW_PUBLIC_UPLOAD` plus `--confirm-public-upload`. A
+project with **no** limit set is not "unlimited" — it is "no decision
+made", and a paid provider is refused outright. The offline `fake`/`demo`
+tiers cost nothing and are never gated by either switch.
+
+`fable-approve --step shots` prices the whole shot plan before making any
+shot claimable, and refuses if the total would pass the limit — failing
+there costs nothing, whereas failing later means shots were queued that
+could never all be paid for. The worker re-checks per shot anyway, since
+config and budget can both change after approval.
+
+**Running out of budget is a review, not a failure.** A shot the project
+cannot pay for stops at `REVIEW_REQUIRED` with `failure_code` =
+`BUDGET_EXCEEDED` (or `PAID_GENERATION_NOT_ALLOWED`) *before* any provider
+call, so nothing was charged and no take exists. Raise the limit and the
+shot re-queues through the same path a rejected take uses.
+
+What the numbers mean, precisely:
+
+- **Estimates never move spend.** `budget_spent_amount` only ever
+  accumulates a cost the provider *reported* for a generation that
+  actually completed, recorded in the same transaction as the take it
+  belongs to.
+- **Unknown stays unknown.** A provider that publishes no price yields
+  `known: false` from `fable-estimate` — never a guessed number. Under a
+  live budget an unpriceable generation is *refused*, since allowing an
+  unbounded charge is precisely what a ceiling forbids.
+- **`unpriced_take_count`** in `fable-status`/`fable-budget` counts
+  completed takes the provider gave no figure for. Non-zero means the
+  reported spend is a lower bound, and it says so rather than quietly
+  under-reporting.
+- **Currencies are never converted.** A provider quoting or billing in a
+  currency the budget is not denominated in is refused
+  (`BUDGET_CURRENCY_MISMATCH`), never converted at an invented rate.
+
+Lowering a limit below what a project has already spent is refused;
+clearing a limit (`--clear`) is always allowed, re-closes the paid gate,
+and un-spends nothing.
 
 ### Choosing the Narrative Director
 

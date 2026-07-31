@@ -557,6 +557,22 @@ REFERENCE_IMAGE_PROVIDERS: dict[str, Callable[[Settings | None], object]] = {
 }
 
 
+# Provider ids that never bill a real account: the offline tiers plus the
+# unconfigured placeholder (which cannot generate anything at all). Cost
+# gating asks the question by EXCLUSION rather than by listing paid vendor
+# names, so a real adapter registered by a later commit counts as paid the
+# moment it exists, without anyone having to remember to add it here --
+# the safe direction to be wrong in. Vendor names still live only in this
+# module, per the same discipline as every other provider family.
+FREE_PROVIDER_IDS = frozenset({"fake", "demo", "unconfigured"})
+
+
+def provider_charges_money(provider_id: str) -> bool:
+    """Whether generating with this provider spends real money -- the
+    input to Fable's paid-generation double gate (core.cost_service)."""
+    return normalize_provider_name(provider_id) not in FREE_PROVIDER_IDS
+
+
 def resolve_reference_image_provider(name: str, settings: Settings | None = None):
     try:
         return REFERENCE_IMAGE_PROVIDERS[normalize_provider_name(name)](settings)

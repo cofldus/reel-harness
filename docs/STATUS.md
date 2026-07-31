@@ -27,26 +27,16 @@ F4 and F5 not started.**
   validation, bounded repair loop, fake + openai-compatible adapters,
   canonical shot-prompt compiler. **Live-verified against gpt-4o.**
 - **F3 (in progress)** — reference images, cost/budget, demo + google
-  image adapters, multiple candidate takes.
+  image adapters, multiple candidate takes. Commits 1 (reference provider
+  contract) and 2 (cost/budget, schema v10) are done and pushed.
 - **F4 (not started)** — web UI + `/v1/fable/*` API.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
 ## F3 remaining commits (the immediate work)
 
-Commit 1 of 6 is done and pushed. Remaining, in order:
+Commits 1 and 2 of 6 are done and pushed. Remaining, in order:
 
-2. **`feat: add cost estimation and project budget limits`** — schema
-   v10 additive columns on `fable_projects`
-   (`budget_limit_amount` / `budget_currency` / `budget_spent_amount`);
-   new `core/cost_service.py` with `estimate_project_cost`,
-   `assert_within_budget`, spend accumulation from real result
-   `cost_amount` values (never estimates), and honest `known=False` when
-   a provider publishes no price. **Double gate**: a paid provider runs
-   only when `Settings.allow_paid_generation` is true AND the project has
-   a budget limit set — mirroring the existing `allow_public_upload`
-   pattern. Budget exhaustion routes a shot to `REVIEW_REQUIRED`, never
-   `FAILED`, so a human raises the limit or stops.
 3. **`feat: add reference generation workflow and casting gate`** —
    `approve_story` currently walks straight through `CASTING`; split it
    so `CASTING` is a real stop. New `generate_references(project_id)`
@@ -124,6 +114,57 @@ Commit 1 of 6 is done and pushed. Remaining, in order:
   enforces this. Do not remove it.
 
 ---
+
+## Fable F3 (in progress) — references, cost/budget, demo+google adapters
+
+Two of six commits have landed on `phase6/fable-cinematic-engine`.
+
+- **Commit 1 — character reference provider contract**: the
+  `CharacterReferenceProvider` Protocol (synchronous by contract: every
+  image API surveyed returns inline bytes rather than a polled job,
+  unlike video) plus `ImageCapabilities` (`watermarked` recorded as the
+  provenance fact it is, not hidden) and the fake tier.
+- **Commit 2 — cost estimation and project budget limits**: schema **v10**
+  (`fable_projects.budget_limit_amount` / `budget_currency` /
+  `budget_spent_amount`, plus `fable_takes.cost_amount` / `cost_currency`
+  so the running total can be audited against its own line items rather
+  than trusted). New `core/cost_service.py` holds four rules: an estimate
+  never moves spend (only a provider-REPORTED cost for a completed
+  generation does, written in the same fenced commit as its take);
+  unknown stays unknown (one unpriceable shot makes the whole project
+  estimate `known=False`, reported with the priced subtotal as a stated
+  lower bound, never rounded to zero); currencies are never converted;
+  and every refusal is a review rather than a failure. The **double
+  gate** — `Settings.allow_paid_generation` AND a per-project budget
+  limit, neither implying the other — mirrors `allow_public_upload`
+  exactly, and asks "does this provider charge?" by *excluding* the free
+  tiers (`FREE_PROVIDER_IDS` in `providers/registry.py`), so the real
+  adapters landing in commits 4 and 5 count as paid the moment they
+  exist. `approve_shots` prices the whole plan before any shot becomes
+  claimable (failing there costs nothing); the worker re-checks per shot,
+  because config and budget can both change after approval. A blocked
+  shot lands `READY -> REVIEW_REQUIRED` (a new state-machine edge)
+  carrying `BUDGET_EXCEEDED` / `PAID_GENERATION_NOT_ALLOWED` with no take
+  row — nothing was submitted, so nothing was charged — and re-queues
+  through the same `REVIEW_REQUIRED -> READY` edge a rejected take uses.
+  New `fable-budget` / `fable-estimate` CLI commands, budget block in
+  `fable-status`, a `paid_generation_feature_flag` preflight check, and
+  `allow_paid_generation` in the config fingerprint.
+- **A real pre-existing defect found and fixed while building this**:
+  `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
+  failure BEFORE submission (an unconfigured provider refusing to quote
+  or validate) made `fable_runner`'s own failure handler raise
+  `InvalidFableTransitionError` out of `run_shot` and straight past
+  `FableDaemon`'s error isolation — a routine "provider not configured"
+  would have killed the worker lane rather than failing one shot. Found
+  by the new cost gate's regression test, not by inspection; predates F3.
+- **F3 honesty notes so far**: no reference images are generated yet
+  (commit 3), the only registered cinematic/image providers are still the
+  free fake tiers, so the paid gate has been exercised only against a
+  provider id stubbed as paid — never against a real billed call. The
+  budget arithmetic rounds at a fixed scale (6 dp) specifically so float
+  accumulation cannot refuse a generation the operator paid for; that is
+  a deliberate tradeoff, not exact decimal money handling.
 
 ## Fable F2 — Narrative Director
 

@@ -155,6 +155,155 @@ def test_select_take_refuses_undownloaded_take(fable, session_factory) -> None:
         fable.select_take(take_id)
 
 
+# -- budget / cost gate --------------------------------------------------
+
+@pytest.fixture
+def priced_fable(session_factory, tmp_path):
+    """A FableService that can actually price a project: a resolver
+    returning the fake cinematic adapter, mirroring how AppContext wires
+    cinematic_provider_for_project."""
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+    from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+
+    def build(*, allow_paid_generation=False, provider=None):
+        provider = provider or FakeCinematicVideoProvider()
+        return FableService(
+            session_factory, storage=LocalFilesystemStorage(tmp_path / "fable_projects"),
+            provider_snapshot={"cinematic_provider": "fake", "narrative_provider": "fake"},
+            narrative_director=FakeNarrativeDirector(),
+            cinematic_provider_resolver=lambda project: provider,
+            allow_paid_generation=allow_paid_generation,
+        )
+
+    return build
+
+
+def _adapted_to_shot_review(fable: FableService, key: str = "budget-1") -> str:
+    project = _create(fable, key)
+    fable.adapt_project(project.id)
+    fable.approve_story(project.id)
+    fable.approve_characters(project.id)
+    return project.id
+
+
+def test_set_budget_requires_a_positive_amount_and_a_currency(priced_fable) -> None:
+    fable = priced_fable()
+    project = _create(fable)
+    with pytest.raises(InvalidActionError, match="positive"):
+        fable.set_budget(project.id, 0.0, "FAKE")
+    with pytest.raises(InvalidActionError, match="currency"):
+        fable.set_budget(project.id, 5.0, None)
+
+
+def test_set_budget_refuses_a_limit_below_what_was_already_spent(priced_fable, session_factory) -> None:
+    """Lowering a limit under the existing spend would read as a promise
+    the money comes back."""
+    from reel_harness.db.cinematic_models import StoryProject
+
+    fable = priced_fable()
+    project = _create(fable)
+    fable.set_budget(project.id, 10.0, "FAKE")
+    with session_factory() as session:
+        session.get(StoryProject, project.id).budget_spent_amount = 4.0
+        session.commit()
+
+    with pytest.raises(InvalidActionError, match="already spent"):
+        fable.set_budget(project.id, 2.0, "FAKE")
+    fable.set_budget(project.id, 6.0, "FAKE")  # above the spend is fine
+
+
+def test_clearing_a_budget_keeps_the_recorded_spend(priced_fable, session_factory) -> None:
+    from reel_harness.db.cinematic_models import StoryProject
+
+    fable = priced_fable()
+    project = _create(fable)
+    fable.set_budget(project.id, 10.0, "FAKE")
+    with session_factory() as session:
+        session.get(StoryProject, project.id).budget_spent_amount = 4.0
+        session.commit()
+
+    fable.set_budget(project.id, None)
+    status = fable.budget_status(project.id)
+    assert status.limit_amount is None
+    assert status.spent_amount == 4.0  # clearing a ceiling un-spends nothing
+
+
+def test_approve_shots_refuses_when_the_estimate_exceeds_the_budget(priced_fable) -> None:
+    """The cost gate is literal: shots never become claimable when the
+    project cannot pay for all of them."""
+    fable = priced_fable()
+    project_id = _adapted_to_shot_review(fable)
+    fable.set_budget(project_id, 0.001, "FAKE")
+    with pytest.raises(InvalidActionError, match="budget exhausted"):
+        fable.approve_shots(project_id)
+    # Nothing moved: still at the gate, still no claimable shot.
+    assert fable.get_project(project_id).status == "SHOT_REVIEW"
+    assert all(shot.status == "PLANNED" for shot in fable.project_shots(project_id))
+
+
+def test_approve_shots_passes_within_budget(priced_fable) -> None:
+    fable = priced_fable()
+    project_id = _adapted_to_shot_review(fable)
+    fable.set_budget(project_id, 100.0, "FAKE")
+    assert fable.approve_shots(project_id).status == "GENERATING"
+
+
+def test_approve_shots_refuses_a_paid_provider_without_a_project_budget(priced_fable) -> None:
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+
+    provider = FakeCinematicVideoProvider()
+    provider.provider_id = "some-real-vendor"
+    fable = priced_fable(allow_paid_generation=True, provider=provider)
+    project_id = _adapted_to_shot_review(fable)
+    with pytest.raises(InvalidActionError, match="no budget limit"):
+        fable.approve_shots(project_id)
+
+
+def test_approve_shots_refuses_a_paid_provider_without_the_global_switch(priced_fable) -> None:
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+
+    provider = FakeCinematicVideoProvider()
+    provider.provider_id = "some-real-vendor"
+    fable = priced_fable(allow_paid_generation=False, provider=provider)
+    project_id = _adapted_to_shot_review(fable)
+    fable.set_budget(project_id, 100.0, "FAKE")
+    with pytest.raises(InvalidActionError, match="ALLOW_PAID_GENERATION"):
+        fable.approve_shots(project_id)
+
+
+def test_free_provider_needs_no_budget_at_all(priced_fable) -> None:
+    """Requiring a budget to run the offline fake tier would be ceremony,
+    not safety -- the whole F1/F2 offline slice must keep working."""
+    fable = priced_fable()
+    project_id = _adapted_to_shot_review(fable)
+    assert fable.approve_shots(project_id).status == "GENERATING"
+
+
+def test_unpriceable_project_with_a_budget_is_refused_at_the_gate(priced_fable) -> None:
+    """A limit is in force and the cost cannot be established -- approving
+    would authorize an unbounded charge."""
+    from reel_harness.providers.base import CinematicCostEstimate
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+
+    provider = FakeCinematicVideoProvider()
+    provider.estimate_cost = lambda request: CinematicCostEstimate(known=False, detail="no price")
+    fable = priced_fable(provider=provider)
+    project_id = _adapted_to_shot_review(fable)
+    fable.set_budget(project_id, 100.0, "FAKE")
+    with pytest.raises(InvalidActionError, match="cannot be established"):
+        fable.approve_shots(project_id)
+
+
+def test_estimate_cost_is_read_only(priced_fable) -> None:
+    fable = priced_fable()
+    project_id = _adapted_to_shot_review(fable)
+    before = fable.get_project(project_id).status
+    estimate = fable.estimate_cost(project_id)
+    assert estimate.known is True
+    assert fable.get_project(project_id).status == before
+    assert fable.budget_status(project_id).spent_amount == 0.0
+
+
 def test_get_project_raises_for_unknown_id(fable) -> None:
     with pytest.raises(FableProjectNotFoundError):
         fable.get_project("00000000-0000-0000-0000-000000000000")

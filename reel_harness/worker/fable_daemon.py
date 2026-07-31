@@ -37,6 +37,11 @@ class FableDaemonConfig:
     max_shots: int | None = None
     idle_exit_after_seconds: float | None = None
     stop_on_error: bool = False
+    # Settings.allow_paid_generation, carried down to run_shot's cost
+    # gate. Defaults to False so a daemon constructed without an opinion
+    # can only ever run the free tiers -- the safe default for a switch
+    # about money.
+    allow_paid_generation: bool = False
 
 
 class FableDaemon:
@@ -160,7 +165,10 @@ class FableDaemon:
             scene = session.get(FableScene, shot.scene_id)
             project_id = scene.project_id if scene is not None else None
             try:
-                run_shot(session, shot, provider, self._storage, lease_token=lease_token)
+                run_shot(
+                    session, shot, provider, self._storage, lease_token=lease_token,
+                    allow_paid_generation=cfg.allow_paid_generation,
+                )
             finally:
                 heartbeat.stop()
                 release_shot_lease(session, shot, lease_token=lease_token)

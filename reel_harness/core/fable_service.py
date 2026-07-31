@@ -26,6 +26,15 @@ from reel_harness.core.cinematic_state import (
     apply_project_transition,
     apply_shot_transition,
 )
+from reel_harness.core.cost_service import (
+    BudgetStatus,
+    ProjectCostEstimate,
+    assert_paid_generation_allowed,
+    assert_within_budget,
+    budget_status,
+    estimate_project_cost,
+)
+from reel_harness.core.errors import BudgetExceededError, PaidGenerationNotAllowedError
 from reel_harness.core.service import InvalidActionError, JobNotFoundError
 from reel_harness.db.cinematic_models import (
     FableCharacter,
@@ -47,7 +56,8 @@ class FableService:
     def __init__(
         self, session_factory, storage: StorageBackend | None = None,
         provider_snapshot: dict | None = None, narrative_director=None,
-        narrative_director_resolver=None,
+        narrative_director_resolver=None, cinematic_provider_resolver=None,
+        allow_paid_generation: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -59,6 +69,13 @@ class FableService:
         # than silently falling back to anything.
         self._narrative_director = narrative_director
         self._narrative_director_resolver = narrative_director_resolver
+        # Same pinning discipline for the cinematic provider, used only to
+        # PRICE a project (estimate/approval gate) -- the worker resolves
+        # its own provider for the shot it actually generates.
+        self._cinematic_provider_resolver = cinematic_provider_resolver
+        # Settings.allow_paid_generation. False by default so a service
+        # built without an opinion can never authorize spending.
+        self._allow_paid_generation = allow_paid_generation
 
     # -- creation / read -------------------------------------------------
 
@@ -134,6 +151,75 @@ class FableService:
             for take in takes:
                 session.expunge(take)
             return takes
+
+    # -- cost / budget ---------------------------------------------------
+
+    def set_budget(
+        self, project_id: str, limit_amount: float | None, currency: str | None = None,
+    ) -> StoryProject:
+        """Sets (or clears, with limit_amount=None) this project's spending
+        ceiling. Setting a limit is the per-project half of the paid
+        generation double gate -- without it, a cost-incurring provider is
+        refused outright.
+
+        A limit below what the project has ALREADY spent is refused: it
+        would read as a promise the money can be recovered. Clearing a
+        limit is allowed at any time and simply re-closes the paid gate;
+        it never un-spends anything."""
+        if limit_amount is not None and limit_amount <= 0:
+            raise InvalidActionError(f"budget limit must be positive, got {limit_amount}")
+        if limit_amount is not None and not currency:
+            raise InvalidActionError("a budget limit requires an explicit currency")
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            if project is None:
+                raise FableProjectNotFoundError(project_id)
+            if limit_amount is not None and limit_amount < project.budget_spent_amount:
+                raise InvalidActionError(
+                    f"budget limit {limit_amount} is below the {project.budget_spent_amount} "
+                    f"already spent on this project"
+                )
+            if (
+                limit_amount is not None and project.budget_currency
+                and currency != project.budget_currency and project.budget_spent_amount > 0
+            ):
+                raise InvalidActionError(
+                    f"project has already spent {project.budget_spent_amount} "
+                    f"{project.budget_currency} -- refusing to redenominate the budget to "
+                    f"{currency} (no conversion is applied)"
+                )
+            project.budget_limit_amount = limit_amount
+            project.budget_currency = currency if limit_amount is not None else project.budget_currency
+            session.commit()
+            session.refresh(project)
+            session.expunge(project)
+            return project
+
+    def budget_status(self, project_id: str) -> BudgetStatus:
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            if project is None:
+                raise FableProjectNotFoundError(project_id)
+            return budget_status(session, project)
+
+    def estimate_cost(self, project_id: str, provider=None) -> ProjectCostEstimate:
+        """What generating this project's shots would cost, priced by the
+        project's own pinned provider. Read-only -- nothing is approved,
+        transitioned, or spent."""
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            if project is None:
+                raise FableProjectNotFoundError(project_id)
+            provider = provider or self._resolve_cinematic_provider(project)
+            shots = self._shots_for_project(session, project_id)
+            return estimate_project_cost(project, shots, provider)
+
+    def _resolve_cinematic_provider(self, project: StoryProject):
+        if self._cinematic_provider_resolver is None:
+            raise InvalidActionError(
+                "no cinematic provider resolver is configured -- cost cannot be estimated"
+            )
+        return self._cinematic_provider_resolver(project)
 
     # -- adaptation ------------------------------------------------------
 
@@ -357,9 +443,18 @@ class FableService:
             session.expunge(project)
             return project
 
-    def approve_shots(self, project_id: str) -> StoryProject:
+    def approve_shots(self, project_id: str, provider=None) -> StoryProject:
         """SHOT_REVIEW -> GENERATING: THE cost gate. Every PLANNED shot
-        becomes READY for the worker lane. Never called automatically."""
+        becomes READY for the worker lane. Never called automatically.
+
+        Being THE cost gate is now literal: a cost-incurring provider must
+        pass the paid-generation double gate, and the whole project's
+        estimate must fit inside the remaining budget, BEFORE any shot
+        becomes claimable. Failing here costs nothing; failing at the
+        worker means shots were queued that could never all be paid for.
+        The worker re-checks per shot anyway -- config and budget can both
+        change between this approval and a shot being picked up -- so this
+        is the early, cheap answer, not the only one."""
         with self._session_factory() as session:
             project = session.get(StoryProject, project_id)
             if project is None:
@@ -367,6 +462,7 @@ class FableService:
             shots = self._shots_for_project(session, project_id)
             if not shots:
                 raise InvalidActionError("project has no shots to generate")
+            self._assert_generation_affordable(project, shots, provider)
             apply_project_transition(project, FableProjectStatus.GENERATING)
             for shot in shots:
                 if shot.status == FableShotStatus.PLANNED.value:
@@ -375,6 +471,47 @@ class FableService:
             session.refresh(project)
             session.expunge(project)
             return project
+
+    def _assert_generation_affordable(
+        self, project: StoryProject, shots: list[FableShot], provider=None,
+    ) -> None:
+        """The approval-time half of cost enforcement. Raises
+        InvalidActionError (not a PipelineError) because this is a user
+        action being refused at a CLI/API boundary, not a shot failing
+        mid-flight -- the caller gets a message, not a state change.
+
+        A project with no budget limit and a free provider skips straight
+        through: requiring a budget to run the offline fake tier would be
+        ceremony, not safety."""
+        if provider is None and self._cinematic_provider_resolver is None:
+            # Nothing to price with. Only safe because the paid gate below
+            # cannot be evaluated either -- so refuse rather than approve
+            # blindly whenever spending is even possible.
+            if self._allow_paid_generation:
+                raise InvalidActionError(
+                    "cannot verify generation cost: no cinematic provider resolver is "
+                    "configured while paid generation is enabled"
+                )
+            return
+        provider = provider or self._resolve_cinematic_provider(project)
+        try:
+            assert_paid_generation_allowed(
+                project, provider.provider_id, self._allow_paid_generation,
+            )
+        except PaidGenerationNotAllowedError as exc:
+            raise InvalidActionError(str(exc)) from exc
+        if project.budget_limit_amount is None:
+            return
+        estimate = estimate_project_cost(project, shots, provider)
+        if not estimate.known:
+            raise InvalidActionError(
+                f"project has a budget limit but its cost cannot be established: "
+                f"{estimate.detail}"
+            )
+        try:
+            assert_within_budget(project, estimate.amount, estimate.currency)
+        except BudgetExceededError as exc:
+            raise InvalidActionError(str(exc)) from exc
 
     # -- take selection --------------------------------------------------
 

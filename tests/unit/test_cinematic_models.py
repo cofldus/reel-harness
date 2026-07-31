@@ -25,8 +25,18 @@ _FABLE_TABLES = {
 }
 
 
-def test_schema_version_is_9() -> None:
-    assert SCHEMA_VERSION == 9
+def test_schema_version_is_10() -> None:
+    assert SCHEMA_VERSION == 10
+
+
+def test_budget_columns_default_to_no_limit_and_zero_spend() -> None:
+    """A NULL limit is "no decision made", NOT "unlimited" -- the paid
+    gate refuses a cost-incurring provider while it is unset. Spend starts
+    at a real 0.0 rather than NULL so arithmetic never needs a None guard."""
+    project = StoryProject(idempotency_key="budget-defaults", title="t", source_text="s")
+    assert project.budget_limit_amount is None
+    assert project.budget_currency is None
+    assert StoryProject.__table__.c.budget_spent_amount.nullable is False
 
 
 def test_init_db_creates_all_fable_tables(engine) -> None:

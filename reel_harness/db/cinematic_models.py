@@ -52,6 +52,15 @@ class StoryProject(Base):
     # fingerprint on an already-adapted project is a no-op replay rather
     # than a second paid LLM call -- see core.fable_service.adapt_project.
     adaptation_fingerprint: Mapped[str | None] = mapped_column(default=None)
+    # v10: spending ceiling for this project (core.cost_service). NULL
+    # means "no limit set", which is NOT "unlimited": a cost-incurring
+    # provider is refused outright until an operator names a number, so
+    # the absence of a decision can never be mistaken for permission.
+    # `budget_spent_amount` only ever accumulates costs a provider
+    # actually reported for a completed generation -- never an estimate.
+    budget_limit_amount: Mapped[float | None] = mapped_column(default=None)
+    budget_currency: Mapped[str | None] = mapped_column(default=None)
+    budget_spent_amount: Mapped[float] = mapped_column(default=0.0)
 
     status: Mapped[str] = mapped_column(default="DRAFT")
     failure_code: Mapped[str | None] = mapped_column(default=None)
@@ -215,6 +224,12 @@ class FableTake(Base):
     media_path: Mapped[str | None] = mapped_column(default=None)
     checksum_sha256: Mapped[str | None] = mapped_column(default=None)
     license: Mapped[str | None] = mapped_column(default=None)
+    # v10: what this take ACTUALLY cost, as reported by the provider.
+    # None means the provider published no per-generation figure -- an
+    # honest gap (see CinematicVideoResult.cost_amount), never a guess,
+    # and never silently counted as zero when reporting spend.
+    cost_amount: Mapped[float | None] = mapped_column(default=None)
+    cost_currency: Mapped[str | None] = mapped_column(default=None)
 
     status: Mapped[str] = mapped_column(default="SUBMITTED")
     quality: Mapped[dict | None] = mapped_column(JSON, default=None)

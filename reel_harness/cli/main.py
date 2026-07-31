@@ -472,6 +472,7 @@ def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
         print(f"fable project not found: {args.project_id}", file=sys.stderr)
         return 1
     shots = ctx.fable.project_shots(args.project_id)
+    budget = ctx.fable.budget_status(args.project_id)
     payload = {
         "project_id": project.id,
         "title": project.title,
@@ -479,14 +480,27 @@ def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
         "aspect_ratio": project.aspect_ratio,
         "failure_code": project.failure_code,
         "failure_summary": project.failure_summary,
+        "budget": {
+            "limit_amount": budget.limit_amount,
+            "currency": budget.currency,
+            "spent_amount": budget.spent_amount,
+            "remaining_amount": budget.remaining_amount,
+            # Completed takes the provider published no price for. A
+            # non-zero count means `spent_amount` is a lower bound.
+            "unpriced_take_count": budget.unpriced_take_count,
+        },
         "shots": [
             {
                 "shot_id": shot.id, "status": shot.status, "order": shot.shot_order,
                 "action": shot.action, "duration_sec": shot.duration_sec,
+                # Carries BUDGET_EXCEEDED / PAID_GENERATION_NOT_ALLOWED for a
+                # shot the worker stopped before spending anything.
+                "failure_code": shot.failure_code,
                 "takes": [
                     {
                         "take_id": take.id, "status": take.status, "selected": take.selected,
                         "attempt_number": take.attempt_number,
+                        "cost_amount": take.cost_amount, "cost_currency": take.cost_currency,
                     }
                     for take in ctx.fable.shot_takes(shot.id)
                 ],
@@ -495,6 +509,63 @@ def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
         ],
     }
     print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_fable_budget(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Sets or reports a project's spending ceiling. With no --limit/--clear
+    it is purely a report, so checking a budget can never change one."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        if args.clear:
+            ctx.fable.set_budget(args.project_id, None)
+        elif args.limit is not None:
+            ctx.fable.set_budget(args.project_id, args.limit, args.currency)
+        status = ctx.fable.budget_status(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": args.project_id,
+        "limit_amount": status.limit_amount,
+        "currency": status.currency,
+        "spent_amount": status.spent_amount,
+        "remaining_amount": status.remaining_amount,
+        "unpriced_take_count": status.unpriced_take_count,
+        "paid_generation_enabled": ctx.settings.allow_paid_generation,
+    }, indent=2))
+    return 0
+
+
+def cmd_fable_estimate(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Prices the project's shots with its own pinned provider. Read-only:
+    approves nothing and spends nothing."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        estimate = ctx.fable.estimate_cost(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": args.project_id,
+        # False means the number below is NOT a total -- see `detail`.
+        "known": estimate.known,
+        "amount": estimate.amount,
+        "currency": estimate.currency,
+        "shot_count": estimate.shot_count,
+        "unpriced_shot_count": estimate.unpriced_shot_count,
+        "detail": estimate.detail,
+    }, indent=2))
     return 0
 
 
@@ -2962,6 +3033,7 @@ def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
         max_shots=args.max_shots,
         idle_exit_after_seconds=args.idle_exit_after,
         stop_on_error=args.stop_on_error,
+        allow_paid_generation=settings.allow_paid_generation,
     )
     daemon = FableDaemon(
         ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,
@@ -3283,6 +3355,27 @@ def build_parser() -> argparse.ArgumentParser:
     fable_status = sub.add_parser("fable-status", help="Project status with per-shot/take detail (JSON)")
     fable_status.add_argument("project_id")
     fable_status.set_defaults(func=cmd_fable_status)
+
+    fable_budget = sub.add_parser(
+        "fable-budget", help="Set or show a project's spending limit (no flags = show only)",
+    )
+    fable_budget.add_argument("project_id")
+    budget_action = fable_budget.add_mutually_exclusive_group()
+    budget_action.add_argument("--limit", type=float, default=None, help="Spending ceiling")
+    budget_action.add_argument(
+        "--clear", action="store_true",
+        help="Remove the limit (re-closes the paid-generation gate; spends nothing back)",
+    )
+    fable_budget.add_argument(
+        "--currency", default=None, help="Currency for --limit (required with --limit)",
+    )
+    fable_budget.set_defaults(func=cmd_fable_budget)
+
+    fable_estimate = sub.add_parser(
+        "fable-estimate", help="Estimated cost of generating this project's shots (read-only)",
+    )
+    fable_estimate.add_argument("project_id")
+    fable_estimate.set_defaults(func=cmd_fable_estimate)
 
     fable_list = sub.add_parser("fable-list")
     fable_list.set_defaults(func=cmd_fable_list)

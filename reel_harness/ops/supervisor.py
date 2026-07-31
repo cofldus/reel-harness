@@ -223,6 +223,7 @@ class Supervisor:
                 max_shots=base.max_shots if base else None,
                 idle_exit_after_seconds=base.idle_exit_after_seconds if base else None,
                 stop_on_error=base.stop_on_error if base else False,
+                allow_paid_generation=self._ctx.settings.allow_paid_generation,
             )
             daemon = FableDaemon(
                 self._ctx.session_factory, self._ctx.fable_storage,

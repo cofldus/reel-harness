@@ -91,6 +91,29 @@ def test_preflight_public_upload_flag_with_publisher_configured_passes(
     assert _checks_by_name(report)["public_upload_feature_flag"].status == "PASS"
 
 
+def test_preflight_paid_generation_flag_defaults_to_disabled(session_factory, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(jobs_dir=tmp_path / "jobs", credential_dir=tmp_path / "creds")
+    report = run_preflight(settings, session_factory, profile="fake")
+    check = _checks_by_name(report)["paid_generation_feature_flag"]
+    assert check.status == "PASS"
+    assert "disabled" in check.detail
+
+
+def test_preflight_paid_generation_enabled_with_only_free_tiers_warns(
+    session_factory, tmp_path, monkeypatch,
+) -> None:
+    """A switch about money that is on with nothing behind it is the state
+    an operator most easily forgets before selecting a real adapter."""
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(
+        jobs_dir=tmp_path / "jobs", credential_dir=tmp_path / "creds",
+        allow_paid_generation=True,
+    )
+    report = run_preflight(settings, session_factory, profile="fake")
+    assert _checks_by_name(report)["paid_generation_feature_flag"].status == "WARN"
+
+
 def test_preflight_bad_schema_fails(tmp_path) -> None:
     from sqlalchemy import text
 

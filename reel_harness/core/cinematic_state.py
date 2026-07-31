@@ -123,7 +123,22 @@ SHOT_TERMINAL_STATUSES = frozenset({FableShotStatus.SELECTED})
 
 ALLOWED_SHOT_TRANSITIONS: dict[FableShotStatus, set[FableShotStatus]] = {
     FableShotStatus.PLANNED: {FableShotStatus.READY, FableShotStatus.REJECTED},
-    FableShotStatus.READY: {FableShotStatus.SUBMITTED, FableShotStatus.REJECTED},
+    # READY -> REVIEW_REQUIRED is the budget/paid-gate block (F3): the
+    # worker refuses to submit a shot it cannot pay for, and that is a
+    # human decision (raise the limit, or stop), never a shot failure.
+    # No provider call has been made, so the shot carries no take.
+    #
+    # READY -> FAILED covers everything that can go wrong BEFORE
+    # submission -- an unconfigured provider refusing to quote or
+    # validate, a request the adapter rejects outright. Its absence was a
+    # real defect: worker.fable_runner's failure handler would itself
+    # raise InvalidFableTransitionError out of run_shot and past the
+    # daemon's error isolation, turning a routine "provider not
+    # configured" into a dead worker lane.
+    FableShotStatus.READY: {
+        FableShotStatus.SUBMITTED, FableShotStatus.REJECTED,
+        FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
+    },
     FableShotStatus.SUBMITTED: {FableShotStatus.GENERATING, FableShotStatus.FAILED},
     FableShotStatus.GENERATING: {
         FableShotStatus.DOWNLOADING, FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
@@ -219,6 +234,14 @@ def apply_shot_transition(shot: FableShotLike, new_status: FableShotStatus, **fi
 # --- Shot grammar (film vocabulary) ---------------------------------------
 # Stored as plain strings on FableShot, validated against these enums at
 # the service/adaptation boundary -- same convention as status strings.
+
+# The resolution every shot generation is requested at. One constant
+# because two things must agree exactly: what worker.fable_runner asks
+# the provider to generate, and what core.cost_service prices before
+# approving. A per-shot estimate priced at a resolution the worker then
+# does not request would be a lie about money, so neither side is allowed
+# its own literal.
+DEFAULT_SHOT_RESOLUTION = "360p"
 
 
 class ShotSize(StrEnum):

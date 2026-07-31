@@ -56,6 +56,7 @@ def config_fingerprint(settings: Settings) -> dict:
         "publisher_processing_poll_interval_seconds": settings.publisher_processing_poll_interval_seconds,
         "publisher_processing_max_duration_seconds": settings.publisher_processing_max_duration_seconds,
         "allow_public_upload": settings.allow_public_upload,
+        "allow_paid_generation": settings.allow_paid_generation,
         "youtube_upload_chunk_size": settings.youtube_upload_chunk_size,
         "tiktok_upload_chunk_size": settings.tiktok_upload_chunk_size,
     }

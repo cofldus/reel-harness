@@ -12,15 +12,37 @@ cycles, so this runner polls inline with a bounded loop; F3/F5 move
 long-poll pacing into a dedicated lane (next_poll_at, like the
 publication processing poller). A "moderated" provider state routes the
 shot to REVIEW_REQUIRED with the reason recorded -- a human decision,
-never an automatic retry of the same prompt."""
+never an automatic retry of the same prompt.
+
+F3 adds the cost gates (core.cost_service), checked before the provider
+is called at all: a shot this project may not pay for stops at
+REVIEW_REQUIRED with no take row, since nothing was submitted and so
+nothing was charged. On the way out, the take records what the provider
+actually billed and the project's running total moves by that same
+figure -- both inside the one fenced commit that persists the take."""
 from __future__ import annotations
 
 import time
 
 from sqlalchemy import select
 
-from reel_harness.core.cinematic_state import FableShotStatus, apply_shot_transition
-from reel_harness.core.errors import PipelineError
+from reel_harness.core.cinematic_state import (
+    DEFAULT_SHOT_RESOLUTION,
+    FableShotStatus,
+    apply_shot_transition,
+)
+from reel_harness.core.cost_service import (
+    assert_paid_generation_allowed,
+    assert_within_budget,
+    estimate_request_for_shot,
+    record_spend,
+)
+from reel_harness.core.errors import (
+    BudgetCurrencyMismatchError,
+    BudgetExceededError,
+    PaidGenerationNotAllowedError,
+    PipelineError,
+)
 from reel_harness.db.cinematic_models import (
     FableCharacter,
     FableLocation,
@@ -72,9 +94,33 @@ def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project
     )
 
 
+def _shot_price(provider: CinematicVideoProvider, shot: FableShot, project: StoryProject):
+    """This shot's estimated price, as (amount, currency). An estimate the
+    provider marks unknown yields (None, None), which assert_within_budget
+    refuses under a live budget rather than treating as free."""
+    estimate = provider.estimate_cost(estimate_request_for_shot(shot, project))
+    if not estimate.known:
+        return None, None
+    return estimate.amount, estimate.currency
+
+
+def _block_for_review(
+    session, shot: FableShot, lease_token: str | None, code: str, summary: str,
+) -> FableShot:
+    """Stops a shot BEFORE any provider call, for a reason only a human
+    can resolve (budget/paid gate). Deliberately REVIEW_REQUIRED rather
+    than FAILED: nothing is broken, a decision is missing. No take row
+    exists, because nothing was ever submitted."""
+    apply_shot_transition(shot, FableShotStatus.REVIEW_REQUIRED)
+    shot.failure_code = code
+    shot.failure_summary = summary[:500]
+    _fenced_commit(session, shot, lease_token)
+    return shot
+
+
 def run_shot(
     session, shot: FableShot, provider: CinematicVideoProvider, storage: StorageBackend,
-    lease_token: str | None = None, sleep=time.sleep,
+    lease_token: str | None = None, sleep=time.sleep, allow_paid_generation: bool = False,
 ) -> FableShot:
     scene = session.get(FableScene, shot.scene_id)
     assert scene is not None
@@ -88,11 +134,28 @@ def run_shot(
         prompt=prompt,
         duration_sec=shot.duration_sec or 2.0,
         aspect_ratio=project.aspect_ratio,
-        resolution="360p",
+        resolution=DEFAULT_SHOT_RESOLUTION,
         correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
     )
 
     try:
+        # The cost gates run before validate_request, so a project that
+        # must not spend money never reaches a provider call at all.
+        # FableService.approve_shots checks the same two rules at the
+        # approval gate; this is the enforcement point, because config and
+        # budget can both change between approval and the moment a worker
+        # actually picks the shot up. Nested inside the outer handler on
+        # purpose: pricing itself can raise an ordinary PipelineError (an
+        # unconfigured provider refuses to quote), and that is a shot
+        # FAILURE, not a budget refusal.
+        try:
+            assert_paid_generation_allowed(project, provider.provider_id, allow_paid_generation)
+            assert_within_budget(project, *_shot_price(provider, shot, project))
+        except (
+            PaidGenerationNotAllowedError, BudgetExceededError, BudgetCurrencyMismatchError,
+        ) as exc:
+            return _block_for_review(session, shot, lease_token, exc.code, str(exc))
+
         provider.validate_request(request)
         apply_shot_transition(shot, FableShotStatus.SUBMITTED)
         if not _fenced_commit(session, shot, lease_token):
@@ -150,8 +213,28 @@ def run_shot(
         take.checksum_sha256 = result.checksum_sha256
         take.license = result.license
         take.generation_seed = result.generation_seed
+        take.cost_amount = result.cost_amount
+        take.cost_currency = result.cost_currency
         take.status = "DOWNLOADED"
         apply_shot_transition(shot, FableShotStatus.REVIEW_REQUIRED)
+        # Spend accumulates from the REAL reported cost, never the
+        # estimate that authorized the call, and in the SAME fenced
+        # commit that persists the take -- so the running total and its
+        # line items can never disagree across a crash. A provider that
+        # reported no figure moves the total by nothing rather than by a
+        # guess; cost_service.recorded_spend counts those takes so the
+        # under-count is visible instead of silent.
+        try:
+            record_spend(project, result.cost_amount, result.cost_currency)
+        except BudgetCurrencyMismatchError as exc:
+            # The generation is already paid for and downloaded. Losing
+            # the take row over an accounting disagreement would be the
+            # worse outcome by far, so the take is kept with the
+            # provider's own figures recorded verbatim, the running total
+            # is left untouched (adding an unconvertible amount would
+            # corrupt it), and the shot carries the reason for a human.
+            shot.failure_code = exc.code
+            shot.failure_summary = str(exc)[:500]
         _fenced_commit(session, shot, lease_token)
         return shot
     except PipelineError as exc:

@@ -150,6 +150,30 @@ def test_shot_rejection_requeues_rather_than_failing() -> None:
     assert shot.status == "READY"
 
 
+def test_budget_block_sends_a_ready_shot_to_review_and_back() -> None:
+    """A shot the project cannot pay for is stopped at READY, before any
+    provider call, and that stop is a review -- not a failure. Raising the
+    limit re-queues it through the SAME REVIEW_REQUIRED -> READY edge a
+    rejected take already uses; no new recovery path exists for money."""
+    shot = _FakeShot(status="READY")
+    apply_shot_transition(shot, FableShotStatus.REVIEW_REQUIRED)
+    assert shot.status == "REVIEW_REQUIRED"
+    apply_shot_transition(shot, FableShotStatus.READY)
+    assert shot.status == "READY"
+
+
+def test_a_ready_shot_can_fail_before_it_is_ever_submitted() -> None:
+    """Regression: READY -> FAILED was missing, so a provider that refused
+    to quote or validate made the runner's own failure handler raise
+    InvalidFableTransitionError past the daemon's error isolation."""
+    shot = _FakeShot(status="READY")
+    apply_shot_transition(
+        shot, FableShotStatus.FAILED,
+        failure_code="PROVIDER_NOT_CONFIGURED", failure_summary="not registered",
+    )
+    assert shot.status == "FAILED"
+
+
 def test_shot_invalid_transition_raises() -> None:
     with pytest.raises(InvalidFableTransitionError):
         check_shot_transition(FableShotStatus.PLANNED, FableShotStatus.GENERATING, {})

@@ -30,10 +30,13 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # Migration policy until Alembic is introduced (see docs/ARCHITECTURE.md):
 # `create_all` builds the full current schema for new databases, and
 # _ADDITIVE_COLUMNS applies forward-only ALTER TABLE ADD COLUMN statements so
-# existing dev databases keep working without data loss. Only nullable column
-# additions are allowed through this path -- anything destructive or shaped
-# differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 9
+# existing dev databases keep working without data loss. Only ADDING a column
+# is allowed through this path: nullable, or NOT NULL with a server_default
+# that gives every existing row a correct value (see `assets.attempt_number`
+# and `publications.processing_poll_count`). Anything destructive -- a drop,
+# a rename, a type change, a backfill that needs to read other columns -- is
+# the trigger to adopt Alembic for real.
+SCHEMA_VERSION = 10
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -86,6 +89,21 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     # core.fable_service.adapt_project. First additive column added since
     # the migration mechanism became dialect-portable (6A-1).
     ("fable_projects", "adaptation_fingerprint", String(), True, None),
+    # v10: Fable F3 cost/budget -- see core.cost_service. The limit is
+    # NULL until an operator sets one, and that NULL is load-bearing: a
+    # cost-incurring provider is refused while no explicit limit exists.
+    # `budget_spent_amount` accumulates REAL provider-reported costs only
+    # (never estimates), so an existing project reads as 0 spent, which
+    # is exactly true -- nothing it generated was ever billed through
+    # this accounting.
+    ("fable_projects", "budget_limit_amount", Float(), True, None),
+    ("fable_projects", "budget_currency", String(), True, None),
+    ("fable_projects", "budget_spent_amount", Float(), False, text("0")),
+    # The per-take record the project total is an accumulation OF -- kept
+    # so the running total can be audited against its own line items
+    # (core.cost_service.recorded_spend) instead of being trusted.
+    ("fable_takes", "cost_amount", Float(), True, None),
+    ("fable_takes", "cost_currency", String(), True, None),
 ]
 
 

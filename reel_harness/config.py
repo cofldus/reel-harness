@@ -217,6 +217,17 @@ class Settings(BaseSettings):
     allow_public_upload: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_ALLOW_PUBLIC_UPLOAD", "ALLOW_PUBLIC_UPLOAD"))
 
+    # Fable (Phase F3) global spend switch, deliberately shaped exactly like
+    # allow_public_upload above: a cost-incurring cinematic/reference-image
+    # provider runs only when this is true AND the project itself carries an
+    # explicit budget limit (core.cost_service.assert_paid_generation_allowed).
+    # Two independent decisions -- one operator-wide, one per project -- so
+    # neither can be inferred from the other. The offline fake/demo tiers cost
+    # nothing and are never gated by this.
+    allow_paid_generation: bool = Field(
+        False, validation_alias=_llm_alias(
+            "REEL_HARNESS_ALLOW_PAID_GENERATION", "ALLOW_PAID_GENERATION"))
+
     # YouTube OAuth (installed-app/loopback flow -- see docs/PUBLISHING.md
     # and publisher.oauth_youtube). The client id/secret come from a Google
     # Cloud Console OAuth client of type "Desktop app"; unlike the LLM/TTS/
