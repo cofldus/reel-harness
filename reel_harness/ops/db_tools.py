@@ -9,11 +9,15 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
 
 from reel_harness.db.schema import _ADDITIVE_COLUMNS, SCHEMA_VERSION
+
+if TYPE_CHECKING:
+    from reel_harness.media.runner import RunResult
 
 _MANIFEST_SUFFIX = ".manifest.json"
 
@@ -46,13 +50,30 @@ def sqlite_path_from_url(database_url: str) -> Path:
     return Path(raw)
 
 
+def postgres_dsn_from_url(database_url: str) -> str:
+    """Canonical libpq-style DSN (`postgresql://...`, no `+psycopg` driver
+    suffix) for handing to the `pg_dump`/`pg_restore` command-line tools --
+    SQLAlchemy's `postgresql+psycopg://` driver qualifier is a
+    SQLAlchemy-only convention those tools don't understand. Sibling to
+    `sqlite_path_from_url`'s hard gate: raises for anything that isn't a
+    PostgreSQL URL."""
+    url = make_url(database_url)
+    if url.get_backend_name() != "postgresql":
+        raise DbToolsError(f"this operation only supports PostgreSQL database URLs, got {database_url!r}")
+    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
 def safe_db_identifier(database_url: str) -> str:
-    """Never the full path (could reveal an operator's home directory
-    layout in a shared incident bundle) -- just the filename."""
+    """Never the full URL/path (could reveal credentials or an operator's
+    home directory layout in a shared incident bundle) -- just the SQLite
+    filename, or the bare PostgreSQL database name (no host/user/password)."""
+    url = make_url(database_url)
+    if url.get_backend_name() == "postgresql":
+        return url.database or "<unknown>"
     try:
         return sqlite_path_from_url(database_url).name
     except DbToolsError:
-        return "<non-sqlite>"
+        return "<unknown>"
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +336,35 @@ def _actual_schema_version(db_path: Path) -> int | None:
         conn.close()
 
 
-def db_backup(database_url: str, dest_dir: Path, timestamp: datetime | None = None) -> dict:
+def _actual_schema_version_postgres(database_url: str) -> int | None:
+    """PostgreSQL sibling of _actual_schema_version -- reads the REAL
+    schema_migrations.version from the live database via a short-lived
+    engine (there is no single file to open directly, unlike SQLite)."""
+    from reel_harness.db.schema import create_engine_from_url
+
+    engine = create_engine_from_url(database_url)
+    try:
+        with engine.connect() as conn:
+            if not inspect(conn).has_table("schema_migrations"):
+                return None
+            return conn.execute(text("SELECT version FROM schema_migrations")).scalar_one_or_none()
+    finally:
+        engine.dispose()
+
+
+def _run_postgres_tool(argv: list[str]) -> RunResult:
+    from reel_harness.media.runner import run as run_process
+
+    try:
+        return run_process(argv)
+    except FileNotFoundError as exc:
+        raise DbToolsError(
+            f"{argv[0]!r} not found on PATH -- PostgreSQL client tools (pg_dump/pg_restore) must be "
+            "installed separately to back up or restore a PostgreSQL database (see docs/OPERATIONS.md)"
+        ) from exc
+
+
+def _sqlite_backup(database_url: str, dest_dir: Path, timestamp: datetime | None) -> dict:
     """Uses SQLite's own online backup API (`sqlite3.Connection.backup`,
     stdlib since Python 3.7) rather than a raw file copy, so a backup is
     safe to take even while another connection holds the database open --
@@ -362,6 +411,60 @@ def db_backup(database_url: str, dest_dir: Path, timestamp: datetime | None = No
     }
     (dest_dir / f"{filename}{_MANIFEST_SUFFIX}").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"path": str(final_path), **manifest}
+
+
+def _postgres_backup(database_url: str, dest_dir: Path, timestamp: datetime | None) -> dict:
+    """PostgreSQL backup via `pg_dump`'s custom format (`--format=custom`):
+    a single compressed file restorable by `pg_restore`, the closest
+    analogue to SQLite's single-file backup. Invoked via ProcessRunner's
+    `list[str]` + `shell=False` discipline (CLAUDE.md's hard invariant) --
+    the connection DSN is passed as a single `--dbname=<dsn>` argument,
+    never interpolated into a shell string. Written to a uniquely-named
+    temp file first, then os.replace()'d into place, same as the SQLite
+    path. Same checksum + manifest-sidecar contract as the SQLite path, so
+    db_restore's safety checks apply uniformly regardless of backend."""
+    from reel_harness._version import __version__
+
+    dsn = postgres_dsn_from_url(database_url)
+    dest_dir = dest_dir.resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = timestamp or datetime.now(UTC)
+    stamp = ts.strftime("%Y%m%dT%H%M%S%fZ")
+    filename = f"reel_harness-{stamp}-{uuid.uuid4().hex[:8]}.pgdump"
+    final_path = dest_dir / filename
+    temp_path = dest_dir / f".{filename}.tmp"
+
+    result = _run_postgres_tool(
+        ["pg_dump", f"--dbname={dsn}", "--format=custom", "--file", str(temp_path)],
+    )
+    if result.returncode != 0:
+        Path(temp_path).unlink(missing_ok=True)
+        raise DbToolsError(f"pg_dump failed (exit {result.returncode}): {result.stderr.strip()}")
+    os.replace(temp_path, final_path)
+
+    checksum = _sha256_file(final_path)
+    manifest = {
+        "app_version": __version__,
+        "schema_version": _actual_schema_version_postgres(database_url),
+        "source_db_identifier": safe_db_identifier(database_url),
+        "created_at": ts.isoformat(),
+        "checksum_sha256": checksum,
+        "file_size_bytes": final_path.stat().st_size,
+    }
+    (dest_dir / f"{filename}{_MANIFEST_SUFFIX}").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"path": str(final_path), **manifest}
+
+
+def db_backup(database_url: str, dest_dir: Path, timestamp: datetime | None = None) -> dict:
+    """Dispatches to the SQLite or PostgreSQL backup implementation by
+    dialect -- both produce the same manifest shape (app_version,
+    schema_version, source_db_identifier, created_at, checksum_sha256,
+    file_size_bytes), so db_restore's safety checks never need to know
+    which backend produced the backup they're validating."""
+    if make_url(database_url).get_backend_name() == "postgresql":
+        return _postgres_backup(database_url, dest_dir, timestamp)
+    return _sqlite_backup(database_url, dest_dir, timestamp)
 
 
 @dataclass
@@ -443,22 +546,39 @@ def db_restore(
 
     pre_restore = db_backup(database_url, pre_restore_backup_dir)
 
-    if engine is not None:
-        engine.dispose()
-
-    db_path = sqlite_path_from_url(database_url)
-    temp_restore_path = db_path.parent / f".{db_path.name}.restoring-{uuid.uuid4().hex}"
-    try:
-        shutil.copy2(backup_path, temp_restore_path)
-        os.replace(temp_restore_path, db_path)
-    except OSError:
-        Path(temp_restore_path).unlink(missing_ok=True)
-        raise
+    if make_url(database_url).get_backend_name() == "postgresql":
+        _postgres_restore(database_url, backup_path)
+    else:
+        if engine is not None:
+            engine.dispose()
+        db_path = sqlite_path_from_url(database_url)
+        temp_restore_path = db_path.parent / f".{db_path.name}.restoring-{uuid.uuid4().hex}"
+        try:
+            shutil.copy2(backup_path, temp_restore_path)
+            os.replace(temp_restore_path, db_path)
+        except OSError:
+            Path(temp_restore_path).unlink(missing_ok=True)
+            raise
 
     return {
         "restored": True, "restored_from": str(backup_path),
         "pre_restore_backup_path": pre_restore["path"], "schema_version": backup_schema_version,
     }
+
+
+def _postgres_restore(database_url: str, backup_path: Path) -> None:
+    """PostgreSQL sibling of the SQLite atomic-file-swap restore -- there is
+    no single file to swap, so `pg_restore` is invoked directly against the
+    live database instead. `--clean --if-exists` drops existing objects
+    before recreating them (mirroring the SQLite path's full replacement
+    semantics) and `--no-owner` avoids failing when the restoring role
+    differs from the role that produced the backup."""
+    dsn = postgres_dsn_from_url(database_url)
+    result = _run_postgres_tool(
+        ["pg_restore", f"--dbname={dsn}", "--clean", "--if-exists", "--no-owner", str(backup_path)],
+    )
+    if result.returncode != 0:
+        raise DbToolsError(f"pg_restore failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
 # ---------------------------------------------------------------------------

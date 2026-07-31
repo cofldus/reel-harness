@@ -378,3 +378,159 @@ def test_foreign_key_violations_dispatches_to_postgresql_branch() -> None:
             raise AssertionError("must not execute a query on the PostgreSQL branch")
 
     assert _foreign_key_violations(_FakeConn()) == []
+
+
+def test_postgres_dsn_from_url_strips_driver_suffix() -> None:
+    """pg_dump/pg_restore are handed a plain libpq DSN, never SQLAlchemy's
+    postgresql+psycopg:// convention, which those tools don't understand."""
+    from reel_harness.ops.db_tools import postgres_dsn_from_url
+
+    dsn = postgres_dsn_from_url("postgresql+psycopg://user:pass@localhost:5432/reel_harness")
+    assert dsn == "postgresql://user:pass@localhost:5432/reel_harness"
+
+
+def test_postgres_dsn_from_url_rejects_non_postgres() -> None:
+    from reel_harness.ops.db_tools import DbToolsError, postgres_dsn_from_url
+
+    with pytest.raises(DbToolsError):
+        postgres_dsn_from_url("sqlite:///somewhere.db")
+
+
+def test_safe_db_identifier_for_postgres_never_leaks_credentials() -> None:
+    ident = safe_db_identifier("postgresql+psycopg://user:hunter2@db.example.com:5432/reel_harness")
+    assert ident == "reel_harness"
+    assert "hunter2" not in ident
+    assert "user" not in ident
+    assert "db.example.com" not in ident
+
+
+def test_run_postgres_tool_raises_clear_error_when_tool_missing(monkeypatch) -> None:
+    from reel_harness.ops.db_tools import DbToolsError, _run_postgres_tool
+
+    def _raise_not_found(argv, cwd=None, timeout=None):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr("reel_harness.media.runner.run", _raise_not_found)
+    with pytest.raises(DbToolsError, match="pg_dump"):
+        _run_postgres_tool(["pg_dump", "--dbname=postgresql://x"])
+
+
+def test_db_backup_dispatches_to_postgres_and_writes_manifest(monkeypatch, tmp_path) -> None:
+    """No real PostgreSQL server is available in this environment, so
+    pg_dump is stubbed at the ProcessRunner boundary -- this confirms
+    db_backup dispatches to the PostgreSQL implementation for a
+    postgresql:// URL, invokes pg_dump with the DSN as a single argv
+    element (list[str], never a shell string), and produces the same
+    manifest contract as the SQLite path. Real end-to-end pg_dump behavior
+    is verified separately against a real PostgreSQL instance."""
+    from pathlib import Path
+
+    from reel_harness.ops import db_tools
+    from reel_harness.media.runner import RunResult
+
+    calls = []
+
+    def _fake_run(argv, cwd=None, timeout=None):
+        calls.append(argv)
+        file_arg_index = argv.index("--file") + 1
+        Path(argv[file_arg_index]).write_bytes(b"fake pg_dump bytes")
+        return RunResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("reel_harness.media.runner.run", _fake_run)
+    monkeypatch.setattr(db_tools, "_actual_schema_version_postgres", lambda url: SCHEMA_VERSION)
+
+    url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
+    result = db_tools.db_backup(url, tmp_path / "backups")
+
+    assert result["schema_version"] == SCHEMA_VERSION
+    assert result["source_db_identifier"] == "reel_harness"
+    assert Path(result["path"]).read_bytes() == b"fake pg_dump bytes"
+    assert Path(f"{result['path']}.manifest.json").exists()
+    assert calls[0][0] == "pg_dump"
+    assert "--dbname=postgresql://user:pass@localhost:5432/reel_harness" in calls[0]
+
+
+def test_db_backup_raises_on_pg_dump_failure(monkeypatch, tmp_path) -> None:
+    from reel_harness.ops import db_tools
+    from reel_harness.ops.db_tools import DbToolsError
+    from reel_harness.media.runner import RunResult
+
+    def _fake_run(argv, cwd=None, timeout=None):
+        return RunResult(returncode=1, stdout="", stderr="connection refused")
+
+    monkeypatch.setattr("reel_harness.media.runner.run", _fake_run)
+
+    url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
+    with pytest.raises(DbToolsError, match="pg_dump failed"):
+        db_tools.db_backup(url, tmp_path / "backups")
+    assert list((tmp_path / "backups").glob("*.pgdump")) == []  # no half-written file left behind
+
+
+def test_db_restore_dispatches_to_postgres_restore(monkeypatch, tmp_path, db) -> None:
+    """db_restore's universal safety checks (confirm, no active lease,
+    checksum match) run identically regardless of backend; only the final
+    apply step differs. session_factory here is a real (empty) SQLite
+    session used purely for the lease-activity check -- it is a parameter
+    independent of database_url, so this exercises the PostgreSQL dispatch
+    branch without needing a real PostgreSQL server."""
+    from pathlib import Path
+
+    from reel_harness.ops import db_tools
+    from reel_harness.media.runner import RunResult
+
+    _, _, session_factory = db
+    pg_url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
+    restore_calls = []
+
+    def _fake_run(argv, cwd=None, timeout=None):
+        if argv[0] == "pg_dump":
+            file_arg_index = argv.index("--file") + 1
+            Path(argv[file_arg_index]).write_bytes(b"fake pg_dump bytes")
+        elif argv[0] == "pg_restore":
+            restore_calls.append(argv)
+        return RunResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("reel_harness.media.runner.run", _fake_run)
+    monkeypatch.setattr(db_tools, "_actual_schema_version_postgres", lambda url: SCHEMA_VERSION)
+
+    backup_result = db_tools.db_backup(pg_url, tmp_path / "backups")
+    result = db_tools.db_restore(
+        pg_url, Path(backup_result["path"]), confirm_restore=True,
+        session_factory=session_factory, lease_timeout_seconds=60,
+        pre_restore_backup_dir=tmp_path / "pre_restore",
+    )
+
+    assert result["restored"] is True
+    assert len(restore_calls) == 1
+    assert restore_calls[0][0] == "pg_restore"
+    assert str(Path(backup_result["path"])) in restore_calls[0]
+    assert "--dbname=postgresql://user:pass@localhost:5432/reel_harness" in restore_calls[0]
+
+
+def test_db_restore_raises_on_pg_restore_failure(monkeypatch, tmp_path, db) -> None:
+    from pathlib import Path
+
+    from reel_harness.ops import db_tools
+    from reel_harness.ops.db_tools import DbToolsError
+    from reel_harness.media.runner import RunResult
+
+    _, _, session_factory = db
+    pg_url = "postgresql+psycopg://user:pass@localhost:5432/reel_harness"
+
+    def _fake_run(argv, cwd=None, timeout=None):
+        if argv[0] == "pg_dump":
+            file_arg_index = argv.index("--file") + 1
+            Path(argv[file_arg_index]).write_bytes(b"fake pg_dump bytes")
+            return RunResult(returncode=0, stdout="", stderr="")
+        return RunResult(returncode=1, stdout="", stderr="pg_restore: error: could not connect")
+
+    monkeypatch.setattr("reel_harness.media.runner.run", _fake_run)
+    monkeypatch.setattr(db_tools, "_actual_schema_version_postgres", lambda url: SCHEMA_VERSION)
+
+    backup_result = db_tools.db_backup(pg_url, tmp_path / "backups")
+    with pytest.raises(DbToolsError, match="pg_restore failed"):
+        db_tools.db_restore(
+            pg_url, Path(backup_result["path"]), confirm_restore=True,
+            session_factory=session_factory, lease_timeout_seconds=60,
+            pre_restore_backup_dir=tmp_path / "pre_restore",
+        )

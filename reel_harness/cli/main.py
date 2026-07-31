@@ -2916,14 +2916,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     db_migrate_p.set_defaults(func=cmd_db_migrate)
 
-    db_backup_p = sub.add_parser("db-backup", help="SQLite online backup with checksum manifest")
+    db_backup_p = sub.add_parser(
+        "db-backup", help="Online backup with checksum manifest (SQLite or PostgreSQL, from DATABASE_URL)",
+    )
     db_backup_p.add_argument(
         "--dest-dir", required=True, help="Directory to write the backup into (outside the repository)",
     )
     db_backup_p.set_defaults(func=cmd_db_backup)
 
     db_restore_p = sub.add_parser("db-restore", help="Restore the database from a db-backup archive")
-    db_restore_p.add_argument("backup_path", help="Path to a *.sqlite3.bak file produced by db-backup")
+    db_restore_p.add_argument(
+        "backup_path",
+        help="Path to a *.sqlite3.bak (SQLite) or *.pgdump (PostgreSQL) file produced by db-backup",
+    )
     db_restore_p.add_argument(
         "--confirm-restore", action="store_true", help="Required -- this replaces the live database",
     )
