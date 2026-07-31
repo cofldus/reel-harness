@@ -6,6 +6,18 @@ from reel_harness.config import Settings
 from reel_harness.ops.fingerprint import config_fingerprint, fingerprint_hash
 
 
+def test_settings_in_tests_never_read_the_developers_dotenv() -> None:
+    """Guards the conftest `isolate_dotenv` fixture. Without it, a bare
+    Settings() reads the developer's real `.env`, so tests pass or fail
+    depending on whose machine they run on -- which actually happened
+    once a real `.env` with live credentials existed."""
+    settings = Settings()
+    assert settings.llm_provider == "fake"
+    assert settings.narrative_provider == "fake"
+    assert settings.llm_base_url == ""
+    assert settings.llm_api_key.get_secret_value() == ""
+
+
 def test_fingerprint_never_contains_secrets() -> None:
     settings = Settings(
         llm_provider="openai_compatible", llm_base_url="https://llm.example.com/v1", llm_model="gpt-x",

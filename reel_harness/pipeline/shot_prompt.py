@@ -41,12 +41,12 @@ _PROHIBITED_ARTIFACTS = (
 _IDENTITY_KEY_ORDER = ("face", "appearance", "hair", "wardrobe", "accessories")
 
 
-def _identity_fragment(character_bible: dict | None) -> str:
+def _identity_values(character_bible: dict | None) -> list[str]:
     if not character_bible:
-        return ""
+        return []
     fixed = character_bible.get("fixed_identity") or {}
     if not isinstance(fixed, dict):
-        return ""
+        return []
     parts: list[str] = []
     seen: set[str] = set()
     for key in _IDENTITY_KEY_ORDER:
@@ -58,7 +58,7 @@ def _identity_fragment(character_bible: dict | None) -> str:
         value = fixed.get(key)
         if value:
             parts.append(str(value))
-    return ", ".join(parts)
+    return parts
 
 
 def compile_shot_prompt(
@@ -72,11 +72,20 @@ def compile_shot_prompt(
     location = location or {}
     continuity = shot.continuity_requirements or {}
 
+    # Wardrobe is usually ALSO part of fixed_identity (it must stay
+    # constant across shots), so emit it in slot 3 only when the identity
+    # fragment doesn't already carry it -- repeating it verbatim adds no
+    # information and dilutes the prompt.
+    identity_values = _identity_values(character_bible)
+    wardrobe = str((character_bible or {}).get("wardrobe", ""))
+    if wardrobe and wardrobe in identity_values:
+        wardrobe = ""
+
     slots: list[str] = [
         # 1 subject, 2 fixed identity, 3 wardrobe
         f"a single fictional adult actor: {shot.subject}" if shot.subject else "a single fictional adult actor",
-        _identity_fragment(character_bible),
-        str((character_bible or {}).get("wardrobe", "")),
+        ", ".join(identity_values),
+        wardrobe,
         # 4 location (+ its continuity anchors)
         ", ".join(str(part) for part in (
             location.get("name", ""), location.get("description", ""),

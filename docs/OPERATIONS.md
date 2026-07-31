@@ -1013,10 +1013,17 @@ footage can never be orphaned by a plan change.
 
 The real-provider adapter is covered by contract tests against a mock
 transport (protocol conformance, retries, rate-limit handling, auth
-failures that never echo the credential). **Live adaptation against a
-real LLM endpoint is reported as `NOT RUN` unless credentials were
-configured and a real call was actually made** — contract-test success is
-never reported as live success.
+failures that never echo the credential). Contract-test success is never
+reported as live success.
+
+**Live adaptation: RUN and PASSED** (2026-07-31, `openai-compatible`
+against `gpt-4o`). A real Korean short story produced a valid shot plan
+in ~26 seconds — 1 adult character, 1 location, 2 scenes, 4 shots (18s
+total) — passing every validator on the first attempt with no repair
+needed. Adaptation is a single LLM call of a few thousand output tokens,
+so cost per adaptation is roughly that of one large chat completion;
+budget controls for the far more expensive video-generation phase arrive
+in F3.
 
 ## Cancelling a job
 

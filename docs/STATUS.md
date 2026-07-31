@@ -75,9 +75,17 @@ generated and genuinely validated.
 - **F2 honesty notes**: the fidelity check only rejects obvious drift
   (fabricated citations, a dropped ending); real semantic faithfulness
   stays the STORY_REVIEW gate's human decision and nothing claims more.
-  The MockTransport adapter tests prove protocol conformance only --
-  **live adaptation against a real LLM endpoint has NOT been run** (no
-  credentials configured in this environment) and is not claimed.
+  The MockTransport adapter tests prove protocol conformance only, never
+  live success.
+- **Live verification: RUN and PASSED** (2026-07-31, real credentials,
+  `openai-compatible` against `gpt-4o`). A real Korean short story was
+  adapted in ~26s: 1 adult character with fixed identity, 1 location,
+  2 scenes, 4 shots (18s total), every scene beat a genuine source
+  quote, every shot a single filmable action with one camera movement,
+  all validators passed on the first attempt with no repair needed.
+  That run surfaced one real defect -- wardrobe was emitted twice per
+  prompt when fixed_identity already carried it -- now fixed with
+  regression coverage.
 
 ## Fable F1 — Cinematic domain + fake vertical slice
 

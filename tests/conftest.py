@@ -26,6 +26,30 @@ POSTGRES_TEST_AVAILABLE = bool(REEL_HARNESS_TEST_POSTGRES_URL)
 
 
 @pytest.fixture(autouse=True)
+def isolate_dotenv(monkeypatch):
+    """Tests must never read the developer's real `.env`.
+
+    `Settings` is configured with `env_file=".env"`, so a bare
+    `Settings()` in a test silently picks up whatever credentials and
+    provider selections the developer happens to have configured locally
+    -- making tests pass or fail depending on the machine they run on.
+    This was latent until a real `.env` existed, at which point two
+    fingerprint/readiness tests started failing because they saw a real
+    LLM host where they asserted `None`.
+
+    Neutralizing the env_file here fixes every present and future test at
+    once, instead of requiring each call site to remember `_env_file=None`.
+    Environment VARIABLES are deliberately left alone: tests that set them
+    via monkeypatch do so in the test body (after this fixture), and some
+    legitimately-exported ones (e.g. REEL_HARNESS_FFMPEG_PATH) must keep
+    working.
+    """
+    from reel_harness.config import Settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
 def block_real_network(monkeypatch):
     """Phase 0/1 only ever talks to Fake providers and a local SQLite file, so any
     attempt to open a real (non-loopback) network socket during a test is a bug,

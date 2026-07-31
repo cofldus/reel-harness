@@ -76,6 +76,20 @@ def test_fixed_identity_is_always_injected() -> None:
     assert "grey coat" in prompt
 
 
+def test_wardrobe_is_not_repeated_when_fixed_identity_already_carries_it() -> None:
+    """Wardrobe must stay constant across shots, so it normally lives in
+    fixed_identity too -- emitting it twice adds no information and
+    dilutes the prompt. Found in a real live-adaptation run."""
+    prompt = compile_shot_prompt(_shot(), _project(), _CHARACTER_BIBLE, _LOCATION)
+    assert prompt.count("grey coat") == 1
+
+
+def test_wardrobe_still_appears_when_absent_from_fixed_identity() -> None:
+    bible = {"wardrobe": "grey coat", "fixed_identity": {"hair": "black short hair"}}
+    prompt = compile_shot_prompt(_shot(), _project(), bible, _LOCATION)
+    assert prompt.count("grey coat") == 1
+
+
 def test_unknown_identity_keys_are_kept_not_dropped() -> None:
     bible = {"fixed_identity": {"hair": "black short hair", "tattoo": "small wrist tattoo"}}
     prompt = compile_shot_prompt(_shot(), _project(), bible, _LOCATION)
