@@ -136,6 +136,24 @@ class AppContext:
             journal=self.publish_journal(),
         )
 
+    def cinematic_provider_for_shot(self, shot):
+        """The cinematic provider for one leased Fable shot, honoring the
+        project's creation-time snapshot -- mirrors providers_for_job's
+        pinning discipline. An unsatisfiable snapshot yields a provider
+        that fails the shot with PROVIDER_NOT_CONFIGURED, never a silent
+        switch."""
+        from reel_harness.db.cinematic_models import FableScene, StoryProject
+        from reel_harness.providers.registry import resolve_cinematic_video_for_snapshot
+
+        snapshot = None
+        with self.session_factory() as session:
+            scene = session.get(FableScene, shot.scene_id)
+            if scene is not None:
+                project = session.get(StoryProject, scene.project_id)
+                if project is not None:
+                    snapshot = project.provider_config
+        return resolve_cinematic_video_for_snapshot(snapshot, self.settings)
+
     def channel_niche_for_job(self, job) -> str | None:
         if job is None:
             return None

@@ -61,11 +61,18 @@ class LeaseHeartbeat:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.stop()
 
+    def _beat(self) -> bool:
+        """One heartbeat write; returns whether this worker still owns the
+        lease. The single subclass hook: worker.fable_daemon overrides it
+        to target fable_shots instead of jobs while reusing the thread
+        lifecycle unchanged."""
+        with self._session_factory() as session:
+            return heartbeat_lease(session, self._job_id, self._lease_token)
+
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
             try:
-                with self._session_factory() as session:
-                    still_owner = heartbeat_lease(session, self._job_id, self._lease_token)
+                still_owner = self._beat()
                 if not still_owner:
                     self.lease_lost.set()
                     _logger.warning(

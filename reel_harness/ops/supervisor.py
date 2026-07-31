@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from reel_harness.worker.daemon import DaemonConfig, WorkerDaemon, default_worker_id
+from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
 from reel_harness.worker.publish_daemon import (
     PublisherDaemon,
     PublisherDaemonConfig,
@@ -41,9 +42,13 @@ class SupervisorConfig:
     port: int = 8000
     render_workers: int = 1
     publisher_workers: int = 1
+    # Fable shot-generation workers (Phase F1) -- off by default: cinematic
+    # generation is opt-in until the Fable web workflow lands (F4).
+    fable_workers: int = 0
     shutdown_timeout_seconds: float = 30.0
     render_daemon_config: DaemonConfig | None = None
     publisher_daemon_config: PublisherDaemonConfig | None = None
+    fable_daemon_config: FableDaemonConfig | None = None
 
 
 if TYPE_CHECKING:
@@ -201,6 +206,51 @@ class Supervisor:
         elif exit_code != 0:
             _log_event("supervisor_component_stopped", component="publisher_worker", exit_code=exit_code)
 
+    def _start_fable_workers(self) -> None:
+        cfg = self._config
+        base = cfg.fable_daemon_config
+        for i in range(cfg.fable_workers):
+            worker_id = (
+                f"{base.worker_id if base else default_worker_id()}-{i}"
+                if cfg.fable_workers > 1
+                else (base.worker_id if base else default_worker_id())
+            )
+            daemon_config = FableDaemonConfig(
+                worker_id=worker_id,
+                poll_interval_seconds=base.poll_interval_seconds if base else 5.0,
+                lease_timeout_seconds=base.lease_timeout_seconds if base else 300,
+                heartbeat_interval_seconds=base.heartbeat_interval_seconds if base else 60.0,
+                max_shots=base.max_shots if base else None,
+                idle_exit_after_seconds=base.idle_exit_after_seconds if base else None,
+                stop_on_error=base.stop_on_error if base else False,
+            )
+            daemon = FableDaemon(
+                self._ctx.session_factory, self._ctx.fable_storage,
+                self._ctx.cinematic_provider_for_shot, daemon_config,
+            )
+            thread = threading.Thread(
+                target=self._run_fable_daemon, args=(daemon, worker_id), name=f"fable:{worker_id}",
+            )
+
+            def _stop(d: FableDaemon = daemon) -> None:
+                d.request_stop("supervisor_shutdown")
+
+            def _fatal_error(d: FableDaemon = daemon) -> str | None:
+                return d.fatal_error
+
+            self._threads.append(_ThreadHandle(
+                name=f"fable:{worker_id}", thread=thread, stop=_stop, fatal_error_getter=_fatal_error,
+            ))
+            thread.start()
+
+    def _run_fable_daemon(self, daemon: FableDaemon, worker_id: str) -> None:
+        exit_code = daemon.run()
+        if daemon.fatal_error:
+            self.fatal_errors[f"fable:{worker_id}"] = daemon.fatal_error
+            _log_event("supervisor_component_fatal", component="fable_worker", error=daemon.fatal_error)
+        elif exit_code != 0:
+            _log_event("supervisor_component_stopped", component="fable_worker", exit_code=exit_code)
+
     def _start_api(self) -> None:
         import uvicorn
 
@@ -238,8 +288,12 @@ class Supervisor:
         component_counts = {
             "api": cfg.run_api, "render_workers": cfg.render_workers if cfg.run_render_worker else 0,
             "publisher_workers": cfg.publisher_workers if cfg.run_publisher_worker else 0,
+            "fable_workers": cfg.fable_workers,
         }
-        total_workers = component_counts["render_workers"] + component_counts["publisher_workers"]
+        total_workers = (
+            component_counts["render_workers"] + component_counts["publisher_workers"]
+            + component_counts["fable_workers"]
+        )
         if total_workers > _SQLITE_WORKER_COUNT_WARN_THRESHOLD:
             _log_event(
                 "supervisor_worker_count_warning", total_workers=total_workers,
@@ -257,6 +311,8 @@ class Supervisor:
             self._start_render_workers()
         if cfg.run_publisher_worker:
             self._start_publisher_workers()
+        if cfg.fable_workers > 0:
+            self._start_fable_workers()
 
         try:
             while not self._stop_event.is_set():

@@ -2947,6 +2947,38 @@ def cmd_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
     return daemon.run()
 
 
+def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.worker.daemon import default_worker_id
+    from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
+
+    settings = ctx.settings
+    config = FableDaemonConfig(
+        worker_id=args.worker_id or default_worker_id(),
+        poll_interval_seconds=(
+            args.poll_interval if args.poll_interval is not None else settings.worker_poll_interval_seconds
+        ),
+        lease_timeout_seconds=args.lease_timeout or settings.lease_timeout_seconds,
+        heartbeat_interval_seconds=settings.lease_heartbeat_seconds,
+        max_shots=args.max_shots,
+        idle_exit_after_seconds=args.idle_exit_after,
+        stop_on_error=args.stop_on_error,
+    )
+    daemon = FableDaemon(
+        ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,
+    )
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        daemon.request_stop(f"signal_{signum}")
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return daemon.run()
+
+
 def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
     from reel_harness.worker.publish_daemon import (
         PublisherDaemon,
@@ -2998,6 +3030,7 @@ def cmd_serve(args: argparse.Namespace, ctx: AppContext) -> int:
         run_api=args.api, run_render_worker=args.render_worker, run_publisher_worker=args.publisher_worker,
         host=host, port=args.port,
         render_workers=args.render_workers, publisher_workers=args.publisher_workers,
+        fable_workers=args.fable_workers,
         shutdown_timeout_seconds=args.shutdown_timeout,
         render_daemon_config=DaemonConfig(
             worker_id=default_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
@@ -3266,6 +3299,17 @@ def build_parser() -> argparse.ArgumentParser:
     fable_cancel.add_argument("project_id")
     fable_cancel.set_defaults(func=cmd_fable_cancel)
 
+    fable_worker_run = sub.add_parser(
+        "fable-worker-run", help="Continuous polling worker for Fable shot generation",
+    )
+    fable_worker_run.add_argument("--worker-id", default=None)
+    fable_worker_run.add_argument("--poll-interval", type=float, default=None)
+    fable_worker_run.add_argument("--lease-timeout", type=int, default=None)
+    fable_worker_run.add_argument("--max-shots", type=int, default=None)
+    fable_worker_run.add_argument("--idle-exit-after", type=float, default=None)
+    fable_worker_run.add_argument("--stop-on-error", action="store_true")
+    fable_worker_run.set_defaults(func=cmd_fable_worker_run)
+
     worker_run_once = sub.add_parser("worker-run-once")
     worker_run_once.add_argument("--worker-id", default="cli-worker")
     worker_run_once.add_argument(
@@ -3396,6 +3440,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--publisher-workers", type=int, default=1,
         help="Thread count for the publisher worker (SQLite: keep this low)",
+    )
+    serve.add_argument(
+        "--fable-workers", type=int, default=0,
+        help="Thread count for the Fable cinematic shot-generation worker (default 0 = off)",
     )
     serve.add_argument(
         "--shutdown-timeout", type=float, default=30.0, help="Seconds to wait for graceful shutdown",
