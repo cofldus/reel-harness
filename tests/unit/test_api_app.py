@@ -252,6 +252,46 @@ def test_get_and_cancel_publication_not_found_returns_404(tmp_path) -> None:
         app.dependency_overrides.clear()
 
 
+def test_list_publications_requires_api_key_and_paginates(tmp_path) -> None:
+    from reel_harness.db.models import Publication
+
+    ctx = _make_ctx(tmp_path)
+    app.dependency_overrides[get_context] = lambda: ctx
+    try:
+        client = TestClient(app)
+        channel = ctx.jobs.create_channel(name="c", niche="n", language="en")
+        job, _ = ctx.jobs.create_job(channel.id, idempotency_key="k-pub-list", topic="t")
+        with ctx.session_factory() as session:
+            for i in range(3):
+                session.add(Publication(
+                    job_id=job.id, provider="youtube", account_reference=f"acct-{i}",
+                    status="READY_TO_UPLOAD", privacy_status="private",
+                    idempotency_key=f"pub-list-{i}", final_video_checksum=f"checksum-{i}",
+                ))
+            session.commit()
+
+        unauthed = client.get("/v1/publications")
+        assert unauthed.status_code == 401
+
+        response = client.get("/v1/publications?limit=2", headers={"Authorization": "Bearer test-key"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 3
+        assert body["limit"] == 2
+        assert len(body["publications"]) == 2
+
+        filtered = client.get(
+            f"/v1/publications?job_id={job.id}&provider=youtube",
+            headers={"Authorization": "Bearer test-key"},
+        )
+        assert filtered.json()["total"] == 3
+
+        bad_limit = client.get("/v1/publications?limit=0", headers={"Authorization": "Bearer test-key"})
+        assert bad_limit.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_status_endpoint_reports_version_schema_and_counts(tmp_path) -> None:
     import reel_harness.api.app as app_module
 

@@ -606,6 +606,40 @@ def provider_capabilities(provider: str) -> PublisherCapabilities:
     raise NotImplementedError(f"Publisher '{provider}' is not registered yet")
 
 
+_PUBLISHER_PROVIDER_IDS = ("youtube", "tiktok", "instagram")
+
+
+def configured_publishers(settings: Settings, credential_backend) -> dict[str, list[str]]:
+    """Provider id -> connected account aliases, for the three real
+    publisher providers (never "fake" -- it has no OAuth client and no
+    credentials to connect). A provider is a KEY in the returned dict only
+    if its OAuth client is actually configured (REEL_HARNESS_*_CLIENT_ID/
+    _SECRET present) -- so `provider not in result` means "not configured"
+    and `result[provider] == []` means "configured, zero accounts
+    connected yet", two different UI states callers must not collapse into
+    one. No I/O beyond local file reads -- never a real network call."""
+    from reel_harness.config import (
+        ProviderConfigurationError,
+        validate_instagram_credentials_configured,
+        validate_tiktok_credentials_configured,
+        validate_youtube_credentials_configured,
+    )
+
+    validators = {
+        "youtube": validate_youtube_credentials_configured,
+        "tiktok": validate_tiktok_credentials_configured,
+        "instagram": validate_instagram_credentials_configured,
+    }
+    result: dict[str, list[str]] = {}
+    for provider in _PUBLISHER_PROVIDER_IDS:
+        try:
+            validators[provider](settings)
+        except ProviderConfigurationError:
+            continue
+        result[provider] = credential_backend.list_accounts(provider)
+    return result
+
+
 def _resolve_fresh_youtube_access_token(
     settings: Settings, credential_backend, account_reference: str, oauth_transport: object = None,
 ) -> str:

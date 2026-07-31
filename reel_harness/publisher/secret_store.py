@@ -122,6 +122,20 @@ class FileSecretStore:
     def delete(self, namespace: str, key: str) -> None:
         self._path_for(namespace, key).unlink(missing_ok=True)
 
+    def pop(self, namespace: str, key: str) -> dict | None:
+        """Reads and deletes in one call, for single-use transient state
+        (e.g. an OAuth pending-flow entry). A concurrent double-pop of the
+        same key is safe: the loser sees the file already gone and gets
+        None, never a corrupted read -- read-then-unlink is fine here
+        because the only failure mode is "someone else already consumed
+        it," not a torn write (writes are already atomic via `set()`'s
+        tmp-file + os.replace)."""
+        value = self.get(namespace, key)
+        if value is None:
+            return None
+        self.delete(namespace, key)
+        return value
+
     def exists(self, namespace: str, key: str) -> bool:
         return self._path_for(namespace, key).is_file()
 

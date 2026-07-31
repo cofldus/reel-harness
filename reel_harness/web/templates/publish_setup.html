@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}게시 준비 - Reel Harness{% endblock %}
+{% block content %}
+<h1>{{ job.topic or "영상" }} 게시 준비</h1>
+
+{% if job.video_available %}
+<video controls class="job-video" src="/jobs/{{ job.job_id }}/video"></video>
+{% endif %}
+
+{% if errors.get("_eligibility") %}
+<div class="alert alert-error" role="alert"><p>게시할 수 없습니다: {{ errors["_eligibility"] }}</p></div>
+{% endif %}
+{% if errors.get("_general") %}
+<div class="alert alert-error" role="alert"><p>{{ errors["_general"] }}</p></div>
+{% endif %}
+{% if errors.get("provider") %}
+<div class="alert alert-error" role="alert"><p>{{ errors["provider"] }}</p></div>
+{% endif %}
+
+{% for platform in setup.platforms %}
+<section class="settings-card">
+  <h2>{{ platform.display_name }}</h2>
+
+  {% if not platform.selectable %}
+  <span class="badge badge-not_configured">연결 필요</span>
+  <p>{{ platform.disabled_reason }}</p>
+  <p class="hint"><a href="/publisher-accounts">계정 연결</a> 화면에서 먼저 연결하세요.</p>
+  {% endif %}
+
+  {# Always rendered (never omitted when unselectable) so the CSRF hidden
+     field is always present on this page -- disabled inputs + the reason
+     above, matching publisher_accounts.html's identical fix, rather than
+     hiding the form (and its CSRF token) entirely. #}
+  <form method="post" action="/jobs/{{ job.job_id }}/publications" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="provider" value="{{ platform.provider }}">
+
+    <div class="form-field">
+      <label>계정
+        <select name="account_reference" {{ "disabled" if not platform.selectable }}>
+          {% for account in platform.accounts %}
+          <option value="{{ account }}"
+            {{ "selected" if submitted_provider == platform.provider
+                             and values.get("account_reference") == account }}>
+            {{ account }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      {% if submitted_provider == platform.provider and errors.get("account_reference") %}
+      <p class="field-error">{{ errors["account_reference"] }}</p>
+      {% endif %}
+    </div>
+
+    <fieldset class="form-field">
+      <legend>공개 범위</legend>
+      {% for value, label in platform.privacy_values %}
+      {% set is_public = value in platform.public_privacy_values %}
+      {% set option_disabled = not platform.selectable or (is_public and not platform.public_upload_allowed) %}
+      <label {{ "class=disabled" if option_disabled }}>
+        <input type="radio" name="privacy_status" value="{{ value }}"
+               {{ "disabled" if option_disabled }}
+               {{ "checked" if (submitted_provider == platform.provider
+                                 and values.get("privacy_status") == value)
+                              or (submitted_provider != platform.provider
+                                  and value == platform.default_privacy) }}>
+        {{ label }}
+        {% if is_public and not platform.public_upload_allowed %}
+        <span class="hint">(공개 업로드가 비활성화되어 있습니다)</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+      {% if submitted_provider == platform.provider and errors.get("privacy_status") %}
+      <p class="field-error">{{ errors["privacy_status"] }}</p>
+      {% endif %}
+    </fieldset>
+
+    {% if platform.public_privacy_values %}
+    <div class="form-field">
+      <label>
+        <input type="checkbox" name="confirm_public_upload" value="true"
+               {{ "disabled" if not platform.selectable }}
+               {{ "checked" if submitted_provider == platform.provider
+                               and values.get("confirm_public_upload") }}>
+        공개 범위로 게시하는 것에 동의합니다
+        {% if platform.provider == "instagram" %}
+        (Instagram Reels는 항상 공개로 게시되며 비공개 옵션이 없습니다)
+        {% endif %}
+      </label>
+      {% if submitted_provider == platform.provider and errors.get("confirm_public_upload") %}
+      <p class="field-error">{{ errors["confirm_public_upload"] }}</p>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if platform.requires_user_confirmation %}
+    <div class="form-field">
+      <p class="hint">
+        기본 옵션(변경 불가):
+        {% for key, val in platform.default_platform_options.items() %}
+        {{ key }}={{ val }}{% if not loop.last %}, {% endif %}
+        {% endfor %}
+        {% if platform.provider == "tiktok" %}
+        -- 이 앱이 TikTok의 검수를 통과하지 못한 경우 실제로는 본인만 보기로 게시될 수 있습니다.
+        {% endif %}
+      </p>
+      <label>
+        <input type="checkbox" name="confirm_platform_options" value="true"
+               {{ "disabled" if not platform.selectable }}
+               {{ "checked" if submitted_provider == platform.provider
+                               and values.get("confirm_platform_options") }}>
+        위 플랫폼 기본 옵션을 확인했습니다
+      </label>
+      {% if submitted_provider == platform.provider and errors.get("confirm_platform_options") %}
+      <p class="field-error">{{ errors["confirm_platform_options"] }}</p>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <button type="submit" class="btn btn-primary" {{ "disabled" if not platform.selectable }}>
+      {{ platform.display_name }}에 게시하기
+    </button>
+  </form>
+</section>
+{% endfor %}
+{% endblock %}

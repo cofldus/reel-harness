@@ -151,3 +151,23 @@ def test_list_keys_rejects_invalid_namespace(tmp_path) -> None:
     store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
     with pytest.raises(SecretStoreError):
         store.list_keys("../escape")
+
+
+def test_pop_returns_the_value_and_deletes_it(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    store.set("ns", "k1", {"a": 1})
+    assert store.pop("ns", "k1") == {"a": 1}
+    assert store.get("ns", "k1") is None
+    assert store.exists("ns", "k1") is False
+
+
+def test_pop_on_missing_key_returns_none(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    assert store.pop("ns", "never-set") is None
+
+
+def test_double_pop_second_call_returns_none(tmp_path) -> None:
+    store = FileSecretStore(tmp_path / "secrets", repo_root=tmp_path / "repo")
+    store.set("ns", "k1", {"a": 1})
+    assert store.pop("ns", "k1") == {"a": 1}
+    assert store.pop("ns", "k1") is None

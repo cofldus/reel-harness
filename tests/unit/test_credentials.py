@@ -9,6 +9,7 @@ from reel_harness.publisher.credentials import (
     FileCredentialBackend,
     InMemoryCredentialBackend,
     OAuthCredential,
+    publisher_account_safe_metadata,
 )
 from reel_harness.publisher.secret_store import FileSecretStore
 
@@ -140,3 +141,29 @@ def test_in_memory_backend_list_accounts(tmp_path) -> None:
     backend.save_credential(_credential(account_reference="acct-a"))
     backend.save_credential(_credential(account_reference="acct-b"))
     assert backend.list_accounts("youtube") == ["acct-a", "acct-b"]
+
+
+def test_safe_metadata_never_includes_the_access_or_refresh_token() -> None:
+    cred = _credential()
+    safe = publisher_account_safe_metadata(cred)
+    assert cred.access_token not in str(safe.values())
+    assert cred.refresh_token not in str(safe.values())
+    assert "access_token" not in safe
+    assert "refresh_token" not in safe
+    assert safe["has_refresh_token"] is True
+
+
+def test_safe_metadata_has_refresh_token_false_when_none() -> None:
+    cred = _credential(refresh_token=None)
+    safe = publisher_account_safe_metadata(cred)
+    assert safe["has_refresh_token"] is False
+
+
+def test_safe_metadata_includes_operational_health_fields() -> None:
+    cred = _credential(invalid=True, last_refresh_error="invalid_grant")
+    safe = publisher_account_safe_metadata(cred)
+    assert safe["invalid"] is True
+    assert safe["last_refresh_error"] == "invalid_grant"
+    assert safe["provider"] == "youtube"
+    assert safe["account_reference"] == "default"
+    assert safe["channel_id"] == "UC-fake"

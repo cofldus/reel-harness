@@ -2150,18 +2150,24 @@ def _cmd_publisher_doctor_instagram(args: argparse.Namespace, ctx: AppContext) -
 def cmd_publisher_account_list(args: argparse.Namespace, ctx: AppContext) -> int:
     """Lists saved account aliases for a publisher provider -- never a
     token, only safe identity/status fields."""
+    from reel_harness.publisher.credentials import publisher_account_safe_metadata
+
     backend = ctx.credential_backend()
     aliases = backend.list_accounts(args.provider)
     accounts = []
     for alias in aliases:
         cred = backend.get_credential(args.provider, alias)
+        if cred is None:
+            accounts.append({
+                "account_reference": alias, "channel_id": None, "channel_title": None,
+                "has_refresh_token": False, "expires_at": None, "invalid": False,
+            })
+            continue
+        safe = publisher_account_safe_metadata(cred)
         accounts.append({
-            "account_reference": alias,
-            "channel_id": cred.channel_id if cred else None,
-            "channel_title": cred.channel_title if cred else None,
-            "has_refresh_token": bool(cred.refresh_token) if cred else False,
-            "expires_at": cred.expires_at.isoformat() if cred and cred.expires_at else None,
-            "invalid": cred.invalid if cred else False,
+            key: safe[key]
+            for key in ("account_reference", "channel_id", "channel_title", "has_refresh_token",
+                        "expires_at", "invalid")
         })
     print(json.dumps({"provider": args.provider, "accounts": accounts}, indent=2))
     return 0
@@ -2171,24 +2177,14 @@ def cmd_publisher_account_show(args: argparse.Namespace, ctx: AppContext) -> int
     """Shows one saved account's safe metadata. Never prints access_token,
     refresh_token, client_secret, an authorization code, a PKCE verifier, or
     the raw stored JSON."""
+    from reel_harness.publisher.credentials import publisher_account_safe_metadata
+
     backend = ctx.credential_backend()
     cred = backend.get_credential(args.provider, args.alias)
     if cred is None:
         print(f"no saved credential for account {args.alias!r}", file=sys.stderr)
         return 2
-    print(json.dumps({
-        "provider": cred.provider,
-        "account_reference": cred.account_reference,
-        "channel_id": cred.channel_id,
-        "channel_title": cred.channel_title,
-        "scope": cred.scope,
-        "has_refresh_token": bool(cred.refresh_token),
-        "created_at": cred.created_at.isoformat() if cred.created_at else None,
-        "last_refreshed_at": cred.last_refreshed_at.isoformat() if cred.last_refreshed_at else None,
-        "last_refresh_error": cred.last_refresh_error,
-        "invalid": cred.invalid,
-        "expires_at": cred.expires_at.isoformat() if cred.expires_at else None,
-    }, indent=2))
+    print(json.dumps(publisher_account_safe_metadata(cred), indent=2))
     return 0
 
 

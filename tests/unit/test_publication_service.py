@@ -279,6 +279,33 @@ def test_cancel_refused_once_published(
         publish_service.cancel_publication(pub.id)
 
 
+def test_cancel_refused_once_failed(
+    job_service, channel, session_factory, storage, publish_service, tmp_path,
+) -> None:
+    """The state machine deliberately only allows FAILED -> RETRY_WAIT (see
+    test_publication_state_machine.py::test_failed_allows_only_manual_retry_wait),
+    never a direct FAILED -> CANCELLED. cancel_publication must refuse
+    cleanly with PublicationInvalidActionError here, not attempt the
+    transition and let a raw InvalidTransitionError escape -- found while
+    building the Phase 5B web UI's can_cancel mirroring test."""
+    job = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path)
+    pub, _ = publish_service.create_publication(job.id, provider="youtube", account_reference="acct-1")
+    with session_factory() as session:
+        from reel_harness.core.state_machine import apply_publication_transition
+
+        db_pub = session.get(Publication, pub.id)
+        apply_publication_transition(
+            db_pub, PublicationStatus.UPLOAD_SESSION_CREATED, upload_session_reference="ref-1",
+        )
+        apply_publication_transition(
+            db_pub, PublicationStatus.FAILED, failure_code="X", failure_summary="boom",
+        )
+        session.commit()
+
+    with pytest.raises(PublicationInvalidActionError):
+        publish_service.cancel_publication(pub.id)
+
+
 def test_dry_run_style_check_eligibility_never_persists_anything(
     job_service, channel, session_factory, storage, publish_service, tmp_path,
 ) -> None:
@@ -287,3 +314,46 @@ def test_dry_run_style_check_eligibility_never_persists_anything(
     assert result.eligible is True
     with session_factory() as session:
         assert session.query(Publication).filter(Publication.job_id == job.id).count() == 0
+
+
+def test_list_publications_limit_and_offset_page_through_results(
+    job_service, channel, session_factory, storage, publish_service, tmp_path,
+) -> None:
+    job_a = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path, key="page-a")
+    job_b = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path, key="page-b")
+    job_c = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path, key="page-c")
+    publish_service.create_publication(job_a.id, provider="youtube", account_reference="acct-1")
+    publish_service.create_publication(job_b.id, provider="youtube", account_reference="acct-1")
+    publish_service.create_publication(job_c.id, provider="youtube", account_reference="acct-1")
+
+    unbounded = publish_service.list_publications()
+    assert len(unbounded) >= 3  # unchanged default behavior -- limit=None stays unbounded
+
+    page1 = publish_service.list_publications(limit=2, offset=0)
+    page2 = publish_service.list_publications(limit=2, offset=2)
+    assert len(page1) == 2
+    ids_seen = {p.id for p in page1} | {p.id for p in page2}
+    assert ids_seen.issuperset({unbounded[0].id, unbounded[1].id})
+    # no overlap between consecutive pages
+    assert {p.id for p in page1}.isdisjoint({p.id for p in page2[: len(page1)]}) or len(page2) == 0
+
+
+def test_count_publications_matches_unbounded_list_length(
+    job_service, channel, session_factory, storage, publish_service, tmp_path,
+) -> None:
+    job = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path, key="count-1")
+    publish_service.create_publication(job.id, provider="youtube", account_reference="acct-1")
+
+    total = publish_service.count_publications(job_id=job.id)
+    listed = publish_service.list_publications(job_id=job.id)
+    assert total == len(listed) == 1
+
+
+def test_count_publications_respects_status_filter(
+    job_service, channel, session_factory, storage, publish_service, tmp_path,
+) -> None:
+    job = _make_eligible_job(job_service, channel, session_factory, storage, tmp_path, key="count-2")
+    publish_service.create_publication(job.id, provider="youtube", account_reference="acct-1")
+
+    assert publish_service.count_publications(job_id=job.id, status=PublicationStatus.READY_TO_UPLOAD.value) == 1
+    assert publish_service.count_publications(job_id=job.id, status=PublicationStatus.PUBLISHED.value) == 0

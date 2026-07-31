@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}게시 상세 - Reel Harness{% endblock %}
+{% block content %}
+<h1>{{ job_topic or "(주제 없음)" }} 게시</h1>
+<p><a href="/jobs/{{ publication.job_id }}">원본 작업 보기</a></p>
+
+{% include "fragments/publication_status.html" %}
+
+<section class="advanced-details">
+  <details>
+    <summary>기술 정보</summary>
+    <dl>
+      <dt>publication_id</dt><dd>{{ publication.publication_id }}</dd>
+      <dt>job_id</dt><dd>{{ publication.job_id }}</dd>
+      <dt>provider</dt><dd>{{ publication.provider }}</dd>
+      <dt>created_at</dt><dd>{{ publication.created_at }}</dd>
+      <dt>updated_at</dt><dd>{{ publication.updated_at }}</dd>
+    </dl>
+  </details>
+</section>
+{% endblock %}
