@@ -22,7 +22,8 @@ KNOWN_LIMITATIONS = (
     "(see live_verification status below).",
     "Instagram Reels publishing has no private/unlisted option -- every publish is public.",
     "TikTok forces SELF_ONLY visibility on any app that has not passed its own review process.",
-    "SQLite/local filesystem storage only -- no PostgreSQL or cloud object storage.",
+    "Local filesystem storage only -- no cloud object storage. Database: SQLite (default) or "
+    "PostgreSQL (fresh databases only -- SQLite-to-PostgreSQL data transfer is not implemented yet).",
     "One pre-existing test skip on Windows (symlink-rejection, requires elevated privileges to create).",
     "No remote video/post delete is implemented for any publisher.",
     "No cloud deployment target is implemented -- single-machine, local-first only.",

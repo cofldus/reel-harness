@@ -536,11 +536,12 @@ directly. This remains a deliberate scope boundary, not an oversight — see
 
 Facebook Reels publishers, automatic public publishing, scheduled-publish
 automation, automatic remote delete, thumbnail/subtitle upload, analytics
-collection, auto-commenting, PostgreSQL, a cloud secret manager, and a
-cloud queue — none of these exist yet. TikTok and Instagram publishing are
-covered below (Phase 3C/3D). (An OAuth account-management UI and a web
-dashboard were out of scope as of Phase 3B; both now exist — see "Web UI —
-Publishing (Phase 5B)" above.)
+collection, auto-commenting, a cloud secret manager, and a cloud queue —
+none of these exist yet. TikTok and Instagram publishing are covered below
+(Phase 3C/3D). (An OAuth account-management UI and a web dashboard were
+out of scope as of Phase 3B; both now exist — see "Web UI — Publishing
+(Phase 5B)" above. PostgreSQL was also out of scope then; it exists as of
+Phase 6A-1 — see "Database backends" below.)
 
 ## Publishing (TikTok)
 
@@ -928,9 +929,9 @@ would require, automating Meta's own app-review process, automatic public
 publishing (public is Instagram's *only* mode, but still requires the
 explicit double-confirmation + feature flag above), scheduled-publish
 automation, automatic remote post delete, thumbnail-only upload, subtitle
-upload, analytics collection, comments management, a web dashboard,
-PostgreSQL, a cloud queue, a forced cloud-storage vendor, and arbitrary
-tunneling software.
+upload, analytics collection, comments management, a web dashboard (now
+exists — Phase 5A/5B), PostgreSQL (now exists — Phase 6A-1), a cloud
+queue, a forced cloud-storage vendor, and arbitrary tunneling software.
 
 ## Cancelling a job
 
@@ -1232,6 +1233,46 @@ exactly how the process that produced it was configured. Settings changed
 after a job/publication was created never retroactively change that job's
 own already-persisted snapshot.
 
+### Database backends (Phase 6A-1)
+
+SQLite is the zero-config default (`DATABASE_URL=sqlite:///./reel_harness.db`)
+and nothing about the local/Demo Mode experience requires anything else.
+PostgreSQL is a fully-supported second backend:
+
+```
+uv sync --extra postgres        # psycopg v3 driver -- never a hard dependency
+DATABASE_URL=postgresql://user:pass@host:5432/reel_harness uv run reel-harness serve
+```
+
+- A bare `postgresql://...` URL (the shape most managed-Postgres providers
+  hand out) is normalized to `postgresql+psycopg://` automatically; a URL
+  that already names an explicit driver is left alone. Unsupported schemes
+  are rejected at startup with a clear error (`config.validate_provider_settings`).
+- PostgreSQL engines get a real bounded connection pool with a pre-ping
+  health check. Tunables (all ignored on SQLite, which has no connection
+  pool or server-side statement timeout of its own):
+  `REEL_HARNESS_DB_POOL_SIZE` (default 5),
+  `REEL_HARNESS_DB_POOL_MAX_OVERFLOW` (default 10),
+  `REEL_HARNESS_DB_STATEMENT_TIMEOUT_SECONDS` (default unset — no timeout).
+- The additive-column migration mechanism, `db-status`, and `db-verify` are
+  dialect-portable (SQLAlchemy introspection + per-dialect DDL rendering,
+  never hand-written SQLite type strings). PostgreSQL backup/restore
+  requires the `pg_dump`/`pg_restore` client tools on `PATH` (installed
+  separately — they ship with any PostgreSQL client package).
+- CI runs the repository-level dual-backend suite
+  (`tests/integration/test_postgres_backend_parity.py`) against a real
+  `postgres:16` service container on every push, including a real
+  concurrent lease-claim race. To run it locally, point
+  `REEL_HARNESS_TEST_POSTGRES_URL` at a disposable database (its tables
+  are **dropped and recreated** by the fixtures — never a database you
+  care about); unset, those tests skip cleanly.
+- **Not included in 6A-1, deliberately**: a SQLite→PostgreSQL data-transfer
+  command (`db-transfer`). Moving existing local data into PostgreSQL
+  depends on the multi-user ownership model (Phase 6A-2) — who owns the
+  migrated rows must be decided explicitly, not defaulted silently — so
+  the transfer tool lands there, not here. Until then, PostgreSQL is for
+  fresh databases.
+
 ### Database operations
 
 ```
@@ -1242,30 +1283,44 @@ uv run reel-harness db-restore <backup_path> --confirm-restore --pre-restore-bac
 uv run reel-harness db-verify
 ```
 
+All five commands work against whichever backend `DATABASE_URL` names.
+
 - **`db-status`**: current vs. latest schema version, pending column/version
-  migrations, table row counts, `PRAGMA integrity_check`, a safe (filename
-  only, never the full path) db identifier.
+  migrations, table row counts, an integrity status, a safe db identifier
+  (SQLite: filename only, never the full path; PostgreSQL: bare database
+  name, never host/user/password).
 - **`db-migrate`**: wraps the existing idempotent `init_db()` — a default
   pre-migration safety backup (`--backup-dir` required unless you pass
-  `--no-backup` explicitly), a PID-lockfile exclusive lock so two
-  invocations can't interleave, `--dry-run` to report the plan without
-  touching anything, and a safe no-op on repeated runs.
-- **`db-backup`**: SQLite's own online backup API (safe to run while the DB
-  is in use), written atomically with a checksummed JSON manifest
-  alongside it. The manifest's `schema_version` is the database's own
-  **actual** version at backup time — never assumed to match the running
-  code's version, so a backup of a not-yet-migrated database honestly
-  records that fact.
-- **`db-restore`**: destructive, so every check before the final atomic
-  swap can refuse and leave the live database untouched — explicit
+  `--no-backup` explicitly), an exclusive lock so two invocations can't
+  interleave (SQLite: a PID lockfile next to the DB file; PostgreSQL: a
+  native `pg_try_advisory_lock`, which the server releases automatically
+  if the process crashes mid-migration), `--dry-run` to report the plan
+  without touching anything, and a safe no-op on repeated runs.
+- **`db-backup`**: SQLite uses its own online backup API (safe to run while
+  the DB is in use); PostgreSQL uses `pg_dump --format=custom`. Both are
+  written atomically with the same checksummed JSON manifest alongside.
+  The manifest's `schema_version` is the database's own **actual** version
+  at backup time — never assumed to match the running code's version, so a
+  backup of a not-yet-migrated database honestly records that fact.
+- **`db-restore`**: destructive, so every check before the final apply can
+  refuse and leave the live database untouched — explicit
   `--confirm-restore`, refuses while any lease looks actively held by a
   running worker (heartbeat within the lease timeout), verifies the
   backup's checksum against its own manifest, refuses a backup from a
   schema newer than this build supports, and always takes its own backup
-  of the current database first (`--pre-restore-backup-dir`).
-- **`db-verify`**: `PRAGMA integrity_check`, foreign-key check, orphan
-  publications (no matching job), and the forbidden ACTIVE+unlocked state
-  — reusing the exact same detectors the worker daemons themselves use.
+  of the current database first (`--pre-restore-backup-dir`). The apply
+  step is the one backend-specific part: SQLite swaps the file atomically;
+  PostgreSQL runs `pg_restore --clean --if-exists --no-owner` against the
+  live database.
+- **`db-verify`**: integrity check, foreign-key check, orphan publications
+  (no matching job), and the forbidden ACTIVE+unlocked state — reusing the
+  exact same detectors the worker daemons themselves use. The first two
+  are SQLite-specific by nature (`PRAGMA integrity_check` /
+  `PRAGMA foreign_key_check`): PostgreSQL has no client-reachable
+  whole-file integrity scan (server-side WAL + checksums own that
+  concern), and it enforces foreign keys synchronously on every write, so
+  a committed violation cannot exist — on PostgreSQL those two checks
+  report clean by construction and the row-level checks do the real work.
   Cross-checking the DB against what's actually on disk is `storage-verify`'s
   job, not duplicated here.
 
@@ -1430,7 +1485,9 @@ list predates both. Facebook Reels publishing does not exist. Also not
 yet supported: automatic public publishing (public always requires the
 explicit double-confirmation + feature flag above), scheduled-publish
 automation, automatic remote video/post delete, thumbnail/subtitle
-upload, analytics collection, PostgreSQL, cloud storage/CDN (beyond
+upload, analytics collection, SQLite→PostgreSQL data transfer (PostgreSQL
+itself is supported as of Phase 6A-1 — see "Database backends" above; the
+transfer tool is deferred to Phase 6A-2), cloud storage/CDN (beyond
 Instagram's own resumable upload), a credential-bundling backup command
 (see "Credential backup policy" above), face-recognition smart crop, BGM
 mixing, subtitle burn-in, multi-language dubbing.
