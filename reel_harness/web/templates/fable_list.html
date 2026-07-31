@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}시네마틱 프로젝트 - Reel Harness{% endblock %}
+{% block content %}
+<h1>시네마틱 프로젝트</h1>
+<p class="meta">원작 이야기를 각색해 여러 샷으로 나눠 생성하고, 테이크를 골라 한 편으로 잇습니다.</p>
+
+<p><a class="button" href="/fable/new">새 프로젝트 만들기</a></p>
+
+{% if projects %}
+<table class="job-table">
+  <thead>
+    <tr><th>제목</th><th>상태</th><th>생성 시간</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for project in projects %}
+    <tr>
+      <td>{{ project.title }}</td>
+      <td>
+        <span class="badge badge-status">{{ project.status_label }}</span>
+        {% if project.needs_action %}<span class="badge badge-action">확인 필요</span>{% endif %}
+      </td>
+      <td>{{ project.elapsed }} 전</td>
+      <td><a href="{{ project.detail_url }}">열기</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty-state">아직 프로젝트가 없습니다.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,77 @@
+{# Self-terminating poll: the hx-get is only re-included while the project
+   is genuinely still working. A project waiting on a person (any review
+   gate, or FAILED) stops polling instead of hammering the DB forever --
+   the same rule fragments/job_status.html follows. #}
+<div id="fable-status"
+     {% if not project.is_terminal and not project.needs_action %}
+     hx-get="/fable/{{ project.project_id }}/status" hx-trigger="every 2s [document.visibilityState=='visible']" hx-swap="outerHTML"
+     {% endif %}>
+
+  <div class="status-header">
+    <span class="badge badge-status">{{ project.status_label }}</span>
+    {% if project.needs_action %}<span class="badge badge-action">확인 필요</span>{% endif %}
+  </div>
+
+  {% if project.failure_summary %}
+  <div class="alert alert-error" role="alert">
+    <p>{{ project.failure_summary }}</p>
+    <details>
+      <summary>기술 세부정보</summary>
+      <dl><dt>failure_code</dt><dd>{{ project.failure_code }}</dd></dl>
+    </details>
+  </div>
+  {% endif %}
+
+  <h2>예산</h2>
+  <dl class="budget">
+    <dt>한도</dt>
+    <dd>{% if project.budget.limit_amount is none %}설정 안 됨{% else %}{{ project.budget.limit_amount }} {{ project.budget.currency }}{% endif %}</dd>
+    <dt>사용</dt>
+    <dd>{{ project.budget.spent_amount }} {{ project.budget.currency or '' }}</dd>
+    <dt>남음</dt>
+    <dd>{% if project.budget.remaining_amount is none %}-{% else %}{{ project.budget.remaining_amount }}{% endif %}</dd>
+  </dl>
+  {% if project.budget.spend_is_incomplete %}
+  <div class="alert alert-info" role="status">
+    <p>가격을 알 수 없는 생성이 {{ project.budget.unpriced_take_count }}건 있습니다. 표시된 사용액은 실제보다 적을 수 있습니다.</p>
+  </div>
+  {% endif %}
+
+  {% if project.shots %}
+  <h2>샷 ({{ project.shots | length }})</h2>
+  <table class="job-table">
+    <thead><tr><th>#</th><th>동작</th><th>상태</th><th>테이크</th></tr></thead>
+    <tbody>
+      {% for shot in project.shots %}
+      <tr>
+        <td>{{ shot.shot_order }}</td>
+        <td>{{ shot.action or '-' }}</td>
+        <td>
+          <span class="badge badge-status">{{ shot.status_label }}</span>
+          {% if shot.failure_code %}<span class="badge badge-error">{{ shot.failure_code }}</span>{% endif %}
+        </td>
+        <td>
+          {% if shot.takes %}
+          <ul class="take-list">
+            {% for take in shot.takes %}
+            <li>
+              #{{ take.attempt_number }} · {{ take.status }}
+              {% if take.selected %}<strong>(선택됨)</strong>{% endif %}
+              {% if take.can_select %}
+              <form method="post" action="/fable/takes/{{ take.take_id }}/select" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="project_id" value="{{ project.project_id }}">
+                <button type="submit">이 테이크 선택</button>
+              </form>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

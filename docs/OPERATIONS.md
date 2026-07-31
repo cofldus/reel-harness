@@ -1157,6 +1157,30 @@ Lowering a limit below what a project has already spent is refused;
 clearing a limit (`--clear`) is always allowed, re-closes the paid gate,
 and un-spends nothing.
 
+### The Fable web UI
+
+`reel-harness serve` exposes the whole lifecycle at `/fable`, alongside
+the job and publication screens. Three pages: a project list, a create
+form, and a project detail page that carries every gate action, the
+casting review, the shot/take table and the budget controls.
+
+Two rules the pages follow, both inherited from Phase 5A/5B:
+
+- **A button that is shown is one the service will accept.** Every
+  `can_*` mirrors the real `FableService` precondition rather than a
+  guess from the transition table, so the page can never offer an action
+  that 409s. When the character gate is blocked, the page says *why*
+  ("2 unapproved reference sheets") instead of silently hiding a button.
+- **Forms are disabled, never removed.** A page that hides a whole form
+  also hides its CSRF field, which was a real bug in Phase 5A.
+
+Every mutating route is CSRF-protected (double-submit cookie) and
+answers with Post/Redirect/Get, so a browser refresh can never
+re-submit a generation that costs money. A refusal comes back as a
+readable message on the page, not a traceback — refusals here are normal
+(a gate not reached, a budget exhausted) and the reason is the useful
+part.
+
 ### The `/v1/fable/*` API
 
 Every CLI action above has an HTTP equivalent, bearer-token authenticated
