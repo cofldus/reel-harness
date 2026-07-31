@@ -17,6 +17,12 @@ from sqlalchemy.schema import Column, CreateColumn
 from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlalchemy.types import JSON, TypeEngine
 
+# Imported for its side effect only: registering the Fable cinematic tables
+# on Base.metadata BEFORE any init_db()/create_all() call. v8 adds only
+# brand-new tables (fable_projects/characters/locations/scenes/shots/takes),
+# which create_all() handles for both fresh and existing databases -- same
+# shape as the v5 publications tables, no _ADDITIVE_COLUMNS entries needed.
+import reel_harness.db.cinematic_models  # noqa: F401  (side-effect import)
 from reel_harness.db.models import Base, UTCDateTime
 
 SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
@@ -27,7 +33,7 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # existing dev databases keep working without data loss. Only nullable column
 # additions are allowed through this path -- anything destructive or shaped
 # differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -73,6 +79,9 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     ("publications", "processing_started_at", UTCDateTime(), True, None),
     ("publications", "next_poll_at", UTCDateTime(), True, None),
     ("publications", "processing_poll_count", Integer(), False, text("0")),
+    # v8: no new columns -- the Fable cinematic tables (db.cinematic_models)
+    # are brand-new, which create_all() already handles for both fresh and
+    # existing databases; same shape as v5's publications tables.
 ]
 
 
