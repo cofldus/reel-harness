@@ -36,7 +36,7 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # and `publications.processing_poll_count`). Anything destructive -- a drop,
 # a rename, a type change, a backfill that needs to read other columns -- is
 # the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -114,6 +114,9 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     ("fable_characters", "reference_failure_summary", String(), True, None),
     ("fable_characters", "reference_cost_amount", Float(), True, None),
     ("fable_characters", "reference_cost_currency", String(), True, None),
+    # v12: per-project candidate-take count. NULL means "use the
+    # operator's default", which is a different statement from "one".
+    ("fable_projects", "takes_per_shot", Integer(), True, None),
 ]
 
 

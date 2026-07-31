@@ -57,6 +57,7 @@ class AppContext:
             cinematic_provider_resolver=self.cinematic_provider_for_project,
             allow_paid_generation=self.settings.allow_paid_generation,
             reference_provider_resolver=self.reference_provider_for_project,
+            takes_per_shot=self.settings.fable_takes_per_shot,
         )
         self._secret_store = None
 

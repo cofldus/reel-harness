@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 
 from reel_harness.core.adaptation_service import run_adaptation
 from reel_harness.core.cinematic_state import (
+    SUPPORTED_TAKES_PER_SHOT,
     FableProjectStatus,
     FableShotStatus,
     apply_project_transition,
@@ -67,7 +68,7 @@ class FableService:
         provider_snapshot: dict | None = None, narrative_director=None,
         narrative_director_resolver=None, cinematic_provider_resolver=None,
         allow_paid_generation: bool = False, reference_provider=None,
-        reference_provider_resolver=None,
+        reference_provider_resolver=None, takes_per_shot: int = 1,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -91,6 +92,11 @@ class FableService:
         # project's snapshot, or an instance from a test.
         self._reference_provider = reference_provider
         self._reference_provider_resolver = reference_provider_resolver
+        # Settings.fable_takes_per_shot -- the default a project's own
+        # override falls back to, used for PRICING here and by the worker
+        # for generation. Both must agree, or the gate approves a
+        # fraction of the real bill.
+        self._default_takes_per_shot = takes_per_shot
 
     # -- creation / read -------------------------------------------------
 
@@ -98,6 +104,7 @@ class FableService:
         self, title: str, source_text: str, idempotency_key: str,
         *, language: str = "ko", genre: str | None = None, tone: str | None = None,
         target_duration_sec: int = 60, aspect_ratio: str = "9:16",
+        takes_per_shot: int | None = None,
     ) -> tuple[StoryProject, bool]:
         """Returns (project, idempotent_replay) -- the unique constraint on
         idempotency_key is the duplicate guard, same idiom as
@@ -106,6 +113,12 @@ class FableService:
             raise InvalidActionError(f"unsupported aspect ratio {aspect_ratio!r} (supported: 9:16, 16:9)")
         if not source_text.strip():
             raise InvalidActionError("source_text must not be empty")
+        if takes_per_shot is not None and takes_per_shot not in SUPPORTED_TAKES_PER_SHOT:
+            raise InvalidActionError(
+                f"takes_per_shot must be one of "
+                f"{', '.join(str(n) for n in sorted(SUPPORTED_TAKES_PER_SHOT))}, "
+                f"got {takes_per_shot}"
+            )
         with self._session_factory() as session:
             existing = session.execute(
                 select(StoryProject).where(StoryProject.idempotency_key == idempotency_key)
@@ -117,6 +130,7 @@ class FableService:
                 idempotency_key=idempotency_key, title=title, source_text=source_text,
                 language=language, genre=genre, tone=tone,
                 target_duration_sec=target_duration_sec, aspect_ratio=aspect_ratio,
+                takes_per_shot=takes_per_shot,
                 provider_config=self._provider_snapshot,
             )
             session.add(project)
@@ -227,7 +241,16 @@ class FableService:
                 raise FableProjectNotFoundError(project_id)
             provider = provider or self._resolve_cinematic_provider(project)
             shots = self._shots_for_project(session, project_id)
-            return estimate_project_cost(project, shots, provider)
+            return estimate_project_cost(
+                project, shots, provider, takes_per_shot=self._takes_per_shot(project),
+            )
+
+    def _takes_per_shot(self, project: StoryProject) -> int:
+        """What this project will actually generate per shot -- its own
+        override, or the operator-wide default the service was built with.
+        Pricing has to use the same number the worker will, or the budget
+        gate approves a fraction of the real bill."""
+        return project.takes_per_shot or self._default_takes_per_shot
 
     def _resolve_cinematic_provider(self, project: StoryProject):
         if self._cinematic_provider_resolver is None:
@@ -775,7 +798,9 @@ class FableService:
             raise InvalidActionError(str(exc)) from exc
         if project.budget_limit_amount is None:
             return
-        estimate = estimate_project_cost(project, shots, provider)
+        estimate = estimate_project_cost(
+            project, shots, provider, takes_per_shot=self._takes_per_shot(project),
+        )
         if not estimate.known:
             raise InvalidActionError(
                 f"project has a budget limit but its cost cannot be established: "

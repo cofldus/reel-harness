@@ -29,19 +29,16 @@ F4 and F5 not started.**
 - **F3 (in progress)** — reference images, cost/budget, demo + google
   image adapters, multiple candidate takes. Commits 1 (reference provider
   contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
-  sheets, schema v11) and 4 (demo + google adapters) are done and pushed.
+  sheets, schema v11), 4 (demo + google adapters) and 5 (multiple takes,
+  schema v12) are done and pushed.
 - **F4 (not started)** — web UI + `/v1/fable/*` API.
 - **F5 (not started)** — real Veo adapter, film editor, audio, release
   `v0.5.0rc1`.
 
 ## F3 remaining commits (the immediate work)
 
-Commits 1-4 of 6 are done and pushed. Remaining, in order:
+Commits 1-5 of 6 are done and pushed. Remaining, in order:
 
-5. **`feat: add multiple candidate takes per shot`** — `Settings.
-   fable_takes_per_shot` (1 / 2 / 4) plus per-project override; worker
-   generates N takes with distinct seeds; each take's cost counts against
-   the budget; rejected takes are retained, never deleted on selection.
 6. **`test: add fable reference and budget e2e`** — offline e2e through
    the fake tier, plus a `fable-reference-smoke` CLI command and docs.
 
@@ -181,6 +178,28 @@ Two of six commits have landed on `phase6/fable-cinematic-engine`.
   reference-driven runs at 720p, so they cost more and buy nothing), and
   the per-image price is configurable rather than hardcoded, reporting
   `known=False` when unset.
+- **Commit 5 — multiple candidate takes per shot**: schema **v12**
+  (`fable_projects.takes_per_shot`, NULL meaning "use the operator's
+  default", which is a different statement from "one").
+  `Settings.fable_takes_per_shot` accepts only 1/2/4 -- each take is a
+  separate paid generation, so "4" is a considered choice and "40" is a
+  typo that would spend forty times the approved estimate. Each take
+  carries a distinct seed derived from (prompt fingerprint, attempt
+  number): distinct because N takes from one seed are N copies of the
+  same clip, deterministic because a crash replay must reproduce the take
+  already paid for. The budget is checked PER TAKE, so a project that can
+  afford two but not four generates two and stops with the shot
+  reviewable. `run_shot` became a batch: `_run_one_take` reports an
+  outcome and the batch's terminal status is decided in one place, where
+  the rule is "any produced candidate makes this a human decision" -- a
+  shot with two good takes and a third that timed out is REVIEW_REQUIRED
+  with the failure recorded, never FAILED, because failing would discard
+  generations already paid for. That required four new shot-transition
+  edges: `VALIDATING -> SUBMITTED` (the next candidate of the same batch)
+  and `REVIEW_REQUIRED` from SUBMITTED/GENERATING/DOWNLOADING (a batch can
+  be interrupted at any phase of any take). Pricing multiplies by the
+  project's own take count, because a gate that priced one take would
+  approve a quarter of the real bill.
 - **A real pre-existing defect found and fixed while building this**:
   `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
   failure BEFORE submission (an unconfigured provider refusing to quote

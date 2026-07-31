@@ -1054,6 +1054,34 @@ answers** — if it does not, the whole consistency strategy needs
 rethinking. That is what `fable-reference-smoke` exists to find out
 before F5 builds on it.
 
+### Multiple candidate takes per shot
+
+`REEL_HARNESS_FABLE_TAKES_PER_SHOT` (1, 2 or 4; default 1), overridable
+per project with `fable-create --takes-per-shot N`. Each take is a
+**separate paid generation**, so asking for 4 costs four times as much —
+the default is 1 and more is an explicit choice to spend N times as much
+for something to choose between.
+
+- Each take gets a **distinct seed**, deterministically derived from the
+  prompt fingerprint and the attempt number. Distinct because N takes
+  from one prompt with one seed are N copies of the same clip;
+  deterministic because a re-run after a crash must reproduce the take it
+  already paid for rather than buy a different one.
+- The budget is checked **per take**, not per shot. A project that can
+  afford two takes but not four generates two and stops with the shot
+  reviewable — refusing to produce any would waste the ones it could pay
+  for.
+- A failure on a later take **never discards the earlier ones**. A shot
+  with two good takes and a third that timed out lands in
+  `REVIEW_REQUIRED` with the failure recorded, not `FAILED`. A shot only
+  fails when it produced nothing at all.
+- Re-running a complete batch **buys nothing**: the takes are already
+  there, so the run replays.
+- Selecting one take **retains the others**, media included. Rejected
+  candidates are never deleted on selection.
+- Only 1, 2 and 4 are accepted. `40` is a typo that would spend forty
+  times the estimate a human approved.
+
 ### Cost, budgets, and the paid-generation gate
 
 Generation is the only phase that spends money, and two independent

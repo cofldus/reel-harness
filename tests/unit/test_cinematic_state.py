@@ -162,6 +162,28 @@ def test_budget_block_sends_a_ready_shot_to_review_and_back() -> None:
     assert shot.status == "READY"
 
 
+def test_a_batch_can_end_in_review_from_any_in_flight_phase() -> None:
+    """A shot generating several candidate takes can be interrupted at any
+    phase of any take. If earlier takes already produced media, the
+    outcome is a human choosing between what exists -- FAILED would throw
+    away generations the project already paid for."""
+    for status in (
+        FableShotStatus.SUBMITTED, FableShotStatus.GENERATING,
+        FableShotStatus.DOWNLOADING, FableShotStatus.VALIDATING,
+    ):
+        shot = _FakeShot(status=status.value)
+        apply_shot_transition(shot, FableShotStatus.REVIEW_REQUIRED)
+        assert shot.status == "REVIEW_REQUIRED"
+
+
+def test_the_next_candidate_take_resubmits_from_validating() -> None:
+    """N takes walk the SUBMITTED..VALIDATING cycle N times before any
+    human sees the shot."""
+    shot = _FakeShot(status="VALIDATING")
+    apply_shot_transition(shot, FableShotStatus.SUBMITTED)
+    assert shot.status == "SUBMITTED"
+
+
 def test_a_ready_shot_can_fail_before_it_is_ever_submitted() -> None:
     """Regression: READY -> FAILED was missing, so a provider that refused
     to quote or validate made the runner's own failure handler raise

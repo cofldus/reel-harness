@@ -61,6 +61,12 @@ class StoryProject(Base):
     budget_limit_amount: Mapped[float | None] = mapped_column(default=None)
     budget_currency: Mapped[str | None] = mapped_column(default=None)
     budget_spent_amount: Mapped[float] = mapped_column(default=0.0)
+    # v12: per-project override of Settings.fable_takes_per_shot. NULL
+    # means "use the operator's default" rather than "one" -- every
+    # project created before takes were configurable reads as NULL, and
+    # silently pinning those to 1 would be a different statement than
+    # making no statement.
+    takes_per_shot: Mapped[int | None] = mapped_column(default=None)
 
     status: Mapped[str] = mapped_column(default="DRAFT")
     failure_code: Mapped[str | None] = mapped_column(default=None)

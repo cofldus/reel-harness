@@ -139,12 +139,29 @@ ALLOWED_SHOT_TRANSITIONS: dict[FableShotStatus, set[FableShotStatus]] = {
         FableShotStatus.SUBMITTED, FableShotStatus.REJECTED,
         FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
     },
-    FableShotStatus.SUBMITTED: {FableShotStatus.GENERATING, FableShotStatus.FAILED},
+    # Every in-flight phase can end in REVIEW_REQUIRED, not just
+    # GENERATING (F3). One rule covers all of them: a shot generating a
+    # BATCH of candidate takes can be interrupted at any phase of any
+    # take, and if earlier takes already produced watchable media, the
+    # right outcome is a human choosing between what exists -- not FAILED,
+    # which would throw away generations the project already paid for.
+    FableShotStatus.SUBMITTED: {
+        FableShotStatus.GENERATING, FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
+    },
     FableShotStatus.GENERATING: {
         FableShotStatus.DOWNLOADING, FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
     },
-    FableShotStatus.DOWNLOADING: {FableShotStatus.VALIDATING, FableShotStatus.FAILED},
-    FableShotStatus.VALIDATING: {FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED},
+    FableShotStatus.DOWNLOADING: {
+        FableShotStatus.VALIDATING, FableShotStatus.REVIEW_REQUIRED, FableShotStatus.FAILED,
+    },
+    # VALIDATING -> SUBMITTED is the NEXT candidate take of the same batch
+    # (F3): a shot asked for N takes walks this cycle N times before any
+    # human sees it. Without this edge the second take would have nowhere
+    # to go, and the per-take phase (which take is downloading right now?)
+    # would have to be collapsed into one opaque GENERATING span.
+    FableShotStatus.VALIDATING: {
+        FableShotStatus.REVIEW_REQUIRED, FableShotStatus.SUBMITTED, FableShotStatus.FAILED,
+    },
     # Take selection resolves the review; rejection re-queues generation.
     FableShotStatus.REVIEW_REQUIRED: {FableShotStatus.SELECTED, FableShotStatus.READY},
     FableShotStatus.SELECTED: set(),
@@ -242,6 +259,12 @@ def apply_shot_transition(shot: FableShotLike, new_status: FableShotStatus, **fi
 # does not request would be a lie about money, so neither side is allowed
 # its own literal.
 DEFAULT_SHOT_RESOLUTION = "360p"
+
+# How many candidate takes one shot may be generated at. Restricted to a
+# small set rather than any positive int because each take is a separate
+# paid generation: "4" is a considered choice, "40" is a typo that would
+# spend forty times the estimate a human approved.
+SUPPORTED_TAKES_PER_SHOT: frozenset[int] = frozenset({1, 2, 4})
 
 
 class ShotSize(StrEnum):

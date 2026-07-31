@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy.exc import SQLAlchemyError
 
 from reel_harness.core.cinematic_state import FableShotStatus
-from reel_harness.db.cinematic_models import FableScene
+from reel_harness.db.cinematic_models import FableScene, StoryProject
 from reel_harness.observability import log_worker_event
 from reel_harness.providers.base import CinematicVideoProvider
 from reel_harness.worker.daemon import EXIT_FATAL, EXIT_INTERRUPTED, EXIT_OK
@@ -24,7 +24,7 @@ from reel_harness.worker.fable_lease import (
     recover_stale_shots,
     release_shot_lease,
 )
-from reel_harness.worker.fable_runner import run_shot
+from reel_harness.worker.fable_runner import run_shot, takes_per_shot_for
 from reel_harness.worker.heartbeat import LeaseHeartbeat
 
 
@@ -42,6 +42,9 @@ class FableDaemonConfig:
     # can only ever run the free tiers -- the safe default for a switch
     # about money.
     allow_paid_generation: bool = False
+    # Settings.fable_takes_per_shot. A project may override it for itself;
+    # this is the operator-wide default the override falls back to.
+    takes_per_shot: int = 1
 
 
 class FableDaemon:
@@ -164,10 +167,12 @@ class FableDaemon:
             started = self._clock()
             scene = session.get(FableScene, shot.scene_id)
             project_id = scene.project_id if scene is not None else None
+            project = session.get(StoryProject, project_id) if project_id else None
             try:
                 run_shot(
                     session, shot, provider, self._storage, lease_token=lease_token,
                     allow_paid_generation=cfg.allow_paid_generation,
+                    takes_per_shot=takes_per_shot_for(project, cfg.takes_per_shot),
                 )
             finally:
                 heartbeat.stop()

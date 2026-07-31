@@ -419,6 +419,7 @@ def cmd_fable_create(args: argparse.Namespace, ctx: AppContext) -> int:
             title=args.title, source_text=source_text, idempotency_key=idempotency_key,
             language=args.language, genre=args.genre, tone=args.tone,
             target_duration_sec=args.duration, aspect_ratio=args.aspect_ratio,
+            takes_per_shot=args.takes_per_shot,
         )
     except InvalidActionError as exc:
         print(str(exc), file=sys.stderr)
@@ -3093,6 +3094,7 @@ def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
         idle_exit_after_seconds=args.idle_exit_after,
         stop_on_error=args.stop_on_error,
         allow_paid_generation=settings.allow_paid_generation,
+        takes_per_shot=settings.fable_takes_per_shot,
     )
     daemon = FableDaemon(
         ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,
@@ -3399,6 +3401,11 @@ def build_parser() -> argparse.ArgumentParser:
     fable_create.add_argument("--tone", default=None)
     fable_create.add_argument("--duration", type=int, default=60, help="Target duration in seconds")
     fable_create.add_argument("--aspect-ratio", default="9:16", choices=("9:16", "16:9"))
+    fable_create.add_argument(
+        "--takes-per-shot", type=int, default=None, choices=(1, 2, 4),
+        help="Candidate takes generated per shot (default: the operator-wide setting). "
+             "Each take is a separate paid generation.",
+    )
     fable_create.add_argument("--idempotency-key", default=None)
     fable_create.set_defaults(func=cmd_fable_create)
 

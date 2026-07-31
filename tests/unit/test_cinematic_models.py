@@ -25,8 +25,8 @@ _FABLE_TABLES = {
 }
 
 
-def test_schema_version_is_11() -> None:
-    assert SCHEMA_VERSION == 11
+def test_schema_version_is_12() -> None:
+    assert SCHEMA_VERSION == 12
 
 
 def test_budget_columns_default_to_no_limit_and_zero_spend() -> None:

@@ -189,6 +189,13 @@ class Settings(BaseSettings):
             "REEL_HARNESS_GOOGLE_LOCATION", "GOOGLE_LOCATION"))
     google_use_vertex: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_USE_VERTEX", "GOOGLE_USE_VERTEX"))
+    # How many candidate takes to generate per shot (1, 2 or 4). Each take
+    # is a separate paid generation, so the default is 1 -- more candidates
+    # is an explicit choice to spend N times as much for something to
+    # choose between. A project may override this for itself.
+    fable_takes_per_shot: int = Field(
+        1, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TAKES_PER_SHOT", "FABLE_TAKES_PER_SHOT"))
 
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
@@ -506,6 +513,16 @@ def _validate_narrative_settings(settings: Settings) -> None:
         )
 
 
+def _validate_takes_per_shot(settings: Settings) -> None:
+    from reel_harness.core.cinematic_state import SUPPORTED_TAKES_PER_SHOT
+
+    if settings.fable_takes_per_shot not in SUPPORTED_TAKES_PER_SHOT:
+        raise ProviderConfigurationError(
+            f"unsupported fable_takes_per_shot {settings.fable_takes_per_shot!r} "
+            f"(supported: {', '.join(str(n) for n in sorted(SUPPORTED_TAKES_PER_SHOT))})"
+        )
+
+
 def _validate_reference_image_settings(settings: Settings) -> None:
     from reel_harness.providers.registry import REFERENCE_IMAGE_PROVIDERS
 
@@ -720,6 +737,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_cinematic_settings(settings)
     _validate_narrative_settings(settings)
     _validate_reference_image_settings(settings)
+    _validate_takes_per_shot(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)
