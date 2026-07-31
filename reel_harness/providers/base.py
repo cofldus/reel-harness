@@ -360,6 +360,78 @@ class CinematicVideoProvider(Protocol):
     ) -> CinematicVideoResult: ...
 
 
+@dataclass(frozen=True)
+class ImageCapabilities:
+    """What one reference-image adapter supports. `watermarked` is
+    recorded rather than hidden: every major provider watermarks
+    generated imagery (Google embeds SynthID and offers no removal), and
+    downstream consumers -- notably video generation using these as
+    character references -- may or may not accept watermarked input. That
+    is a provenance fact worth carrying, not an implementation detail."""
+
+    text_to_image: bool
+    character_reference: bool
+    max_character_references: int
+    supported_resolutions: frozenset[str]
+    supported_aspect_ratios: frozenset[str]
+    watermarked: bool
+
+
+@dataclass
+class ReferenceImageRequest:
+    """One reference-image generation. `character_reference_paths` feeds
+    previously generated images back in so later views stay the same
+    person -- generating each view independently produces four different
+    actors, which is the whole failure mode this exists to prevent."""
+
+    prompt: str
+    aspect_ratio: str
+    resolution: str
+    character_reference_paths: list[Path] = field(default_factory=list)
+    negative_prompt: str | None = None
+    seed: int | None = None
+    correlation_id: str = ""
+
+
+@dataclass
+class ReferenceImageResult:
+    """A generated image already written to local storage -- same shape
+    discipline as TTSResult/CinematicVideoResult: local path, real
+    measured properties, provenance. Never a raw provider response."""
+
+    image_path: Path
+    provider_id: str
+    model_id: str
+    license: str
+    checksum_sha256: str | None = None
+    # Provenance marker embedded by the provider (e.g. "synthid"), or
+    # None when the provider documents no watermark. Recorded so a later
+    # consumer can reason about it instead of discovering it at runtime.
+    watermark: str | None = None
+    seed: int | None = None
+    request_id: str | None = None
+    cost_amount: float | None = None
+    cost_currency: str | None = None
+
+
+class CharacterReferenceProvider(Protocol):
+    """Image generation for virtual-actor and location reference stills
+    (Fable F3). Synchronous by contract -- every image API surveyed
+    returns inline bytes rather than a polled job, unlike video
+    generation. Vendor names live only in adapters and the registry."""
+
+    provider_id: str
+    capabilities: ImageCapabilities
+
+    def validate_request(self, request: ReferenceImageRequest) -> None: ...
+
+    def estimate_cost(self, request: ReferenceImageRequest) -> CinematicCostEstimate: ...
+
+    def generate_reference(
+        self, request: ReferenceImageRequest, dest_dir: Path,
+    ) -> ReferenceImageResult: ...
+
+
 @dataclass
 class AdaptationRequest:
     """One story-adaptation request (Fable F2). `dialogue_ratio` is a

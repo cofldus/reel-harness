@@ -125,6 +125,35 @@ class _UnconfiguredCinematicVideoProvider:
         raise ProviderNotConfiguredError(self._reason)
 
 
+class _UnconfiguredReferenceImageProvider:
+    """Reference-image counterpart of _UnconfiguredLLMProvider: any
+    generation attempt fails with PROVIDER_NOT_CONFIGURED. Capabilities
+    are a maximally-restrictive placeholder so a capability check that
+    runs before any call stays structurally valid without enabling
+    anything."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        from reel_harness.providers.base import ImageCapabilities
+
+        self._reason = reason
+        self.capabilities = ImageCapabilities(
+            text_to_image=False, character_reference=False, max_character_references=0,
+            supported_resolutions=frozenset(), supported_aspect_ratios=frozenset(),
+            watermarked=False,
+        )
+
+    def validate_request(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def estimate_cost(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def generate_reference(self, request, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
 class _UnconfiguredNarrativeDirector:
     """Narrative counterpart of _UnconfiguredLLMProvider: any adaptation
     attempt fails with PROVIDER_NOT_CONFIGURED."""
@@ -514,6 +543,43 @@ def resolve_cinematic_video_provider(name: str, settings: Settings | None = None
         raise NotImplementedError(f"Cinematic video provider '{name}' is not registered yet") from exc
 
 
+def _build_fake_reference_image(settings: Settings | None):
+    from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
+
+    return FakeReferenceImageProvider()
+
+
+# Reference-image generation (Fable F3). The demo tier and the real
+# Google adapter are registered by later commits; every vendor name stays
+# confined to this module.
+REFERENCE_IMAGE_PROVIDERS: dict[str, Callable[[Settings | None], object]] = {
+    "fake": _build_fake_reference_image,
+}
+
+
+def resolve_reference_image_provider(name: str, settings: Settings | None = None):
+    try:
+        return REFERENCE_IMAGE_PROVIDERS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Reference image provider '{name}' is not registered yet") from exc
+
+
+def resolve_reference_image_for_snapshot(snapshot: dict | None, settings: Settings | None):
+    """Snapshot-pinned resolution -- identical fail-loud ladder as every
+    other provider family; never a silent fallback."""
+    if not snapshot or "reference_image_provider" not in snapshot:
+        return resolve_reference_image_provider(
+            normalize_provider_name(settings.reference_image_provider) if settings else "fake",
+            settings,
+        )
+    name = normalize_provider_name(snapshot.get("reference_image_provider"))
+    if name not in REFERENCE_IMAGE_PROVIDERS:
+        return _UnconfiguredReferenceImageProvider(
+            f"project is pinned to reference image provider {name!r}, which is not registered"
+        )
+    return REFERENCE_IMAGE_PROVIDERS[name](settings)
+
+
 def _build_fake_narrative_director(settings: Settings | None):
     from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
 
@@ -565,10 +631,12 @@ def cinematic_provider_snapshot(settings: Settings | None) -> dict:
 
     cinematic = normalize_provider_name(settings.cinematic_provider) if settings else "fake"
     narrative = normalize_provider_name(settings.narrative_provider) if settings else "fake"
+    reference = normalize_provider_name(settings.reference_image_provider) if settings else "fake"
     snapshot = {
         "cinematic_provider": cinematic,
         "narrative_provider": narrative,
         "narrative_prompt_version": NARRATIVE_PROMPT_VERSION,
+        "reference_image_provider": reference,
     }
     if narrative == "openai-compatible" and settings is not None:
         snapshot["narrative_model"] = settings.llm_model

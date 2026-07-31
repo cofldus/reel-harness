@@ -29,6 +29,20 @@ class SchemaValidationError(PipelineError):
     retryable = True
 
 
+class ContentPolicyRefusedError(PipelineError):
+    """A generative provider's safety filter refused the request.
+
+    Deliberately NOT retryable and deliberately not a hard failure: per
+    .claude/rules/architecture.md an uncertain content-policy outcome
+    goes to REVIEW_REQUIRED for a human decision, never an automatic
+    block and never a blind retry of the same prompt (which would just
+    burn quota to reach the same refusal).
+    """
+
+    code = "CONTENT_POLICY_REVIEW"
+    retryable = False
+
+
 class TransientProviderError(PipelineError):
     """Timeout / 429 / 5xx / connection error from an external provider."""
 

@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     narrative_read_timeout_seconds: float = Field(
         120.0, validation_alias=_llm_alias(
             "REEL_HARNESS_NARRATIVE_READ_TIMEOUT", "NARRATIVE_READ_TIMEOUT_SECONDS"))
+    # Reference-image generation (virtual actor / location stills).
+    reference_image_provider: str = Field(
+        "fake", validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_PROVIDER", "REFERENCE_IMAGE_PROVIDER"))
 
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
@@ -465,6 +469,17 @@ def _validate_narrative_settings(settings: Settings) -> None:
         )
 
 
+def _validate_reference_image_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import REFERENCE_IMAGE_PROVIDERS
+
+    name = normalize_provider_name(settings.reference_image_provider)
+    if name not in REFERENCE_IMAGE_PROVIDERS:
+        raise ProviderConfigurationError(
+            f"unknown reference image provider {settings.reference_image_provider!r} "
+            f"(supported: {', '.join(sorted(REFERENCE_IMAGE_PROVIDERS))})"
+        )
+
+
 def _validate_asset_settings(settings: Settings) -> None:
     if settings.asset_orientation not in ASSET_SUPPORTED_ORIENTATIONS:
         raise ProviderConfigurationError(
@@ -646,6 +661,7 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_tts_settings(settings)
     _validate_cinematic_settings(settings)
     _validate_narrative_settings(settings)
+    _validate_reference_image_settings(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)
