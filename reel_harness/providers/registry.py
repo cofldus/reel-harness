@@ -520,11 +520,32 @@ def _build_fake_narrative_director(settings: Settings | None):
     return FakeNarrativeDirector()
 
 
-# Narrative Director (Fable F2). The openai-compatible adapter is
-# registered by the next commit; until then only the fake tier exists and
-# any other name fails loudly rather than resolving to nothing.
+def _build_openai_compatible_director(settings: Settings | None):
+    if settings is None:
+        raise NotImplementedError("the openai-compatible narrative director requires settings")
+    from reel_harness.providers.openai_compatible_director import (
+        OpenAICompatibleNarrativeDirector,
+    )
+
+    return OpenAICompatibleNarrativeDirector(
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        api_key=settings.llm_api_key.get_secret_value(),
+        connect_timeout=settings.llm_connect_timeout_seconds,
+        read_timeout=settings.narrative_read_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+        temperature=settings.llm_temperature,
+        max_output_tokens=settings.narrative_max_output_tokens,
+    )
+
+
+# Narrative Director (Fable F2). "openai-compatible" is a protocol shape,
+# not a vendor -- the concrete vendor is chosen purely by the configured
+# LLM base URL and model, exactly as for script generation.
 NARRATIVE_DIRECTORS: dict[str, Callable[[Settings | None], object]] = {
     "fake": _build_fake_narrative_director,
+    "openai-compatible": _build_openai_compatible_director,
 }
 
 

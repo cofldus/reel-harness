@@ -149,6 +149,16 @@ class Settings(BaseSettings):
     # set of connection settings would be duplication, not isolation.
     narrative_provider: str = Field(
         "fake", validation_alias=_llm_alias("REEL_HARNESS_NARRATIVE_PROVIDER", "NARRATIVE_PROVIDER"))
+    # An adaptation is a much larger generation than a short-form script
+    # (bible + characters + locations + scenes + shots), so it gets its
+    # own output budget and read timeout rather than reusing the script
+    # call's much smaller ones.
+    narrative_max_output_tokens: int = Field(
+        6000, validation_alias=_llm_alias(
+            "REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS", "NARRATIVE_MAX_OUTPUT_TOKENS"))
+    narrative_read_timeout_seconds: float = Field(
+        120.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_NARRATIVE_READ_TIMEOUT", "NARRATIVE_READ_TIMEOUT_SECONDS"))
 
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
