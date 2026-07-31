@@ -360,6 +360,59 @@ class CinematicVideoProvider(Protocol):
     ) -> CinematicVideoResult: ...
 
 
+@dataclass
+class AdaptationRequest:
+    """One story-adaptation request (Fable F2). `dialogue_ratio` is a
+    prompt HINT only, never a validated constraint; the hard limits
+    (max_characters/max_locations, shot counts, adult-only) are enforced
+    downstream by pipeline.adaptation_schema, not trusted from here."""
+
+    source_text: str
+    language: str
+    genre: str | None
+    tone: str | None
+    target_duration_sec: int
+    aspect_ratio: str
+    max_characters: int = 2
+    max_locations: int = 3
+    dialogue_ratio: float = 0.3
+    keep_ending: bool = True
+
+
+@dataclass
+class AdaptationResult:
+    """Raw adaptation text + provenance -- same shape discipline as
+    ScriptResult: schema validation happens downstream in
+    pipeline.adaptation_schema/adaptation_parser, never in the adapter."""
+
+    raw_text: str
+    provider_id: str
+    model_id: str
+    prompt_version: str
+    request_id: str | None = None
+    usage: dict | None = None
+
+
+class NarrativeDirector(Protocol):
+    """Film-adaptation LLM contract (Fable F2). Separate from LLMProvider
+    because the short-form script call's shapes (topic/ChannelContext ->
+    Script) are semantically wrong for adaptation -- see docs/STATUS.md's
+    F2 section. Vendor names live only in adapters and the registry.
+
+    `repair_adaptation` is the bounded repair loop's re-ask: the previous
+    raw output plus the validation errors it produced, asking for a
+    corrected complete JSON. Adapters that cannot meaningfully repair
+    (e.g. the deterministic fake in its happy mode) may simply re-run."""
+
+    provider_id: str
+
+    def adapt_story(self, request: AdaptationRequest) -> AdaptationResult: ...
+
+    def repair_adaptation(
+        self, request: AdaptationRequest, previous_raw: str, errors: list[str],
+    ) -> AdaptationResult: ...
+
+
 class LLMProvider(Protocol):
     provider_id: str
 
