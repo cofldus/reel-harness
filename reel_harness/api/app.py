@@ -611,6 +611,347 @@ def list_publications(
     )
 
 
+# --- Fable cinematic projects (Phase F4) -----------------------------------
+# Every route here calls the SAME FableService methods the CLI already uses;
+# no domain logic lives in this layer. The response models are deliberately
+# explicit rather than serialized ORM objects, so a column added to
+# StoryProject can never leak through the API by accident.
+
+
+class FableProjectResponse(BaseModel):
+    project_id: str
+    title: str
+    status: str
+    aspect_ratio: str
+    takes_per_shot: int | None = None
+    idempotent_replay: bool = False
+    failure_code: str | None = None
+    failure_summary: str | None = None
+
+
+class FableBudgetResponse(BaseModel):
+    limit_amount: float | None
+    currency: str | None
+    spent_amount: float
+    remaining_amount: float | None
+    # Non-zero means `spent_amount` is a LOWER BOUND: some completed
+    # generation reported no price. Surfaced rather than hidden.
+    unpriced_take_count: int
+
+
+class FableCharacterResponse(BaseModel):
+    character_id: str
+    name: str
+    adult_confirmed: bool
+    reference_approved: bool
+    reference_images: dict
+    reference_failure_code: str | None = None
+    reference_failure_summary: str | None = None
+
+
+class FableTakeResponse(BaseModel):
+    take_id: str
+    attempt_number: int
+    status: str
+    selected: bool
+    cost_amount: float | None = None
+    cost_currency: str | None = None
+
+
+class FableShotResponse(BaseModel):
+    shot_id: str
+    shot_order: int
+    status: str
+    action: str | None = None
+    duration_sec: float | None = None
+    failure_code: str | None = None
+    takes: list[FableTakeResponse]
+
+
+class FableCostEstimateResponse(BaseModel):
+    # False means `amount` is NOT a total -- see `detail`.
+    known: bool
+    amount: float | None
+    currency: str | None
+    shot_count: int
+    unpriced_shot_count: int
+    detail: str
+
+
+class CreateFableProjectRequest(BaseModel):
+    title: str
+    source_text: str
+    idempotency_key: str
+    language: str = "ko"
+    genre: str | None = None
+    tone: str | None = None
+    target_duration_sec: int = 60
+    aspect_ratio: str = "9:16"
+    takes_per_shot: int | None = None
+
+
+class SetFableBudgetRequest(BaseModel):
+    # None clears the limit, which re-closes the paid-generation gate and
+    # un-spends nothing.
+    limit_amount: float | None = None
+    currency: str | None = None
+
+
+def _to_fable_project(project, idempotent_replay: bool = False) -> FableProjectResponse:
+    return FableProjectResponse(
+        project_id=project.id, title=project.title, status=project.status,
+        aspect_ratio=project.aspect_ratio, takes_per_shot=project.takes_per_shot,
+        idempotent_replay=idempotent_replay,
+        failure_code=project.failure_code, failure_summary=project.failure_summary,
+    )
+
+
+def _to_fable_character(character) -> FableCharacterResponse:
+    return FableCharacterResponse(
+        character_id=character.id, name=character.name,
+        adult_confirmed=character.adult_confirmed,
+        reference_approved=character.reference_approved,
+        reference_images=character.reference_images or {},
+        reference_failure_code=character.reference_failure_code,
+        reference_failure_summary=character.reference_failure_summary,
+    )
+
+
+def _fable_project_or_404(ctx: AppContext, project_id: str):
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        return ctx.fable.get_project(project_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"fable project not found: {project_id}") from exc
+
+
+@app.post("/v1/fable/projects", status_code=status.HTTP_201_CREATED,
+          dependencies=[Depends(require_api_key)])
+def create_fable_project(
+    request: CreateFableProjectRequest, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    try:
+        project, replay = ctx.fable.create_project(
+            title=request.title, source_text=request.source_text,
+            idempotency_key=request.idempotency_key, language=request.language,
+            genre=request.genre, tone=request.tone,
+            target_duration_sec=request.target_duration_sec,
+            aspect_ratio=request.aspect_ratio, takes_per_shot=request.takes_per_shot,
+        )
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _to_fable_project(project, idempotent_replay=replay)
+
+
+@app.get("/v1/fable/projects", dependencies=[Depends(require_api_key)])
+def list_fable_projects(ctx: AppContext = Depends(get_context)) -> list[FableProjectResponse]:
+    return [_to_fable_project(p) for p in ctx.fable.list_projects()]
+
+
+@app.get("/v1/fable/projects/{project_id}", dependencies=[Depends(require_api_key)])
+def get_fable_project(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    return _to_fable_project(_fable_project_or_404(ctx, project_id))
+
+
+@app.get("/v1/fable/projects/{project_id}/shots", dependencies=[Depends(require_api_key)])
+def get_fable_shots(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> list[FableShotResponse]:
+    _fable_project_or_404(ctx, project_id)
+    return [
+        FableShotResponse(
+            shot_id=shot.id, shot_order=shot.shot_order, status=shot.status,
+            action=shot.action, duration_sec=shot.duration_sec,
+            failure_code=shot.failure_code,
+            takes=[
+                FableTakeResponse(
+                    take_id=take.id, attempt_number=take.attempt_number, status=take.status,
+                    selected=take.selected, cost_amount=take.cost_amount,
+                    cost_currency=take.cost_currency,
+                )
+                for take in ctx.fable.shot_takes(shot.id)
+            ],
+        )
+        for shot in ctx.fable.project_shots(project_id)
+    ]
+
+
+@app.get("/v1/fable/projects/{project_id}/characters", dependencies=[Depends(require_api_key)])
+def get_fable_characters(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> list[FableCharacterResponse]:
+    _fable_project_or_404(ctx, project_id)
+    return [_to_fable_character(c) for c in ctx.fable.project_characters(project_id)]
+
+
+@app.get("/v1/fable/projects/{project_id}/budget", dependencies=[Depends(require_api_key)])
+def get_fable_budget(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableBudgetResponse:
+    _fable_project_or_404(ctx, project_id)
+    budget = ctx.fable.budget_status(project_id)
+    return FableBudgetResponse(
+        limit_amount=budget.limit_amount, currency=budget.currency,
+        spent_amount=budget.spent_amount, remaining_amount=budget.remaining_amount,
+        unpriced_take_count=budget.unpriced_take_count,
+    )
+
+
+@app.put("/v1/fable/projects/{project_id}/budget", dependencies=[Depends(require_api_key)])
+def set_fable_budget(
+    project_id: str, request: SetFableBudgetRequest, ctx: AppContext = Depends(get_context),
+) -> FableBudgetResponse:
+    _fable_project_or_404(ctx, project_id)
+    try:
+        ctx.fable.set_budget(project_id, request.limit_amount, request.currency)
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return get_fable_budget(project_id, ctx)
+
+
+@app.get("/v1/fable/projects/{project_id}/estimate", dependencies=[Depends(require_api_key)])
+def estimate_fable_cost(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableCostEstimateResponse:
+    """Read-only: prices the shot plan, approves nothing, spends nothing."""
+    _fable_project_or_404(ctx, project_id)
+    try:
+        estimate = ctx.fable.estimate_cost(project_id)
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FableCostEstimateResponse(
+        known=estimate.known, amount=estimate.amount, currency=estimate.currency,
+        shot_count=estimate.shot_count, unpriced_shot_count=estimate.unpriced_shot_count,
+        detail=estimate.detail,
+    )
+
+
+def _fable_action(ctx: AppContext, project_id: str, action, *args) -> FableProjectResponse:
+    """Every project-level action shares one error contract: 404 for a
+    project that does not exist, 409 for one the action is not valid on
+    right now, and 502 for a provider that failed underneath."""
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        return _to_fable_project(action(project_id, *args))
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"fable project not found: {project_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineError as exc:
+        raise HTTPException(status_code=502, detail=f"{exc.code}: {exc}") from exc
+
+
+@app.post("/v1/fable/projects/{project_id}/adapt", dependencies=[Depends(require_api_key)])
+def adapt_fable_project(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    return _fable_action(ctx, project_id, ctx.fable.adapt_project)
+
+
+@app.post("/v1/fable/projects/{project_id}/references", dependencies=[Depends(require_api_key)])
+def generate_fable_references(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    """CASTING -> CHARACTER_REVIEW. Spends money on a paid tier, and is
+    gated exactly as the CLI is (the double gate plus the project's
+    budget) -- this route adds no new permission."""
+    return _fable_action(ctx, project_id, ctx.fable.generate_references)
+
+
+@app.post("/v1/fable/characters/{character_id}/approve", dependencies=[Depends(require_api_key)])
+def approve_fable_reference(
+    character_id: str, ctx: AppContext = Depends(get_context),
+) -> FableCharacterResponse:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        return _to_fable_character(ctx.fable.approve_reference(character_id))
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"character not found: {character_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/v1/fable/characters/{character_id}/reject", dependencies=[Depends(require_api_key)])
+def reject_fable_reference(
+    character_id: str, ctx: AppContext = Depends(get_context),
+) -> FableCharacterResponse:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        return _to_fable_character(ctx.fable.reject_reference(character_id))
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"character not found: {character_id}") from exc
+
+
+class ApproveFableGateRequest(BaseModel):
+    # The gate being approved, named explicitly so a client can never
+    # advance a project by accident -- exactly like the CLI's --step.
+    step: str
+
+
+@app.post("/v1/fable/projects/{project_id}/approve", dependencies=[Depends(require_api_key)])
+def approve_fable_gate(
+    project_id: str, request: ApproveFableGateRequest, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    actions = {
+        "story": ctx.fable.approve_story,
+        "characters": ctx.fable.approve_characters,
+        "shots": ctx.fable.approve_shots,
+        "final": ctx.fable.approve_final,
+    }
+    action = actions.get(request.step)
+    if action is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown step {request.step!r} (expected one of: {', '.join(sorted(actions))})",
+        )
+    return _fable_action(ctx, project_id, action)
+
+
+@app.post("/v1/fable/takes/{take_id}/select", dependencies=[Depends(require_api_key)])
+def select_fable_take(take_id: str, ctx: AppContext = Depends(get_context)) -> dict:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        shot = ctx.fable.select_take(take_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"take not found: {take_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"shot_id": shot.id, "status": shot.status}
+
+
+@app.post("/v1/fable/projects/{project_id}/render", dependencies=[Depends(require_api_key)])
+def render_fable_final(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        ctx.fable.render_final(project_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"fable project not found: {project_id}") from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PipelineError as exc:
+        raise HTTPException(status_code=502, detail=f"{exc.code}: {exc}") from exc
+    return _to_fable_project(ctx.fable.get_project(project_id))
+
+
+@app.post("/v1/fable/projects/{project_id}/cancel", dependencies=[Depends(require_api_key)])
+def cancel_fable_project(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> FableProjectResponse:
+    return _fable_action(ctx, project_id, ctx.fable.cancel_project)
+
+
 # --- Web UI (reel_harness.web) ---------------------------------------------
 # Mounted here (not inside reel_harness.web itself) so this module stays the
 # single place that ever constructs FastAPI() -- ops.supervisor.Supervisor

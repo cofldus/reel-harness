@@ -1157,6 +1157,42 @@ Lowering a limit below what a project has already spent is refused;
 clearing a limit (`--clear`) is always allowed, re-closes the paid gate,
 and un-spends nothing.
 
+### The `/v1/fable/*` API
+
+Every CLI action above has an HTTP equivalent, bearer-token authenticated
+like the rest of `/v1/*`. The routes add **no domain logic and no new
+permission**: each one calls the same `FableService` method the CLI does,
+so every gate that refuses the CLI refuses the API identically.
+
+```
+POST   /v1/fable/projects                      create
+GET    /v1/fable/projects                      list
+GET    /v1/fable/projects/{id}                 status
+GET    /v1/fable/projects/{id}/shots           shots + their takes
+GET    /v1/fable/projects/{id}/characters      cast + reference sheet state
+GET    /v1/fable/projects/{id}/budget          spend position
+PUT    /v1/fable/projects/{id}/budget          set/clear the limit
+GET    /v1/fable/projects/{id}/estimate        price the plan (read-only)
+POST   /v1/fable/projects/{id}/adapt           DRAFT -> STORY_REVIEW
+POST   /v1/fable/projects/{id}/references      CASTING -> CHARACTER_REVIEW
+POST   /v1/fable/characters/{id}/approve       approve one sheet
+POST   /v1/fable/characters/{id}/reject        reject one sheet
+POST   /v1/fable/projects/{id}/approve         {"step": story|characters|shots|final}
+POST   /v1/fable/takes/{id}/select             select one take for its shot
+POST   /v1/fable/projects/{id}/render          cut the final film
+POST   /v1/fable/projects/{id}/cancel          cancel
+```
+
+One uniform error contract: **404** for something that does not exist,
+**409** for an action that is not valid on this project right now (a
+review gate not reached, an unapproved reference sheet, a budget
+exhausted), **422** for a malformed request, **502** for a provider that
+failed underneath.
+
+Response models are explicit rather than serialized ORM rows, so a column
+added to `StoryProject` can never leak through the API by accident — the
+source text and local filesystem paths are never returned.
+
 ### Choosing the Narrative Director
 
 `REEL_HARNESS_NARRATIVE_PROVIDER`:
