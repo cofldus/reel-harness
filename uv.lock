@@ -4123,7 +4123,7 @@ wheels = [
 
 [[package]]
 name = "reel-harness"
-version = "0.4.0rc1"
+version = "0.5.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

@@ -1002,6 +1002,78 @@ cast means approving the actor you actually looked at.
   is not affording it), and each character's sheet is a line item in the
   spend audit.
 
+### Choosing the cinematic video provider
+
+`REEL_HARNESS_CINEMATIC_PROVIDER`:
+
+- **`fake`** (default) — deterministic, renders real mp4s via local
+  ffmpeg, no network. Stamped `FAKE_TEST_LICENSE`.
+- **`google`** — Vertex AI Veo (`veo-3.1-fast-generate-001`). Needs the
+  optional `google` extra and a credential; shares both with the
+  reference-image adapter.
+
+```
+REEL_HARNESS_CINEMATIC_PROVIDER=google
+REEL_HARNESS_GOOGLE_USE_VERTEX=true
+REEL_HARNESS_GOOGLE_PROJECT=my-project
+REEL_HARNESS_GOOGLE_LOCATION=us-central1     # the ONLY supported region
+```
+
+Three documented constraints are enforced locally, before any request is
+sent, because each one costs a generation to learn the hard way:
+
+- **Reference-driven runs are fixed at 8s / 720p.** Not a preference —
+  attaching character references makes the API fix both, so asking for
+  anything else silently returns something different. Requesting a
+  mismatch is refused here instead.
+- **At most 3 reference images**, sent as type `asset` (which transfers
+  identity; `style` would transfer look).
+- **`person_generation=allow_adult`**, stated at the API boundary as well
+  as in every prompt.
+
+`us-central1` is the only region the GA endpoint serves, so a project
+pinned elsewhere fails at **startup** with the right region named — not
+at generation time, after you believed it was configured.
+
+**Generated videos are deleted after two days.** The adapter downloads
+bytes immediately; the local file under `fable_projects/` is the
+artifact, and no provider URI is ever treated as durable storage.
+
+A safety-filtered result surfaces as `moderated`, which routes the shot
+to `REVIEW_REQUIRED` — never a blind retry, since the same prompt would
+be filtered again. **Cancellation is local-only**: the SDK exposes no
+cancel for a video operation, so `cancel_generation` forgets the handle
+and does not claim to have stopped a generation you will still be billed
+for.
+
+### Film assembly: transitions, fades and audio
+
+The final render defaults to **hard cuts**, assembled with a lossless
+stream copy. Anything that blends pixels needs a full re-encode, so it is
+opt-in rather than on by default:
+
+```
+REEL_HARNESS_FABLE_TRANSITION=dissolve        # cut | dissolve | fade_black
+REEL_HARNESS_FABLE_TRANSITION_SECONDS=0.5
+REEL_HARNESS_FABLE_FADE_IN_SECONDS=0.5
+REEL_HARNESS_FABLE_FADE_OUT_SECONDS=1.0
+REEL_HARNESS_FABLE_MUTE_AUDIO=false
+```
+
+Points worth knowing:
+
+- **A transition overlaps the two shots it joins**, so each one makes the
+  film *shorter*. Four 8s shots with 0.5s dissolves run 30.5s, not 32s.
+- Audio crossfades alongside the video, so sound does not jump ahead of
+  picture. Veo generates native audio; muting is an explicit editorial
+  choice, never a silent side effect of assembly.
+- A plan that cannot work — a transition longer than the shortest clip,
+  fades longer than the film — is refused at **startup**, and again
+  before ffmpeg runs. Discovering it at the final render would waste an
+  entire paid generation run.
+- `REEL_HARNESS_FABLE_RENDER_TIMEOUT_SECONDS` (default 1800) exists
+  because re-encoding a film takes far longer than copying one.
+
 ### Choosing the reference-image provider
 
 `REEL_HARNESS_REFERENCE_IMAGE_PROVIDER`:

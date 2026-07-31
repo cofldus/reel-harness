@@ -4,6 +4,71 @@ All notable user-facing changes to Reel Harness are documented here. This
 file summarizes features by release, not every commit — see `git log` and
 `docs/STATUS.md` for the full phase-by-phase implementation history.
 
+## [0.5.0rc1] — 2026-08-01 — Fable cinematic engine (first release candidate)
+
+A second pipeline alongside the short-form job flow: a story is adapted
+into a shot plan, a cast is given approved reference sheets, each shot is
+generated as a video clip, you pick takes, and the selected takes are cut
+into a film. It has its own domain, storage root, worker lane, CLI, API
+and web screens, and shares only the substrate.
+
+### Added
+
+- **Story → film pipeline** (`fable-*` CLI, `/v1/fable/*`, `/fable`):
+  create a project from a story, adapt it into scenes and shots, walk
+  five explicit review gates, generate through a dedicated worker lane,
+  select takes, and render a final film. **Nothing advances without an
+  explicit approval**, and `--step shots` is the single entry into the
+  only phase that can cost money.
+- **Real Narrative Director**: strict schema (adult-only characters, one
+  filmable action and one camera movement per shot), whole-document
+  validation including a source-fidelity check that rejects fabricated
+  quotes, and a bounded repair loop that returns the exact errors to the
+  model. Live-verified against a real LLM.
+- **Character reference sheets**: four views per character, with the face
+  generated first and every other view generated *from* it. Generating
+  them independently yields four different people, which is the failure
+  this exists to prevent. Each sheet is approved individually before the
+  cast gate opens.
+- **Cost tracking and budgets**: a per-project spending limit, spend
+  accumulated only from provider-reported costs (never estimates),
+  per-character and per-take line items the running total can be audited
+  against, and honest `unknown` when a provider publishes no price. A
+  **double gate** — a global switch AND a per-project limit, neither
+  implying the other — guards every paid generation. Running out of
+  budget routes a shot to review, never to failure, and never after being
+  charged.
+- **Multiple candidate takes per shot** (1, 2 or 4), each with a distinct
+  seed and its own budget check. Rejected takes are retained on
+  selection.
+- **Providers**: `fake` and `demo` tiers that run the entire pipeline
+  offline with no credential, plus real adapters for Google image
+  generation and Vertex AI Veo behind the optional `google` extra.
+- **Film assembly** beyond hard cuts: cross-dissolves, fades, and an
+  audio crossfade matched to the video. Hard cuts remain the default
+  because they need no re-encode.
+- **`fable-reference-smoke`**: one real reference-image chain against the
+  configured provider, refusing to spend without explicit confirmation,
+  and reporting what it does *and does not* prove.
+
+### Known limitations
+
+- **The Veo video adapter and the Google image adapter have never been
+  run against their live APIs.** No GCP credentials exist on the machine
+  this release was built on. Both are covered by contract tests against
+  injected fake clients, which prove protocol conformance only. Treat
+  both as preview.
+- **Whether Veo accepts SynthID-watermarked images as character-reference
+  input is unresolved**, and no documentation answers it. Google
+  watermarks every generated image with no removal option, so if Veo
+  rejects them the reference-chaining strategy needs rethinking. Run
+  `fable-reference-smoke` and a single reference-driven generation before
+  relying on it.
+- Whether a real model actually keeps a face consistent across the four
+  reference views is not something any automated check here judges. The
+  chaining is verified as wired correctly; the *result* needs human eyes.
+- Live platform publishing remains unverified (unchanged since 0.1.0).
+
 ## [0.4.0rc1] — 2026-07-31 — Publishing Web UI (first release candidate)
 
 ### Added
