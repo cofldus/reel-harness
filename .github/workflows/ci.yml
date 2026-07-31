@@ -57,8 +57,12 @@ jobs:
       - name: Verify the lockfile matches pyproject.toml
         run: uv lock --check
 
+      # --extra postgres: the driver only (psycopg) -- no PostgreSQL server in
+      # this job; it lets the engine-construction unit tests run instead of
+      # skipping (create_engine eagerly imports the DBAPI module). The real
+      # server-backed tests live in the postgres-parity job below.
       - name: Install dependencies
-        run: uv sync --extra dev --extra demo
+        run: uv sync --extra dev --extra demo --extra postgres
 
       - name: Import check
         run: uv run python -c "import reel_harness; import reel_harness.api.app; import reel_harness.cli.main"

@@ -6,10 +6,20 @@ never connects until first use), so these tests inspect the constructed
 Engine's dialect/pool configuration only."""
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from reel_harness.config import ProviderConfigurationError, Settings, validate_provider_settings
 from reel_harness.db.schema import create_engine_from_url
+
+# create_engine() eagerly imports the DBAPI module even though it never
+# connects -- so any test that CONSTRUCTS a postgresql engine needs the
+# optional `postgres` extra installed. URL validation/dispatch tests don't.
+PSYCOPG_INSTALLED = importlib.util.find_spec("psycopg") is not None
+requires_psycopg = pytest.mark.skipif(
+    not PSYCOPG_INSTALLED, reason="requires the optional `postgres` extra (psycopg)",
+)
 
 
 def _settings(**overrides) -> Settings:
@@ -24,6 +34,7 @@ def test_sqlite_engine_unchanged(tmp_path) -> None:
     engine.dispose()
 
 
+@requires_psycopg
 def test_postgresql_engine_gets_pre_ping_and_pool_settings() -> None:
     engine = create_engine_from_url(
         "postgresql+psycopg://user:pass@localhost:5432/reel_harness",
@@ -35,6 +46,7 @@ def test_postgresql_engine_gets_pre_ping_and_pool_settings() -> None:
     engine.dispose()
 
 
+@requires_psycopg
 def test_postgresql_engine_statement_timeout_sets_connect_option() -> None:
     engine = create_engine_from_url(
         "postgresql+psycopg://user:pass@localhost:5432/reel_harness",
