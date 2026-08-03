@@ -9,7 +9,7 @@
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <header class="site-header">
-    <a class="brand" href="/">Reel Harness</a>
+    {% block brand %}<a class="brand" href="/">Reel Harness</a>{% endblock %}
     <nav aria-label="주요 메뉴">
       <a href="/jobs/new">새 영상 만들기</a>
       <a href="/jobs">작업 목록</a>

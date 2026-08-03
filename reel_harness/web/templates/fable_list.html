@@ -1,13 +1,9 @@
 {% extends "base.html" %}
-{% block title %}시네마틱 프로젝트 - Reel Harness</div>{# /fable #}
-{% endblock %}
+{% block title %}Fable{% endblock %}
+{% block brand %}<a class="brand brand-fable" href="/fable">Fable</a>{% endblock %}
 {% block content %}
 <div class="fable">
 
-<div class="fable-brand">
-  <span class="fable-wordmark">Fable</span>
-  <span class="fable-tagline">이야기를 영화로</span>
-</div>
 
 <h1>시네마틱 프로젝트</h1>
 <p class="meta">원작 이야기를 각색해 여러 샷으로 나눠 생성하고, 테이크를 골라 한 편으로 잇습니다.</p>
@@ -36,4 +32,5 @@
 {% else %}
 <p class="empty-state">아직 프로젝트가 없습니다.</p>
 {% endif %}
+</div>{# /fable #}
 {% endblock %}
