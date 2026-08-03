@@ -132,13 +132,21 @@ class FakeCinematicVideoProvider:
         dest_dir.mkdir(parents=True, exist_ok=True)
         seed_bytes = hashlib.sha256(handle.provider_job_reference.encode()).digest()
         color = (seed_bytes[0], seed_bytes[1], seed_bytes[2])
-        still_path = dest_dir / f".fake-cine-{handle.provider_job_reference}.png"
-        still_path.write_bytes(make_minimal_png(64, 64, color))
 
         if request.aspect_ratio == "16:9":
             width, height = 640, 360
         else:
             width, height = 360, 640
+
+        # The still is generated AT the target aspect ratio, not as a
+        # square. render_scene_clip fits-and-pads, so a square source
+        # became a centred colour block with black bars baked into the
+        # file -- and a bar burned into the pixels is not something a
+        # thumbnail can crop away later. Matching the ratio makes the pad
+        # a no-op, so a fake take looks like what a real one looks like:
+        # full bleed. Small on purpose; ffmpeg scales it up.
+        still_path = dest_dir / f".fake-cine-{handle.provider_job_reference}.png"
+        still_path.write_bytes(make_minimal_png(width // 8, height // 8, color))
         video_path = dest_dir / f"take-{handle.provider_job_reference}.mp4"
         silent_wav = dest_dir / f".fake-cine-{handle.provider_job_reference}.wav"
         _write_silent_wav(silent_wav, request.duration_sec)
