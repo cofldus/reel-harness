@@ -27,14 +27,32 @@ from reel_harness.core.errors import (
 )
 from reel_harness.core.fable_service import FableService
 from reel_harness.db.cinematic_models import FableShot, StoryProject
-from reel_harness.providers.base import CinematicCostEstimate
+from reel_harness.providers.base import CinematicCapabilities, CinematicCostEstimate
 from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
 from reel_harness.storage.local import LocalFilesystemStorage
+
+# Pricing negotiates against capabilities (pipeline.generation_plan), so a
+# stub provider needs them -- the CinematicVideoProvider Protocol has
+# always required `capabilities`, and a double without them was simply
+# under-specified. Permissive on purpose: these tests are about the
+# arithmetic, not about parameter negotiation, which has its own suite.
+_ANY_CAPABILITIES = CinematicCapabilities(
+    text_to_video=True, image_to_video=True, first_frame=True, last_frame=False,
+    character_reference=False, multiple_references=False, max_character_references=0,
+    video_reference=False, native_audio=False, lip_sync=False, supports_seed=True,
+    supports_negative_prompt=True,
+    supported_durations_sec=frozenset({2.0, 4.0, 6.0, 8.0}),
+    supported_aspect_ratios=frozenset({"9:16", "16:9"}),
+    supported_resolutions=frozenset({"360p"}),
+    max_concurrent_jobs=None,
+)
 
 
 class _PricedProvider:
     """A provider whose pricing the test dictates outright -- the point is
     the arithmetic and the honesty rules around it, not any real tariff."""
+
+    capabilities = _ANY_CAPABILITIES
 
     def __init__(self, amount, currency="TEST", known=True, provider_id="paid-test") -> None:
         self.provider_id = provider_id
@@ -49,6 +67,8 @@ class _PricedProvider:
 class _PerShotProvider:
     """Prices each successive call differently, for the mixed-currency and
     partially-unknown cases."""
+
+    capabilities = _ANY_CAPABILITIES
 
     def __init__(self, estimates, provider_id="paid-test") -> None:
         self.provider_id = provider_id

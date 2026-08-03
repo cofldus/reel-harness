@@ -246,6 +246,11 @@ class CinematicCapabilities:
     last_frame: bool
     character_reference: bool
     multiple_references: bool
+    # How many character references one generation accepts. Separate from
+    # `multiple_references` because "supports more than one" and "supports
+    # exactly three" are different facts, and the caller capping a
+    # four-view reference sheet needs the number, not the boolean.
+    max_character_references: int
     video_reference: bool
     native_audio: bool
     lip_sync: bool

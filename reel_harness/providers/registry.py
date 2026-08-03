@@ -99,7 +99,8 @@ class _UnconfiguredCinematicVideoProvider:
         self._reason = reason
         self.capabilities = CinematicCapabilities(
             text_to_video=False, image_to_video=False, first_frame=False, last_frame=False,
-            character_reference=False, multiple_references=False, video_reference=False,
+            character_reference=False, multiple_references=False,
+            max_character_references=0, video_reference=False,
             native_audio=False, lip_sync=False, supports_seed=False,
             supports_negative_prompt=False, supported_durations_sec=frozenset(),
             supported_aspect_ratios=frozenset(), supported_resolutions=frozenset(),

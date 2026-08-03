@@ -59,6 +59,11 @@ from reel_harness.db.cinematic_models import (
     StoryProject,
 )
 from reel_harness.observability import log_worker_event
+from reel_harness.pipeline.generation_plan import (
+    GenerationPlanConflict,
+    resolve_parameters,
+    select_reference_images,
+)
 from reel_harness.pipeline.shot_prompt import compile_shot_prompt, prompt_fingerprint
 from reel_harness.providers.base import CinematicGenerationRequest, CinematicVideoProvider
 from reel_harness.storage.base import StorageBackend
@@ -76,6 +81,17 @@ def _fenced_commit(session, shot: FableShot, lease_token: str | None) -> bool:
         return False
     session.commit()
     return True
+
+
+def subject_character(session, shot: FableShot, project: StoryProject):
+    """The character this shot is OF. Its approved reference sheet is what
+    keeps one virtual actor recognizable across separately generated
+    clips -- the entire reason casting exists."""
+    return session.execute(
+        select(FableCharacter).where(
+            FableCharacter.project_id == project.id, FableCharacter.name == shot.subject,
+        )
+    ).scalars().first()
 
 
 def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project: StoryProject) -> str:
@@ -101,11 +117,19 @@ def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project
     )
 
 
-def _shot_price(provider: CinematicVideoProvider, shot: FableShot, project: StoryProject):
-    """This shot's estimated price, as (amount, currency). An estimate the
-    provider marks unknown yields (None, None), which assert_within_budget
-    refuses under a live budget rather than treating as free."""
-    estimate = provider.estimate_cost(estimate_request_for_shot(shot, project))
+def _shot_price(
+    provider: CinematicVideoProvider, shot: FableShot, project: StoryProject,
+    duration_sec: float | None = None,
+):
+    """This shot's estimated price, as (amount, currency). Priced at the
+    duration that will ACTUALLY be requested -- a provider billing per
+    second and generating 8s for a 3s plan would otherwise be budgeted at
+    a third of the real charge. An estimate the provider marks unknown
+    yields (None, None), which assert_within_budget refuses under a live
+    budget rather than treating as free."""
+    estimate = provider.estimate_cost(
+        estimate_request_for_shot(shot, project, duration_sec=duration_sec)
+    )
     if not estimate.known:
         return None, None
     return estimate.amount, estimate.currency
@@ -230,16 +254,39 @@ def _run_one_take(
     already committed either way; the SHOT's final status is the
     caller's decision, because it depends on what the other takes in the
     batch did."""
-    request = CinematicGenerationRequest(
-        prompt=prompt,
-        duration_sec=shot.duration_sec or 2.0,
-        aspect_ratio=project.aspect_ratio,
-        resolution=DEFAULT_SHOT_RESOLUTION,
-        seed=_seed_for_attempt(fingerprint, attempt_number),
-        correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
-    )
-
     try:
+        # Order matters. Asking the provider to quote the PLANNED shot
+        # comes first because an unconfigured provider raises here, and
+        # "not configured" is the truer reason than any conclusion drawn
+        # from its deliberately-empty placeholder capabilities -- reading
+        # those first would misreport a broken configuration as a plan
+        # conflict a human is expected to resolve.
+        _shot_price(provider, shot, project)
+
+        # What the PROVIDER can actually generate, not what the fake
+        # tier's constants assume. Before this the worker hardcoded 360p
+        # and passed the planned duration straight through, so every
+        # real-provider shot failed validate_request before a frame
+        # existed.
+        try:
+            parameters = resolve_parameters(
+                provider.capabilities, shot.duration_sec or 2.0, DEFAULT_SHOT_RESOLUTION,
+            )
+        except GenerationPlanConflict as exc:
+            return "refused", ("GENERATION_PLAN_CONFLICT", str(exc)[:500])
+
+        character = subject_character(session, shot, project)
+        references = select_reference_images(character, provider.capabilities)
+        request = CinematicGenerationRequest(
+            prompt=prompt,
+            duration_sec=parameters.duration_sec,
+            aspect_ratio=project.aspect_ratio,
+            resolution=parameters.resolution,
+            reference_image_paths=references,
+            seed=_seed_for_attempt(fingerprint, attempt_number),
+            correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
+        )
+
         # The cost gates run before validate_request, so a project that
         # must not spend money never reaches a provider call at all. They
         # run per TAKE, not per shot: each candidate is its own paid
@@ -254,7 +301,9 @@ def _run_one_take(
         # FAILURE, not a budget refusal.
         try:
             assert_paid_generation_allowed(project, provider.provider_id, allow_paid_generation)
-            assert_within_budget(project, *_shot_price(provider, shot, project))
+            assert_within_budget(
+                project, *_shot_price(provider, shot, project, parameters.duration_sec),
+            )
         except (
             PaidGenerationNotAllowedError, BudgetExceededError, BudgetCurrencyMismatchError,
         ) as exc:
@@ -271,6 +320,13 @@ def _run_one_take(
             provider_job_reference=handle.provider_job_reference,
             prompt_fingerprint=fingerprint, status="SUBMITTED",
             generation_seed=request.seed,
+            # WHICH reference sheet this take was generated from. Without
+            # it a take generated before a character was re-cast is
+            # indistinguishable from one generated after, and the column
+            # existed unpopulated until this was wired up.
+            reference_fingerprint=(
+                character.reference_fingerprint if references and character else None
+            ),
         )
         session.add(take)
         apply_shot_transition(shot, FableShotStatus.GENERATING)

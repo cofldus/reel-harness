@@ -55,6 +55,11 @@ from reel_harness.providers.base import (
     CinematicVideoResult,
 )
 
+# The API's own hard limits when reference images are attached.
+MAX_REFERENCE_IMAGES = 3
+REFERENCE_DURATION_SEC = 8.0
+REFERENCE_RESOLUTION = "720p"
+
 # What the chosen model actually supports, per the July 2026 research.
 # `supported_durations_sec` is the reference-driven case: attaching
 # character references fixes the clip at 8 seconds, and this provider
@@ -66,6 +71,7 @@ _VEO_CAPABILITIES = CinematicCapabilities(
     last_frame=True,
     character_reference=True,
     multiple_references=True,
+    max_character_references=MAX_REFERENCE_IMAGES,
     video_reference=False,
     native_audio=True,
     lip_sync=False,
@@ -76,11 +82,6 @@ _VEO_CAPABILITIES = CinematicCapabilities(
     supported_resolutions=frozenset({"720p"}),
     max_concurrent_jobs=None,
 )
-
-# The API's own hard limits when reference images are attached.
-MAX_REFERENCE_IMAGES = 3
-REFERENCE_DURATION_SEC = 8.0
-REFERENCE_RESOLUTION = "720p"
 
 # The only region the GA endpoint serves (docs/STATUS.md's research).
 # Enforced rather than defaulted: a project pinned to another region
