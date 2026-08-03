@@ -3129,6 +3129,51 @@ def _run_instagram_test_upload(ctx: AppContext, access_token: str, account_info)
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def cmd_fable_adapt_eval(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Measure adaptation quality across repeated runs.
+
+    Opt-in and never part of a test suite: each run is a real, paid LLM
+    call. The command states the call count up front and refuses to spend
+    anything without --yes, because "I did not realise it would charge"
+    is not a failure mode worth designing in.
+
+    Pointing it at the fake provider costs nothing and is the right way
+    to check the report itself before spending on the real one.
+    """
+    from reel_harness.ops.adapt_eval import SAMPLE_STORIES, evaluate, format_report
+
+    if args.story:
+        path = Path(args.story)
+        if not path.is_file():
+            print(f"story file not found: {path}", file=sys.stderr)
+            return 2
+        stories = {path.stem: path.read_text(encoding="utf-8")}
+    else:
+        stories = SAMPLE_STORIES
+
+    director = ctx.narrative_director_for_project(None)
+    provider = getattr(director, "provider_id", "?")
+    model = getattr(director, "model_id", "?")
+    calls = len(stories) * args.runs
+
+    print(f"provider={provider} model={model}")
+    print(f"{calls} adaptation call(s): {len(stories)} story/stories x {args.runs} run(s)")
+    if provider != "fake":
+        print("each call is billed by the provider, and a repair adds another")
+        if not args.yes:
+            print("refusing to spend without --yes", file=sys.stderr)
+            return 2
+    print()
+
+    results = evaluate(
+        director, stories, runs=args.runs, target_duration_sec=args.duration,
+    )
+    print(format_report(results, show_plans=args.show_plans))
+    # A sweep where nothing adapted at all is a failure; individual bad
+    # plans are findings to read, not a non-zero exit.
+    return 0 if any(r.metrics is not None for r in results) else 1
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
@@ -3810,6 +3855,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume point; default picks the least-wasteful safe point automatically",
     )
     publication_retry.set_defaults(func=cmd_publication_retry)
+
+    fable_adapt_eval = sub.add_parser(
+        "fable-adapt-eval",
+        help="Measure adaptation quality across repeated runs (real LLM calls)",
+    )
+    fable_adapt_eval.add_argument("--runs", type=int, default=3, help="runs per story (default 3)")
+    fable_adapt_eval.add_argument(
+        "--duration", type=int, default=32, help="target runtime in seconds (default 32)",
+    )
+    fable_adapt_eval.add_argument("--story", help="path to a .txt source instead of the samples")
+    fable_adapt_eval.add_argument(
+        "--show-plans", action="store_true", dest="show_plans",
+        help="print each shot plan, not just its metrics",
+    )
+    fable_adapt_eval.add_argument(
+        "--yes", action="store_true", help="confirm the paid calls (required for a real provider)",
+    )
+    fable_adapt_eval.set_defaults(func=cmd_fable_adapt_eval)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",
