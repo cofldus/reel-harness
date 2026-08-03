@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from reel_harness.config import Settings, load_settings, validate_provider_settings
+from reel_harness.config import (
+    Settings,
+    edit_plan_from_settings,
+    load_settings,
+    validate_provider_settings,
+)
 from reel_harness.core.publish_service import PublicationService
 from reel_harness.core.service import JobService
 from reel_harness.db.schema import create_engine_from_url, init_db, make_session_factory
@@ -36,6 +41,10 @@ class AppContext:
         init_db(self.engine)
         self.session_factory = make_session_factory(self.engine)
         self.storage = LocalFilesystemStorage(self.settings.jobs_dir)
+        # Fable cinematic projects: a SECOND storage instance with its own
+        # root -- same backend class, same UUID/path-traversal enforcement,
+        # different directory tree (fable_projects/{project_id}/...).
+        self.fable_storage = LocalFilesystemStorage(self.settings.fable_projects_dir)
         from reel_harness.providers.registry import provider_snapshot
 
         self.jobs = JobService(
@@ -43,6 +52,20 @@ class AppContext:
             provider_snapshot=provider_snapshot(self.settings),
         )
         self.publications = PublicationService(self.session_factory, self.storage)
+        from reel_harness.core.fable_service import FableService
+        from reel_harness.providers.registry import cinematic_provider_snapshot
+
+        self.fable = FableService(
+            self.session_factory, storage=self.fable_storage,
+            provider_snapshot=cinematic_provider_snapshot(self.settings),
+            narrative_director_resolver=self.narrative_director_for_project,
+            cinematic_provider_resolver=self.cinematic_provider_for_project,
+            allow_paid_generation=self.settings.allow_paid_generation,
+            reference_provider_resolver=self.reference_provider_for_project,
+            takes_per_shot=self.settings.fable_takes_per_shot,
+            edit_plan=edit_plan_from_settings(self.settings),
+            render_timeout_seconds=self.settings.fable_render_timeout_seconds,
+        )
         self._secret_store = None
 
     def config_fingerprint(self) -> dict:
@@ -124,6 +147,54 @@ class AppContext:
             publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()),
             journal=self.publish_journal(),
         )
+
+    def narrative_director_for_project(self, project):
+        """The Narrative Director for one project, honoring its
+        creation-time snapshot -- an unsatisfiable snapshot yields a
+        director that fails with PROVIDER_NOT_CONFIGURED, never a silent
+        switch to a different model or endpoint."""
+        from reel_harness.providers.registry import resolve_narrative_director_for_snapshot
+
+        snapshot = getattr(project, "provider_config", None) if project is not None else None
+        return resolve_narrative_director_for_snapshot(snapshot, self.settings)
+
+    def cinematic_provider_for_shot(self, shot):
+        """The cinematic provider for one leased Fable shot, honoring the
+        project's creation-time snapshot -- mirrors providers_for_job's
+        pinning discipline. An unsatisfiable snapshot yields a provider
+        that fails the shot with PROVIDER_NOT_CONFIGURED, never a silent
+        switch."""
+        from reel_harness.db.cinematic_models import FableScene, StoryProject
+        from reel_harness.providers.registry import resolve_cinematic_video_for_snapshot
+
+        snapshot = None
+        with self.session_factory() as session:
+            scene = session.get(FableScene, shot.scene_id)
+            if scene is not None:
+                project = session.get(StoryProject, scene.project_id)
+                if project is not None:
+                    snapshot = project.provider_config
+        return resolve_cinematic_video_for_snapshot(snapshot, self.settings)
+
+    def cinematic_provider_for_project(self, project):
+        """Same snapshot-pinned resolution as cinematic_provider_for_shot,
+        entered from the project rather than a shot -- used for pricing
+        (cost estimate, approval gate), where there is no leased shot yet.
+        Both go through resolve_cinematic_video_for_snapshot, so a project
+        is never priced with a provider its shots would not run on."""
+        from reel_harness.providers.registry import resolve_cinematic_video_for_snapshot
+
+        snapshot = getattr(project, "provider_config", None) if project is not None else None
+        return resolve_cinematic_video_for_snapshot(snapshot, self.settings)
+
+    def reference_provider_for_project(self, project):
+        """The reference-image provider a project's casting must use,
+        honoring its creation-time snapshot -- same fail-loud ladder as
+        every other family, no silent fallback."""
+        from reel_harness.providers.registry import resolve_reference_image_for_snapshot
+
+        snapshot = getattr(project, "provider_config", None) if project is not None else None
+        return resolve_reference_image_for_snapshot(snapshot, self.settings)
 
     def channel_niche_for_job(self, job) -> str | None:
         if job is None:

@@ -21,7 +21,7 @@ FakeMode = Literal["ok", "empty", "timeout"]
 # infrequent for the typical 3-10 scene range (script_schema.MIN/MAX_SCENES)
 # even though the selection below is hash-based, not collision-free by
 # construction.
-_PALETTE: tuple[tuple[int, int, int], ...] = (
+DEMO_PALETTE: tuple[tuple[int, int, int], ...] = (
     (230, 57, 70), (69, 123, 157), (42, 157, 143), (233, 196, 106),
     (155, 93, 229), (244, 162, 97), (38, 70, 83), (231, 111, 81),
     (6, 214, 160), (17, 138, 178), (239, 71, 111), (255, 209, 102),
@@ -88,8 +88,8 @@ class DemoStockMediaProvider:
     def download(self, candidate: MediaCandidate, dest_dir: Path) -> LocalAssetResult:
         dest_dir.mkdir(parents=True, exist_ok=True)
         local_path = dest_dir / f"{candidate.candidate_id}.png"
-        palette_index = int(hashlib.sha256(candidate.candidate_id.encode()).hexdigest(), 16) % len(_PALETTE)
-        data = make_minimal_png(64, 64, _PALETTE[palette_index])
+        palette_index = int(hashlib.sha256(candidate.candidate_id.encode()).hexdigest(), 16) % len(DEMO_PALETTE)
+        data = make_minimal_png(64, 64, DEMO_PALETTE[palette_index])
         local_path.write_bytes(data)
         return LocalAssetResult(
             local_path=local_path,

@@ -1,126 +1,1644 @@
+/* =====================================================================
+   FABLE — Cinematic Story-to-Video Studio
+   Application stylesheet
+
+   What this replaces, and why:
+
+   The app read as a data-review console. Every section was a card of the
+   same weight, so "what do I do next" had to be inferred by scanning all
+   of them; the paid-generation panel sat in a sidebar that outshouted the
+   work itself; and the colour, radius and type choices were a management
+   tool's, not a filmmaking tool's.
+
+   Three decisions drive everything below.
+
+   1. ONE PURPOSE PER SCREEN. The current step's action is a hero block at
+      the top of the page (.now). Everything else -- past results, budget,
+      metadata -- is reference material and is styled quieter, not equal.
+      Hierarchy is the feature.
+
+   2. MONEY RIDES ON THE ACTION. The cost of a thing belongs on the button
+      that does it. The budget drops from a permanent sidebar column to a
+      collapsible bar, because it is something you check occasionally, not
+      something you read continuously.
+
+   3. CINEMATIC, NOT NEON. Ink navy rather than pure black (black crushes
+      next to video and reads cheap), brass rather than yellow (the colour
+      of film leader and projector light, not an alert), and a real type
+      ramp so density becomes hierarchy instead of noise.
+
+   Structure: tokens, then primitives, then components, then page layouts.
+   No value below is chosen ad hoc -- everything comes off a scale.
+   ===================================================================== */
+
+/* ── typefaces ────────────────────────────────────────────────────────
+   Two weights of the same voice, not two voices.
+
+   SUITE (display) carries the wordmark and the page/step headings --
+   about a fifth of the text on screen. It has more personality than a
+   neutral UI grotesque, which is what stops the product reading as a
+   generic dashboard, but it is still a sans: an earlier draft set the
+   headlines in a Korean serif and the result looked like a literary
+   magazine rather than a production tool.
+
+   SUIT (text) carries everything else: body, cards, forms, buttons,
+   badges, shot metadata, numerals. One family across the whole interface
+   means the hierarchy comes from size and weight rather than from a
+   collision of typefaces.
+
+   Both are variable, so weight is a continuous axis and the ramp below is
+   the complete set of values used anywhere in this file.
+
+   Self-hosted, never CDN: this tool must work offline, and a font request
+   per page load would leak usage to a third party. Licences in
+   fonts/NOTICE.md.
+
+   `font-display: swap` -- a Korean variable font must never hold the
+   first paint hostage. */
+
+@font-face {
+  font-family: "SUITE";
+  src: url("/static/fonts/SUITE-Variable.woff2") format("woff2-variations");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SUIT";
+  src: url("/static/fonts/SUIT-Variable.woff2") format("woff2-variations");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── tokens ──────────────────────────────────────────────────────────── */
+
 :root {
-  color-scheme: light dark;
-  --border: #ccc;
-  --danger: #b3261e;
-  --primary: #1a56db;
-  --bg-muted: #f4f4f5;
+  color-scheme: dark light;
+
+  /* Spacing: 4px base. Nothing outside this ramp. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+  --s8: 64px;
+
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  /* Type ramp. Display sizes tighten and body stays generous, so a dense
+     screen still has somewhere for the eye to rest. */
+  --t-display: 2.25rem;
+  --t-h1: 1.375rem;
+  --t-h2: 1.0625rem;
+  --t-body: 0.9375rem;
+  --t-sm: 0.8125rem;
+  --t-xs: 0.6875rem;
+
+  --font-sans: "SUIT", system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  --font-display: "SUITE", "SUIT", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+
+  /* The complete weight ramp. Both families are variable, so these are
+     real axis positions rather than the nearest cut weight. */
+  --w-body: 400;
+  --w-mid: 550;   /* badges, meta, shot grammar */
+  --w-btn: 650;   /* buttons */
+  --w-card: 700;  /* card titles, step headings */
+  --w-page: 750;  /* page titles */
+  --w-logo: 800;  /* wordmark */
+  --w-semi: 600;
+  --w-bold: 700;
+
+  /* Dark is the primary scheme: this tool is used beside footage, and
+     bright chrome around dark video is both fatiguing and misleading
+     about colour. */
+  --bg: #0b0d11;
+  --surface: #12161c;
+  --surface-2: #171c23;
+  --surface-3: #1e242d;
+  --border: #2a313c;
+  --border-strong: #3a4350;
+  --text: #f5f1e8;
+  --text-2: #b6b0a3;
+  --muted: #7e7a72;
+
+  /* Champagne gold, not signal yellow. Reserved for the primary CTA, the
+     current step, and "selected" -- if it appears anywhere else it stops
+     meaning anything. */
+  --accent: #d9a63a;
+  --accent-hi: #e6c77a;
+  --accent-ink: #0b0d11;
+  --accent-soft: #1d1a12;
+
+  /* Cinema violet, used ONLY for machine-authored things: AI suggestions,
+     auto-generated proposals. A second brand colour would dilute the
+     gold; a second MEANING does not. */
+  --ai: #7c5cfa;
+  --ai-soft: #17162a;
+
+  --ok: #38c172;
+  --ok-soft: #10201a;
+  --warn: #e3a63b;
+  --warn-soft: #221b10;
+  --danger: #e15a5a;
+  --danger-soft: #251518;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-2: 0 4px 16px rgb(0 0 0 / 35%);
+  --shadow-3: 0 16px 48px rgb(0 0 0 / 50%);
+
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --header-h: 56px;
+
+  /* Kept so the older console pages keep working while they still use
+     the old names. */
+  --primary: var(--accent);
+  --primary-ink: var(--accent-ink);
+  --warn-bg: var(--warn-soft);
+  --bg-muted: var(--surface-2);
+  --shadow: var(--shadow-1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    /* Warm white, not clinical grey -- the paper of a call sheet. The
+       light scheme is a deliberate variant, not an inverted afterthought. */
+    --bg: #faf8f4;
+    --surface: #ffffff;
+    --surface-2: #f5f2ec;
+    --surface-3: #ebe6dc;
+    --border: #e2ddd2;
+    --border-strong: #c9c2b4;
+    --text: #16181d;
+    --text-2: #565b66;
+    --muted: #7e7a72;
+
+    /* Gold at display brightness fails contrast on white, so the light
+       scheme uses the same hue darkened rather than a different colour --
+       the brand stays recognisable and the text stays readable. */
+    --accent: #8a6512;
+    --accent-hi: #6d4f0b;
+    --accent-ink: #ffffff;
+    --accent-soft: #faf3de;
+
+    --ai: #5240b8;
+    --ai-soft: #f0edfd;
+
+    --ok: #24794a;
+    --ok-soft: #e8f4ec;
+    --warn: #8a6212;
+    --warn-soft: #fbf2de;
+    --danger: #b23c3c;
+    --danger-soft: #fbecec;
+
+    --shadow-1: 0 1px 2px rgb(20 22 28 / 6%);
+    --shadow-2: 0 4px 16px rgb(20 22 28 / 8%);
+    --shadow-3: 0 16px 48px rgb(20 22 28 / 12%);
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   margin: 0;
-  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  font-weight: var(--w-body);
+  line-height: 1.65;
+  /* Korean has no spaces inside a word the way English does, so the
+     default break-anywhere rule splits 나옵니다 across two lines. This is
+     the single most important line in the file for Korean typography. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  /* Figures line up in a column wherever they are stacked -- budgets,
+     shot durations, take numbers, costs. */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-a { color: var(--primary); }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 3px solid var(--primary);
-  outline-offset: 2px;
+/* Motion is decoration here; anyone who has asked for less gets none. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+
+/* ── typography ──────────────────────────────────────────────────────── */
+
+h1, h2, h3, h4 { margin: 0; line-height: 1.35; font-weight: var(--w-card); }
+h1 { font-size: var(--t-h1); letter-spacing: -0.02em; }
+h2 { font-size: var(--t-h2); letter-spacing: -0.01em; }
+h3 { font-size: var(--t-body); }
+h4 { font-size: var(--t-sm); color: var(--text-2); }
+p { margin: 0 0 var(--s3); }
+p:last-child { margin-bottom: 0; }
+
+/* SUITE appears only on page titles and step headings -- the display
+   family earns its presence by being rare. Everything else is SUIT, so
+   hierarchy comes from size and weight rather than a clash of faces. */
+.display {
+  font-family: var(--font-display);
+  font-weight: var(--w-page);
+  font-size: var(--t-display);
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+}
+.now-title {
+  font-family: var(--font-display);
+  font-weight: var(--w-card);
+  letter-spacing: -0.01em;
+}
+.logline { font-weight: var(--w-card); letter-spacing: -0.005em; }
+.project-facts, .badge, .shot-grammar li { font-weight: var(--w-mid); }
+
+/* Numbers that get compared or stacked line up in a column. */
+.cost, .duration, .budget-figure, .shot-grammar li, .stat-value,
+.segment-count, .take-tag, .mono { font-variant-numeric: tabular-nums; }
+
+.lede { font-size: 1.0625rem; color: var(--text-2); line-height: 1.65; max-width: 62ch; }
+.meta { color: var(--muted); font-size: var(--t-sm); }
+.hint { color: var(--muted); font-size: var(--t-sm); margin: var(--s1) 0 0; }
+.mono { font-family: var(--font-mono); }
+.eyebrow {
+  font-size: 0.75rem;
+  font-weight: var(--w-semi);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.prose { max-width: 68ch; }
+
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { color: var(--accent-hi); }
+
+:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--r-xs); }
+
+/* ── app shell ───────────────────────────────────────────────────────── */
 
 .site-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 1rem 1.5rem;
+  justify-content: space-between;
+  gap: var(--s5);
+  flex-wrap: wrap;
+  min-height: var(--header-h);
+  padding: var(--s2) var(--s5);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
-.site-header .brand { font-weight: 700; text-decoration: none; }
-.site-header nav a { margin-left: 1rem; }
+.brand { display: inline-flex; align-items: baseline; gap: var(--s2); text-decoration: none; }
+.brand-mark {
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: var(--w-logo);
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+.brand-fable .brand-mark { color: var(--accent); }
+.brand-note {
+  font-size: var(--t-xs);
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  border-left: 1px solid var(--border-strong);
+  padding-left: var(--s2);
+}
+@media (max-width: 860px) { .brand-note { display: none; } }
 
-#main-content { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
+.site-header nav { display: flex; gap: var(--s1); flex-wrap: wrap; }
+.site-header nav a {
+  padding: var(--s1) var(--s3);
+  border-radius: var(--r-pill);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: var(--t-sm);
+}
+.site-header nav a:hover { background: var(--surface-2); color: var(--text); }
+
+#main-content { max-width: 1000px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s8); }
+#main-content:has(.wide) { max-width: 1240px; }
+
+/* ── buttons ─────────────────────────────────────────────────────────── */
 
 .btn {
-  display: inline-block;
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-muted);
-  color: inherit;
+  --btn-bg: var(--surface-2);
+  --btn-fg: var(--text);
+  --btn-bd: var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4);
+  min-height: 36px;
+  border: 1px solid var(--btn-bd);
+  border-radius: var(--r-sm);
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: var(--w-btn);
   text-decoration: none;
   cursor: pointer;
-  font-size: 1rem;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, transform 80ms ease;
 }
-.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
-.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn:hover { border-color: var(--muted); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled, .btn[disabled] { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.btn-primary { --btn-bg: var(--accent); --btn-fg: var(--accent-ink); --btn-bd: var(--accent); }
+.btn-primary:hover { --btn-bg: var(--accent-hi); --btn-bd: var(--accent-hi); }
+
+.btn-ghost { --btn-bg: transparent; --btn-fg: var(--text-2); --btn-bd: transparent; }
+.btn-ghost:hover { --btn-bg: var(--surface-2); --btn-fg: var(--text); }
+
+.btn-danger { --btn-bg: transparent; --btn-fg: var(--danger); --btn-bd: var(--danger); }
+.btn-danger:hover { --btn-bg: var(--danger); --btn-fg: #fff; --btn-bd: var(--danger); }
+
+.btn-lg { min-height: 46px; padding: var(--s3) var(--s5); font-size: var(--t-body); }
+.btn-sm { min-height: 26px; padding: 2px var(--s2); font-size: var(--t-xs); }
+.btn-block { width: 100%; }
+
+.actions { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.inline-form { display: inline-flex; gap: var(--s2); align-items: center; margin: 0; }
+
+/* ── badges ──────────────────────────────────────────────────────────── */
 
 .badge {
-  display: inline-block;
-  padding: 0.15rem 0.6rem;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 1px var(--s2);
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 0.75rem;
+  font-weight: var(--w-mid);
+  white-space: nowrap;
+}
+.badge-ok, .badge-pass { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+.badge-pending, .badge-warn { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
+.badge-error, .badge-fail { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.badge-action { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+/* Neutral by design: it carries the status TEXT, so colouring it would
+   double-encode the same fact. */
+.badge-status, .badge-not_configured { border-color: var(--border-strong); background: transparent; color: var(--muted); }
+
+/* ── surfaces ────────────────────────────────────────────────────────── */
+
+.card, .settings-card, .stat-tile, .side-card {
+  background: var(--surface);
   border: 1px solid var(--border);
-  font-size: 0.85rem;
+  border-radius: var(--r-md);
 }
-.badge-pass { border-color: #1a7f37; }
-.badge-warn { border-color: #9a6700; }
-.badge-fail { border-color: var(--danger); }
-.badge-not_configured { border-color: #666; }
+.card-pad { padding: var(--s5); }
 
-.status-banner { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border); }
-.status-pass { border-color: #1a7f37; }
-.status-warn { border-color: #9a6700; }
-.status-fail { border-color: var(--danger); }
-
-.hero { margin: 1.5rem 0; }
-.stat-tiles { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.stat-tile { flex: 1; padding: 1rem; border: 1px solid var(--border); border-radius: 8px; text-align: center; }
-.stat-value { display: block; font-size: 2rem; font-weight: 700; }
-
-.job-summary-list { list-style: none; padding: 0; }
-.job-row a { display: flex; justify-content: space-between; padding: 0.5rem 0; text-decoration: none; color: inherit; border-bottom: 1px solid var(--border); }
-
-.filter-chips { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-.chip { padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; color: inherit; }
-.chip-active { background: var(--primary); color: #fff; border-color: var(--primary); }
-
-.job-table, .asset-table, .preflight-table, .account-table, .publication-table {
-  width: 100%; border-collapse: collapse; margin-bottom: 1rem;
+.alert, .status-banner {
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  margin: var(--s4) 0;
 }
-.job-table th, .job-table td,
-.asset-table th, .asset-table td,
-.preflight-table th, .preflight-table td,
-.account-table th, .account-table td,
-.publication-table th, .publication-table td { border-bottom: 1px solid var(--border); padding: 0.5rem; text-align: left; }
+.alert-error { border-color: var(--danger); background: var(--danger-soft); }
+.alert-info { border-color: var(--border-strong); background: var(--surface-2); }
+.status-banner { margin: 0 0 var(--s5); }
+.status-pass { border-left: 3px solid var(--ok); }
+.status-warn { border-left: 3px solid var(--warn); }
+.status-fail { border-left: 3px solid var(--danger); }
 
-.pagination { display: flex; gap: 1rem; align-items: center; }
-
-.form-field { margin-bottom: 1rem; }
-.form-field label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-.form-field input, .form-field select, .form-field textarea {
-  width: 100%; max-width: 480px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px;
+.empty-state {
+  padding: var(--s7) var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+  color: var(--muted);
 }
-.field-error { color: var(--danger); font-size: 0.9rem; margin: 0.25rem 0 0; }
-.hint { font-size: 0.85rem; color: #666; }
-.disabled { opacity: 0.6; }
+.empty-state h3 { color: var(--text); margin-bottom: var(--s2); font-size: var(--t-h2); }
+.empty-state .actions { justify-content: center; margin-top: var(--s4); }
 
-.job-detail-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 2rem; }
-@media (max-width: 800px) {
-  .job-detail-grid { grid-template-columns: 1fr; }
-}
+.kv { display: grid; grid-template-columns: auto 1fr; gap: var(--s2) var(--s4); margin: 0; }
+.kv dt { color: var(--muted); font-size: var(--t-sm); }
+.kv dd { margin: 0; }
 
-.job-video {
+.disabled { opacity: 0.5; }
+
+/* ── forms ───────────────────────────────────────────────────────────── */
+
+.form-field { margin-bottom: var(--s5); }
+.form-field > label { display: block; font-weight: var(--w-semi); margin-bottom: var(--s1); }
+.form-field .hint { margin: 0 0 var(--s2); }
+
+input, select, textarea {
   width: 100%;
-  max-width: 360px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 140ms ease;
+}
+input:hover, select:hover, textarea:hover { border-color: var(--muted); }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.75; }
+textarea { line-height: 1.7; resize: vertical; min-height: 200px; padding: var(--s3); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-allowed; }
+.field-error { color: var(--danger); font-size: var(--t-sm); margin: var(--s1) 0 0; }
+.has-error input, .has-error textarea, .has-error select { border-color: var(--danger); }
+.field-foot { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0 var(--s4); }
+
+details.advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  margin-bottom: var(--s5);
+}
+details.advanced > summary {
+  cursor: pointer;
+  padding: var(--s3) var(--s4);
+  font-weight: var(--w-semi);
+  font-size: var(--t-sm);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary::before { content: "▸"; color: var(--muted); }
+details.advanced[open] > summary::before { content: "▾"; }
+details.advanced[open] > summary { border-bottom: 1px solid var(--border); }
+.advanced-body { padding: var(--s4) var(--s4) 0; }
+.advanced-body .form-field:last-child { margin-bottom: var(--s4); }
+
+/* ── writing guide ────────────────────────────────────────────────────
+   The source text is the single biggest lever on what comes out, and the
+   things that matter are not guessable from outside the pipeline. So the
+   guidance sits BESIDE the box while you write, rather than in a help
+   page you would have to know to look for. */
+
+.write { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--s4); align-items: start; }
+.write-main { min-width: 0; }
+.write-count { margin: var(--s2) 0 0; font-size: var(--t-sm); color: var(--muted); }
+
+.write-guide {
+  padding: var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  position: sticky;
+  top: calc(var(--header-h) + var(--s4));
+}
+.write-guide .eyebrow { display: block; margin-bottom: var(--s3); }
+
+.checklist { list-style: none; padding: 0; margin: 0 0 var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+.check { display: grid; grid-template-columns: 18px 1fr; gap: var(--s2); align-items: start; }
+.check-box {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  display: grid;
+  place-items: center;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.check-box::after { content: "✓"; font-size: 10px; line-height: 1; color: transparent; }
+.check-on .check-box { background: var(--ok); border-color: var(--ok); }
+.check-on .check-box::after { color: #fff; }
+
+.check-label {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--t-sm);
+  font-weight: var(--w-mid);
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+}
+.check-label:hover { color: var(--text); }
+.check-label::after { content: " ⌄"; color: var(--muted); }
+.check-label[aria-expanded="true"]::after { content: " ⌃"; }
+.check-on .check-label { color: var(--text); }
+
+.check-detail { margin-top: var(--s2); padding-bottom: var(--s2); }
+.check-why { font-size: var(--t-sm); color: var(--text-2); line-height: 1.55; margin-bottom: var(--s2); }
+.example {
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  margin: 0 0 var(--s1);
+  padding: var(--s2);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+}
+.example-tag {
+  display: block;
+  font-size: var(--t-xs);
+  font-weight: var(--w-semi);
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.example-bad { color: var(--muted); }
+.example-bad .example-tag { color: var(--danger); }
+.example-good .example-tag { color: var(--ok); }
+
+@media (max-width: 900px) {
+  .write { grid-template-columns: 1fr; }
+  .write-guide { position: static; }
+}
+
+/* ── stepper ─────────────────────────────────────────────────────────── */
+
+.stepper {
+  display: flex;
+  list-style: none;
+  padding: 0 0 var(--s2);
+  margin: 0 0 var(--s6);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.stepper::-webkit-scrollbar { display: none; }
+.step {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-right: var(--s2);
+  font-size: var(--t-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.step:not(:last-child)::after {
+  content: "";
+  width: var(--s5);
+  height: 1px;
+  flex: none;
+  background: var(--border-strong);
+  margin-left: var(--s2);
+}
+.step-dot {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+  font-family: var(--font-mono);
+}
+.step[data-state="done"] { color: var(--text-2); }
+.step[data-state="done"] .step-dot { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+.step[data-state="current"] { color: var(--text); font-weight: var(--w-semi); }
+.step[data-state="current"] .step-dot { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.step[data-state="blocked"] { color: var(--danger); }
+.step[data-state="blocked"] .step-dot { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.step[data-state="todo"] .step-dot { opacity: 0.5; }
+
+/* ── the now panel ────────────────────────────────────────────────────
+   The single answer to "what do I do next", and the loudest thing on the
+   page by design. Everything below it is reference material. */
+
+.now {
+  background: linear-gradient(160deg, var(--surface-2), var(--surface) 70%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  padding: var(--s5);
+  margin-bottom: var(--s7);
+  box-shadow: var(--shadow-2);
+}
+.now[data-tone="waiting"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.now[data-tone="blocked"] { border-color: var(--danger); }
+.now[data-tone="done"] { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+.now-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s2); }
+.now-title { font-size: 1.375rem; }
+.now-body { color: var(--text-2); margin-bottom: var(--s4); max-width: 62ch; }
+.now-actions { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: center; }
+.now-cost {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  font-size: var(--t-sm);
+  color: var(--text-2);
+}
+.now-cost strong { font-family: var(--font-mono); font-size: var(--t-body); color: var(--accent); }
+/* A spinner would imply we know how long this takes; we do not. A quiet
+   pulsing dot says "running" without promising a duration. */
+.now-pulse {
+  width: 8px; height: 8px; flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  animation: pulse 1.8s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+
+/* ── project header ──────────────────────────────────────────────────── */
+
+.project-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  margin-bottom: var(--s4);
+}
+.project-facts { display: flex; gap: var(--s3); flex-wrap: wrap; color: var(--muted); font-size: var(--t-sm); margin-top: var(--s1); }
+
+.page-head { margin-bottom: var(--s6); }
+.page-head .display { margin-bottom: var(--s2); }
+
+/* ── review sections ─────────────────────────────────────────────────── */
+
+.review { margin-bottom: var(--s7); }
+.review-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s4);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--border);
+}
+.review-head h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-family: var(--font-display);
+  font-weight: var(--w-card);
+  font-size: 1.1875rem;
+}
+.review-count { color: var(--muted); font-size: var(--t-sm); font-weight: var(--w-body); }
+
+.logline {
+  font-size: 1.1875rem;
+  line-height: 1.55;
+  border-left: 2px solid var(--accent);
+  padding-left: var(--s4);
+  margin: 0 0 var(--s4);
+}
+
+/* ── storyboard ──────────────────────────────────────────────────────── */
+
+.shot-grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s4);
+}
+.shot-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--border-strong);
+  border-radius: var(--r-md);
+  transition: border-color 140ms ease;
+}
+.shot-card[data-status="SELECTED"] { border-top-color: var(--ok); }
+.shot-card[data-status="REVIEW_REQUIRED"] { border-top-color: var(--accent); }
+.shot-card[data-status="FAILED"] { border-top-color: var(--danger); }
+.shot-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.shot-slate {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+  padding: 1px var(--s2);
+  border-radius: var(--r-xs);
+  background: var(--text);
+  color: var(--bg);
+  flex: none;
+}
+.shot-action { font-weight: var(--w-mid); line-height: 1.45; margin: 0; }
+.shot-dialogue { color: var(--text-2); font-style: italic; font-size: var(--t-sm); margin: 0; }
+.shot-grammar { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: var(--s1); }
+.shot-grammar li {
+  font-size: 0.75rem;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  padding: 0 var(--s1);
+}
+
+/* ── takes ────────────────────────────────────────────────────────────
+   Comparing candidate clips is the most visual decision in the product,
+   so they sit side by side at a size you can actually judge -- and the
+   selected one is unmistakable without reading a word. */
+
+.take-grid {
+  list-style: none;
+  padding: 0;
+  margin: var(--s2) 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: var(--s2);
+}
+.take { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.take-frame {
+  position: relative;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #000;
+  aspect-ratio: 9 / 16;
+}
+.take-frame video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.take-selected .take-frame { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok); }
+.take-tag {
+  position: absolute;
+  top: var(--s1);
+  left: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  padding: 0 var(--s1);
+  border-radius: var(--r-xs);
+  background: rgb(0 0 0 / 70%);
+  color: #fff;
+}
+.take-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+  font-size: var(--t-xs);
+  text-align: center;
+  background: var(--surface-2);
+}
+
+/* ── casting ─────────────────────────────────────────────────────────── */
+
+.cast-grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--s4);
+}
+.cast-card {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: var(--s4);
+  padding: var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.cast-card[data-approved="true"] { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.cast-portrait, .cast-portrait-empty {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  display: block;
+}
+.cast-portrait-empty { display: grid; place-items: center; color: var(--muted); font-size: var(--t-xs); border-style: dashed; }
+.cast-body { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.cast-name { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.cast-views { list-style: none; padding: 0; margin: 0; display: flex; gap: var(--s1); flex-wrap: wrap; }
+.cast-views a { display: block; line-height: 0; }
+.cast-thumb, .cast-thumb-empty {
+  width: 38px;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  display: block;
+}
+.cast-thumb-empty { display: grid; place-items: center; color: var(--muted); font-size: var(--t-xs); border-style: dashed; }
+.cast-thumb:hover { border-color: var(--accent); }
+
+/* Reusable actors: a shelf of already-approved faces, offered before the
+   paid generate button so the free option is seen first. */
+.reuse {
+  padding: var(--s4);
+  margin-bottom: var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.reuse-list {
+  list-style: none;
+  padding: 0;
+  margin: var(--s3) 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--s3);
+}
+.reuse-item { display: flex; flex-direction: column; gap: var(--s2); align-items: center; text-align: center; }
+.reuse-item .cast-portrait, .reuse-item .cast-portrait-empty { max-width: 96px; }
+
+/* ── landing ──────────────────────────────────────────────────────────
+   The home screen used to open with a preflight banner and three queue
+   counters: an operations dashboard on the front door of a filmmaking
+   tool. It now leads with what the product does and one way in. */
+
+.landing { padding: var(--s6) 0 var(--s7); max-width: 46ch; }
+.landing .display { font-size: clamp(1.875rem, 4.5vw, 2.5rem); margin: var(--s3) 0 var(--s4); }
+.landing .eyebrow { color: var(--accent); }
+
+/* The five acts, stated once so the shape of the work is known before
+   any of it is started. */
+.flow {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--s7);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s3);
+  counter-reset: flow;
+}
+.flow li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s4);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.flow-num {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+  color: var(--accent);
+  letter-spacing: 0.1em;
+}
+.flow-label { font-weight: var(--w-semi); }
+.flow-note { color: var(--muted); font-size: var(--t-sm); line-height: 1.45; }
+
+.estimate {
+  margin: calc(var(--s2) * -1) 0 var(--s5);
+  padding: var(--s3) var(--s4);
+  border-left: 2px solid var(--accent);
+  background: var(--surface-2);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  color: var(--text-2);
+  font-size: var(--t-sm);
+}
+.estimate:empty { display: none; }
+
+/* ── project list ────────────────────────────────────────────────────── */
+
+.toolbar { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; margin-bottom: var(--s5); }
+.toolbar-search { flex: 1; min-width: 180px; max-width: 320px; }
+.segments {
+  display: flex;
+  gap: var(--s1);
+  background: var(--surface-2);
+  padding: var(--s1);
+  border-radius: var(--r-sm);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.segments::-webkit-scrollbar { display: none; }
+.segment {
+  padding: var(--s1) var(--s3);
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-sm);
+  font-weight: var(--w-semi);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segment:hover { color: var(--text); }
+.segment[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
+.segment-count { font-family: var(--font-mono); opacity: 0.6; margin-left: var(--s1); }
+
+.project-grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--s4);
+}
+.project-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+.project-card:hover { border-color: var(--border-strong); transform: translateY(-2px); box-shadow: var(--shadow-2); }
+.project-card:focus-within { box-shadow: var(--focus); }
+.project-cover {
+  aspect-ratio: 16 / 10;
+  background: var(--surface-3);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+}
+.project-cover video, .project-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.project-slate {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.project-card-body { padding: var(--s3) var(--s4) var(--s4); display: flex; flex-direction: column; gap: var(--s2); flex: 1; }
+.project-card-title { font-weight: var(--w-card); font-size: 1.0625rem; line-height: 1.4; }
+/* The whole card is the target; the link keeps the accessible name. */
+.project-card-title a { color: inherit; text-decoration: none; }
+.project-card-title a::after { content: ""; position: absolute; inset: 0; }
+.project-card-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.progress-track { height: 3px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+/* Both meters fill by TRANSFORM rather than by percentage width.
+   .budget-meter is a flex item (flex: 1), so its width is indefinite
+   during flex sizing and a percentage-width child cannot resolve against
+   it -- the browser falls back to auto and the bar renders permanently
+   full, which is a spending indicator that lies. scaleX resolves against
+   the element's own border box and has no such dependency. */
+.progress-track .fill, .budget-meter .fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left center;
+}
+.fill-0 { transform: scaleX(0); }
+.fill-5 { transform: scaleX(0.05); }
+.fill-10 { transform: scaleX(0.1); }
+.fill-15 { transform: scaleX(0.15); }
+.fill-20 { transform: scaleX(0.2); }
+.fill-25 { transform: scaleX(0.25); }
+.fill-30 { transform: scaleX(0.3); }
+.fill-35 { transform: scaleX(0.35); }
+.fill-40 { transform: scaleX(0.4); }
+.fill-45 { transform: scaleX(0.45); }
+.fill-50 { transform: scaleX(0.5); }
+.fill-55 { transform: scaleX(0.55); }
+.fill-60 { transform: scaleX(0.6); }
+.fill-65 { transform: scaleX(0.65); }
+.fill-70 { transform: scaleX(0.7); }
+.fill-75 { transform: scaleX(0.75); }
+.fill-80 { transform: scaleX(0.8); }
+.fill-85 { transform: scaleX(0.85); }
+.fill-90 { transform: scaleX(0.9); }
+.fill-95 { transform: scaleX(0.95); }
+.fill-100 { transform: scaleX(1); }
+
+/* ── budget: reference, not a competing column ──────────────────────── */
+
+.budget { margin-bottom: var(--s6); }
+.budget > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  cursor: pointer;
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  list-style: none;
+  font-size: var(--t-sm);
+}
+.budget > summary::-webkit-details-marker { display: none; }
+.budget[open] > summary { border-radius: var(--r-sm) var(--r-sm) 0 0; border-bottom: 0; }
+.budget-figure { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.budget-meter { flex: 1; min-width: 100px; height: 4px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; }
+.budget-body {
+  padding: var(--s4);
+  border: 1px solid var(--border);
+  border-radius: 0 0 var(--r-sm) var(--r-sm);
+  background: var(--surface);
+}
+.budget-body .field-grid { max-width: 460px; }
+
+/* ── final cut ───────────────────────────────────────────────────────── */
+
+.final { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.final-video {
+  width: 100%;
   aspect-ratio: 9 / 16;
   background: #000;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
   display: block;
-  margin: 1rem 0;
+  box-shadow: var(--shadow-3);
+}
+.job-video, .fable-video {
+  width: 100%;
+  max-width: 300px;
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  display: block;
+  margin: var(--s4) 0;
 }
 
-.job-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
-.job-actions form { display: flex; gap: 0.5rem; align-items: center; }
+/* ── mobile ───────────────────────────────────────────────────────────
+   The primary action must never end up below three screens of reference
+   material, so on small viewports it also rides in a sticky footer. */
 
-.alert { padding: 0.75rem 1rem; border-radius: 8px; margin: 1rem 0; border: 1px solid var(--border); }
-.alert-error { border-color: var(--danger); }
-.alert-info { border-color: var(--primary); }
+.sticky-cta {
+  position: sticky;
+  bottom: 0;
+  z-index: 15;
+  display: none;
+  gap: var(--s2);
+  align-items: center;
+  padding: var(--s3) var(--s4);
+  margin: var(--s6) calc(var(--s4) * -1) 0;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+}
 
+@media (max-width: 760px) {
+  #main-content { padding: var(--s5) var(--s4) var(--s6); }
+  .display { font-size: 1.5rem; }
+  .now { padding: var(--s4); }
+  .now-title { font-size: 1.125rem; }
+  .now-actions .btn-lg { width: 100%; }
+  .final { grid-template-columns: 1fr; }
+  .cast-card { grid-template-columns: 84px minmax(0, 1fr); gap: var(--s3); padding: var(--s3); }
+  .shot-grid { grid-template-columns: 1fr; }
+  .sticky-cta { display: flex; }
+  .sticky-cta .btn { flex: 1; }
+  /* Reference sections collapse on small screens: the point of the page
+     is the action, and eight open sections bury it. */
+  .review-collapse > summary { cursor: pointer; list-style: none; }
+  .review-collapse > summary::-webkit-details-marker { display: none; }
+}
+
+/* ── console pages (jobs, publications, settings) ───────────────────── */
+
+.job-table, .asset-table, .preflight-table, .account-table, .publication-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  margin-bottom: var(--s4);
+}
+.job-table th, .asset-table th, .preflight-table th, .account-table th, .publication-table th {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+.job-table th, .job-table td, .asset-table th, .asset-table td,
+.preflight-table th, .preflight-table td, .account-table th, .account-table td,
+.publication-table th, .publication-table td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--s2) var(--s3);
+  text-align: left;
+}
+.job-summary-list { list-style: none; padding: 0; margin: 0; }
+.job-row a {
+  display: flex; justify-content: space-between; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4); text-decoration: none; color: inherit;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); margin-bottom: var(--s2);
+  transition: border-color 140ms ease;
+}
+.job-row a:hover { border-color: var(--border-strong); }
+.filter-chips { display: flex; gap: var(--s2); margin-bottom: var(--s4); flex-wrap: wrap; }
+.chip {
+  padding: var(--s1) var(--s3); border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--surface);
+  text-decoration: none; color: var(--muted); font-size: var(--t-sm);
+}
+.chip:hover { color: var(--text); }
+.chip-active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.pagination { display: flex; gap: var(--s4); align-items: center; }
 .stage-timeline { list-style: none; padding: 0; }
-.stage-timeline li { padding: 0.4rem 0; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; align-items: center; }
+.stage-timeline li { padding: var(--s2) 0; border-bottom: 1px solid var(--border); display: flex; gap: var(--s2); align-items: center; }
+.hero { margin: var(--s5) 0; }
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s4); margin: var(--s5) 0; }
+.stat-tile { padding: var(--s4); text-align: center; }
+.stat-value { display: block; font-size: 1.75rem; font-weight: var(--w-bold); letter-spacing: -0.02em; }
+.settings-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--s4); }
+.settings-card { padding: var(--s4); }
+.job-detail-grid { display: grid; grid-template-columns: 3fr 2fr; gap: var(--s6); }
+@media (max-width: 800px) { .job-detail-grid { grid-template-columns: 1fr; } }
+.job-actions { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s4); }
+.job-actions form { display: flex; gap: var(--s2); align-items: center; }
+.side-card { padding: var(--s4); }
 
-.settings-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
-.settings-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+/* ── AI-authored surfaces ─────────────────────────────────────────────
+   Violet is not a second brand colour, it is a second MEANING: it marks
+   things the machine wrote, so a user can always tell their own work from
+   a suggestion at a glance. Gold stays reserved for "this is the action".
+   Used sparingly and nowhere else. */
 
-.empty-state { color: #666; padding: 1rem 0; }
+.btn-assist { --btn-bg: transparent; --btn-fg: var(--ai); --btn-bd: var(--ai); }
+.btn-assist:hover { --btn-bg: var(--ai); --btn-fg: #fff; --btn-bd: var(--ai); }
+
+.proposal { border-color: color-mix(in srgb, var(--ai) 45%, var(--border)); background: var(--surface); }
+.proposal-eyebrow { color: var(--ai); }
+.proposal-text {
+  font-size: var(--t-sm);
+  line-height: 1.75;
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--s3);
+  border-radius: var(--r-sm);
+  background: var(--ai-soft);
+  margin-bottom: var(--s3);
+}
+.proposal-notes {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  font-size: var(--t-sm);
+  color: var(--text-2);
+}
+.proposal-notes li { padding-left: var(--s4); position: relative; line-height: 1.5; }
+.proposal-notes li::before { content: "+"; position: absolute; left: 0; color: var(--ai); font-weight: var(--w-bold); }
+
+/* ── mobile tab bar ───────────────────────────────────────────────────
+   On a phone the header's seven links are unreachable one-handed. The
+   four that matter become a real tab bar; the rest stay in the header,
+   which stops being the primary navigation at this width. */
+
+.tabbar { display: none; }
+
+@media (max-width: 760px) {
+  body { padding-bottom: 64px; }
+  .site-header nav { display: none; }
+  .tabbar {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  .tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    /* 56px: comfortably above the 44px minimum touch target. */
+    min-height: 56px;
+    text-decoration: none;
+    color: var(--muted);
+    font-size: var(--t-xs);
+    font-weight: var(--w-mid);
+  }
+  .tab-icon { font-size: 1.05rem; line-height: 1; }
+  .tab[aria-current="page"] { color: var(--accent); }
+  /* The sticky action sits above the tab bar rather than under it. */
+  .sticky-cta { bottom: 64px; }
+}
+
+
+/* Utility classes replacing inline styles. This app sends
+   `style-src 'self'` with no 'unsafe-inline', so every style="" attribute
+   was being silently dropped by the browser -- the progress and budget
+   meters had never actually rendered their values. The CSP is right; the
+   markup was wrong. */
+.actions-loose { margin-top: var(--s4); }
+.prose-center { margin-inline: auto; }
+.advanced-body-pad { padding-bottom: var(--s4); }
+.hint-block { margin-bottom: var(--s4); }
+.inline-form-loose { margin-top: var(--s3); }
+.inline-form-grow { flex: 1; }
+.stat-word { font-size: var(--t-h2); }
+.stat-word.status-pass, .stat-word.status-ok { color: var(--ok); }
+.stat-word.status-warn { color: var(--warn); }
+.stat-word.status-fail { color: var(--danger); }
+
+/* ── the compose screen ───────────────────────────────────────────────
+   Everywhere else a bordered box is right: it separates data that has to
+   be scanned. Here it is wrong. This screen is one person writing one
+   story, and stacking it as four identical rounded rectangles made the
+   most creative moment in the product look like a settings panel.
+
+   So the boxes come off. The title behaves like a title card, the story
+   like a manuscript page, and the chrome retreats until only what you are
+   writing has weight. */
+
+.compose .form-field { margin-bottom: var(--s6); }
+
+/* Title: no box at all. A rule under it, the display face, at a size that
+   says this is the name of a film rather than a database column. */
+.compose-title-field > label { display: none; }
+.compose-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 3.5vw, 2rem);
+  font-weight: var(--w-page);
+  letter-spacing: -0.015em;
+  padding: 0 0 var(--s3);
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: none;
+  transition: border-color 160ms ease;
+}
+.compose-title:hover { border-color: var(--muted); }
+.compose-title:focus { outline: none; border-bottom-color: var(--accent); }
+.compose-title:focus-visible { box-shadow: none; }
+.compose-title::placeholder { color: var(--muted); opacity: 0.45; }
+
+/* Story: a manuscript page. The left rule is the only border, which reads
+   as a margin line rather than a container. */
+.compose-story {
+  border: 0;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0;
+  background: none;
+  padding: var(--s2) 0 var(--s2) var(--s5);
+  font-size: 1rem;
+  line-height: 2;
+  min-height: 340px;
+  transition: border-color 160ms ease;
+}
+.compose-story:hover { border-left-color: var(--muted); }
+.compose-story:focus { outline: none; border-left-color: var(--accent); }
+.compose-story:focus-visible { box-shadow: none; }
+.compose-story::placeholder { color: var(--muted); opacity: 0.5; }
+
+.write-count { padding-left: var(--s5); }
+
+/* Section rules instead of section boxes. */
+.compose-section {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  margin: var(--s7) 0 var(--s4);
+}
+.compose-section::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+/* Selects: the browser chevron is the tell that a form was never
+   designed. Ours is drawn, and the field is a rule rather than a box. */
+.compose select {
+  appearance: none;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: none;
+  padding: var(--s2) var(--s5) var(--s2) 0;
+  font-weight: var(--w-mid);
+  cursor: pointer;
+}
+.compose .select-wrap { position: relative; }
+.compose .select-wrap::after {
+  content: "";
+  position: absolute;
+  right: var(--s2);
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.compose select:hover { border-bottom-color: var(--muted); }
+.compose select:focus { outline: none; border-bottom-color: var(--accent); }
+.compose select:focus-visible { box-shadow: none; }
+
+/* The estimate is an annotation in the margin, not an alert. */
+.compose .estimate {
+  border: 0;
+  border-left: 1px solid var(--accent);
+  background: none;
+  padding: 0 0 0 var(--s3);
+  margin: var(--s4) 0 0;
+  color: var(--muted);
+}
+
+/* Advanced settings: a quiet line of text, not a container. */
+.compose details.advanced {
+  border: 0;
+  background: none;
+  margin: var(--s6) 0 var(--s7);
+  border-top: 1px solid var(--border);
+}
+.compose details.advanced > summary {
+  padding: var(--s3) 0;
+  color: var(--muted);
+  font-weight: var(--w-mid);
+}
+.compose details.advanced > summary:hover { color: var(--text); }
+.compose details.advanced[open] > summary { border-bottom: 0; }
+.compose .advanced-body { padding: 0; }
+
+/* The writing guide is reference, so it sits back: no fill, a hairline,
+   and it only gains presence when something in it is ticked. */
+.compose .write-guide { background: none; border-color: var(--border); }
+.compose .proposal { background: none; }
+
+/* ── media components ─────────────────────────────────────────────────
+   Every frame in this product is a piece of the film, so it gets treated
+   like one: a real aspect box, a slate, and state expressed on the image
+   rather than in text beside it. */
+
+.take-grid { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: var(--s3); }
+
+.take-frame {
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: #000;
+  box-shadow: var(--shadow-1);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+.take:hover .take-frame { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+
+/* The chosen cut gets a gold rim -- the same gold that means "this is the
+   one" everywhere else -- and its siblings step back rather than
+   competing. */
+.take-selected .take-frame {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-2);
+}
+.take-grid:has(.take-selected) .take:not(.take-selected) .take-frame { opacity: 0.5; }
+.take-grid:has(.take-selected) .take:not(.take-selected):hover .take-frame { opacity: 1; }
+
+.take-tag {
+  top: var(--s1);
+  left: var(--s1);
+  font-family: inherit;
+  font-size: 0.625rem;
+  font-weight: var(--w-semi);
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: rgb(0 0 0 / 62%);
+  backdrop-filter: blur(4px);
+  color: #fff;
+}
+.take-mark {
+  position: absolute;
+  top: var(--s1);
+  right: var(--s1);
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: var(--w-bold);
+  box-shadow: var(--shadow-1);
+}
+.take-state {
+  font-size: 0.75rem;
+  font-weight: var(--w-semi);
+  color: var(--accent);
+  text-align: center;
+}
+.take-pick { opacity: 0.75; transition: opacity 140ms ease; }
+.take:hover .take-pick, .take-pick:focus-visible { opacity: 1; }
+
+.take-placeholder {
+  border-radius: 0;
+  background: repeating-linear-gradient(
+    45deg, var(--surface-2), var(--surface-2) 6px, var(--surface-3) 6px, var(--surface-3) 12px);
+}
+
+/* Casting stills are a casting board, not a file listing. */
+.cast-portrait, .cast-portrait-empty {
+  box-shadow: var(--shadow-1);
+  transition: transform 160ms ease;
+}
+.cast-card[data-approved="true"] .cast-portrait { box-shadow: 0 0 0 1px var(--accent), var(--shadow-1); }
+.cast-thumb { transition: transform 140ms ease, border-color 140ms ease; }
+.cast-thumb:hover { transform: scale(1.08); border-color: var(--accent); }
+
+/* Project covers get a gentle top-light so an empty slate still reads as
+   a frame rather than a grey rectangle. */
+.project-cover {
+  background:
+    radial-gradient(120% 80% at 50% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
+    var(--surface-3);
+}
+.project-slate { letter-spacing: 0.3em; opacity: 0.55; }
+.final-video { box-shadow: 0 0 0 1px var(--border), var(--shadow-3); }
+
+/* Disclosure content is designed, not just revealed. Default <details>
+   drops its children flush against the summary with no rhythm of their
+   own, which reads as "the form ran out of budget here". */
+.compose details.advanced > summary { letter-spacing: -0.005em; }
+.compose details.advanced > summary .meta { font-weight: var(--w-body); }
+.compose details.advanced[open] { border-top-color: var(--border-strong); }
+.compose details.advanced[open] > summary { color: var(--text); }
+.compose .advanced-body {
+  padding: var(--s2) 0 var(--s4);
+  animation: reveal 220ms ease;
+}
+@keyframes reveal { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.compose .advanced-body .form-field { margin-bottom: var(--s5); }
+.compose .advanced-body .hint { max-width: 34ch; }
+
+/* Same treatment for the story gate's notes panel on the detail page. */
+.review details.advanced { background: none; border: 0; border-top: 1px solid var(--border); border-radius: 0; }
+.review details.advanced > summary { padding-left: 0; padding-right: 0; color: var(--muted); }
+.review details.advanced > summary:hover { color: var(--text); }
+.review details.advanced[open] > summary { border-bottom: 0; }
+.review .advanced-body { padding: 0 0 var(--s4); animation: reveal 220ms ease; }
+
+/* Cover video frames are cropped from the centre: a 9:16 clip shown in a
+   16:10 card would otherwise be anchored at the top, which on a portrait
+   shot means a card full of ceiling. */
+.project-cover video, .project-cover img { object-position: 50% 50%; }
+.take-frame video { object-position: 50% 50%; background: #000; }
+
+/* ── choice chips ─────────────────────────────────────────────────────
+   These replace every <select> on the compose screen.
+
+   A native select's popup list is painted by the operating system, not
+   the page: CSS reaches the closed control and stops there. (Chromium 135
+   added `appearance: base-select` + `::picker(select)` which finally
+   opens it up, but it is one engine only, so it cannot be the design.)
+   For a handful of options a dropdown was the wrong control anyway --
+   every choice is visible at once here, and picking one is a single tap
+   instead of tap-scan-tap. Real radios underneath: same names, same POST,
+   arrow-key navigation, no JavaScript. */
+
+.chipset { border: 0; padding: 0; margin: 0 0 var(--s6); min-width: 0; }
+.chipset legend {
+  padding: 0;
+  margin-bottom: var(--s3);
+  font-size: var(--t-sm);
+  font-weight: var(--w-semi);
+  color: var(--text-2);
+}
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+.chip-opt { position: relative; cursor: pointer; }
+/* Visually hidden, not display:none -- it must stay focusable and stay in
+   the radio group's keyboard order. */
+.chip-opt input {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: 0; padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.chip-opt > span {
+  display: block;
+  padding: var(--s2) var(--s4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.875rem;
+  font-weight: var(--w-mid);
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+.chip-opt:hover > span { border-color: var(--muted); color: var(--text); }
+.chip-opt input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: var(--w-semi);
+}
+.chip-opt input:focus-visible + span { box-shadow: var(--focus); }
+
+/* Duration reads as a card, because it carries two facts -- the length
+   and the shot count that actually drives the bill. */
+.chips-cards { gap: var(--s3); }
+.chip-card > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-md);
+  min-width: 92px;
+}
+.chip-card strong { font-size: 1rem; font-weight: var(--w-card); color: var(--text); }
+.chip-card em { font-style: normal; font-size: var(--t-xs); color: var(--muted); }
+.chip-card input:checked + span strong,
+.chip-card input:checked + span em { color: var(--accent); }
+
+/* ── the story field ──────────────────────────────────────────────────
+   A bare left rule read as an unfinished box. It is a page now: an inset
+   surface, a ruled margin, and room around the text so writing in it
+   feels like writing rather than filling in a field. */
+
+.compose-story {
+  /* A hairline the same value as the surface it sits on: the field reads
+     as a slightly recessed area rather than a boxed-in control. The
+     earlier heavy left rule fought the page instead of settling into it. */
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  padding: var(--s4) var(--s5);
+  font-size: 1rem;
+  line-height: 1.9;
+  min-height: 200px;
+}
+.compose-story:hover { border-color: var(--border); }
+.compose-story:focus {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--surface);
+}
+.write-count { padding-left: var(--s2); }
+
+/* ── storyboard as a shot list ────────────────────────────────────────
+   A shot list is a list of rows, not a wall of cards. Stacked as tall
+   cards each shot took most of a screen, so comparing shot 1 against
+   shot 4 -- the whole point of a storyboard -- meant scrolling and
+   remembering. One row per shot: the plan on the left, its candidate
+   frames on the right, all of it scannable at once. */
+
+.shot-grid { grid-template-columns: 1fr; gap: var(--s3); }
+.shot-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s5);
+  align-items: center;
+  border-top: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: var(--s4) var(--s4) var(--s4) var(--s5);
+}
+.shot-card[data-status="SELECTED"] { border-left-color: var(--accent); }
+.shot-card[data-status="REVIEW_REQUIRED"] { border-left-color: var(--border-strong); }
+.shot-card[data-status="FAILED"] { border-left-color: var(--danger); }
+.shot-info { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+
+/* Candidate frames: thumbnail sized for comparison, not for viewing.
+   The browser's own fullscreen is one click away when a clip earns a
+   real look, so four control bars stacked down the page buy nothing. */
+.shot-card .take-grid {
+  display: flex;
+  gap: var(--s3);
+  margin: 0;
+  grid-template-columns: none;
+}
+.shot-card .take { width: 84px; flex: none; }
+.shot-card .take-frame { aspect-ratio: 9 / 16; }
+.shot-card .take-frame video { height: 100%; }
+
+@media (max-width: 760px) {
+  .shot-card { grid-template-columns: 1fr; align-items: start; gap: var(--s3); }
+  .shot-card .take-grid { overflow-x: auto; padding-bottom: var(--s1); }
+}
+
+/* Frame first, description after -- the order a real shot list reads in,
+   and it closes the empty gutter that opened when the description was
+   stretched across the row with the thumbnail pinned to the far edge. */
+.shot-card {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  align-items: center;
+}
+.shot-card .take-grid { order: -1; }
+.shot-card .take { width: 68px; }
+.shot-card .take .btn { font-size: 0.6875rem; min-height: 22px; padding: 1px var(--s1); }
+.shot-info { gap: var(--s1); }
+@media (max-width: 760px) {
+  .shot-card { grid-template-columns: 1fr; }
+  .shot-card .take-grid { order: 0; }
+}

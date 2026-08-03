@@ -153,7 +153,10 @@ def db_status(engine, database_url: str) -> DbStatus:
             pending.append(f"schema_migrations.version {current_version!r} -> {SCHEMA_VERSION}")
 
         row_counts: dict[str, int] = {}
-        for table in ("channels", "jobs", "stage_runs", "assets", "publications", "publication_audit_events"):
+        for table in (
+            "channels", "jobs", "stage_runs", "assets", "publications", "publication_audit_events",
+            "fable_projects", "fable_scenes", "fable_shots", "fable_takes",
+        ):
             try:
                 row_counts[table] = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one()
             except Exception:  # noqa: BLE001 - table doesn't exist yet

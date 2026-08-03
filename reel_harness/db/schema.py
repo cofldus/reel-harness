@@ -17,6 +17,12 @@ from sqlalchemy.schema import Column, CreateColumn
 from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlalchemy.types import JSON, TypeEngine
 
+# Imported for its side effect only: registering the Fable cinematic tables
+# on Base.metadata BEFORE any init_db()/create_all() call. v8 adds only
+# brand-new tables (fable_projects/characters/locations/scenes/shots/takes),
+# which create_all() handles for both fresh and existing databases -- same
+# shape as the v5 publications tables, no _ADDITIVE_COLUMNS entries needed.
+import reel_harness.db.cinematic_models  # noqa: F401  (side-effect import)
 from reel_harness.db.models import Base, UTCDateTime
 
 SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
@@ -24,10 +30,13 @@ SUPPORTED_DATABASE_BACKENDS = frozenset({"sqlite", "postgresql"})
 # Migration policy until Alembic is introduced (see docs/ARCHITECTURE.md):
 # `create_all` builds the full current schema for new databases, and
 # _ADDITIVE_COLUMNS applies forward-only ALTER TABLE ADD COLUMN statements so
-# existing dev databases keep working without data loss. Only nullable column
-# additions are allowed through this path -- anything destructive or shaped
-# differently is the trigger to adopt Alembic for real.
-SCHEMA_VERSION = 7
+# existing dev databases keep working without data loss. Only ADDING a column
+# is allowed through this path: nullable, or NOT NULL with a server_default
+# that gives every existing row a correct value (see `assets.attempt_number`
+# and `publications.processing_poll_count`). Anything destructive -- a drop,
+# a rename, a type change, a backfill that needs to read other columns -- is
+# the trigger to adopt Alembic for real.
+SCHEMA_VERSION = 12
 
 # (table, column, SQLAlchemy type, nullable, server_default). Rendered to
 # per-dialect ALTER TABLE ... ADD COLUMN DDL by _ensure_column() via
@@ -73,6 +82,41 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, TypeEngine, bool, TextClause | ColumnEle
     ("publications", "processing_started_at", UTCDateTime(), True, None),
     ("publications", "next_poll_at", UTCDateTime(), True, None),
     ("publications", "processing_poll_count", Integer(), False, text("0")),
+    # v8: no new columns -- the Fable cinematic tables (db.cinematic_models)
+    # are brand-new, which create_all() already handles for both fresh and
+    # existing databases; same shape as v5's publications tables.
+    # v9: Fable F2 adaptation idempotency -- see
+    # core.fable_service.adapt_project. First additive column added since
+    # the migration mechanism became dialect-portable (6A-1).
+    ("fable_projects", "adaptation_fingerprint", String(), True, None),
+    # v10: Fable F3 cost/budget -- see core.cost_service. The limit is
+    # NULL until an operator sets one, and that NULL is load-bearing: a
+    # cost-incurring provider is refused while no explicit limit exists.
+    # `budget_spent_amount` accumulates REAL provider-reported costs only
+    # (never estimates), so an existing project reads as 0 spent, which
+    # is exactly true -- nothing it generated was ever billed through
+    # this accounting.
+    ("fable_projects", "budget_limit_amount", Float(), True, None),
+    ("fable_projects", "budget_currency", String(), True, None),
+    ("fable_projects", "budget_spent_amount", Float(), False, text("0")),
+    # The per-take record the project total is an accumulation OF -- kept
+    # so the running total can be audited against its own line items
+    # (core.cost_service.recorded_spend) instead of being trusted.
+    ("fable_takes", "cost_amount", Float(), True, None),
+    ("fable_takes", "cost_currency", String(), True, None),
+    # v11: Fable F3 reference sheets -- the whole four-view sheet as one
+    # JSON doc (the face view stays in the pre-existing
+    # `reference_image_path`), plus why a sheet is missing when a
+    # content-policy refusal is the reason. See core.fable_service's
+    # generate_references.
+    ("fable_characters", "reference_images", JSON(), True, None),
+    ("fable_characters", "reference_failure_code", String(), True, None),
+    ("fable_characters", "reference_failure_summary", String(), True, None),
+    ("fable_characters", "reference_cost_amount", Float(), True, None),
+    ("fable_characters", "reference_cost_currency", String(), True, None),
+    # v12: per-project candidate-take count. NULL means "use the
+    # operator's default", which is a different statement from "one".
+    ("fable_projects", "takes_per_shot", Integer(), True, None),
 ]
 
 

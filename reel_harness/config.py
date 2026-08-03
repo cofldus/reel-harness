@@ -48,6 +48,14 @@ class Settings(BaseSettings):
         validation_alias=_llm_alias("REEL_HARNESS_DB_STATEMENT_TIMEOUT_SECONDS", "DB_STATEMENT_TIMEOUT_SECONDS"),
     )
     jobs_dir: Path = Path("./jobs")
+    # Fable cinematic projects get their own storage root (a second
+    # LocalFilesystemStorage instance on AppContext) -- project artifacts
+    # live under fable_projects/{project_id}/..., never mixed into
+    # jobs/{job_id}/... The same UUID-only/path-traversal rules apply.
+    fable_projects_dir: Path = Field(
+        Path("./fable_projects"),
+        validation_alias=_llm_alias("REEL_HARNESS_FABLE_PROJECTS_DIR", "FABLE_PROJECTS_DIR"),
+    )
     app_api_key: str = "changeme-local-dev-key"
     # `serve --host` defaults from this (a CLI flag still overrides for a
     # one-off run) so ops.preflight's public-bind check and the running
@@ -129,6 +137,112 @@ class Settings(BaseSettings):
     tts_retry_backoff_seconds: float = Field(
         2.0, validation_alias=_llm_alias("REEL_HARNESS_TTS_RETRY_BACKOFF", "TTS_RETRY_BACKOFF_SECONDS"))
 
+    # Cinematic video generation provider (Fable, Phase F1). Same
+    # conventions as the other provider blocks: "fake" needs nothing and is
+    # the default; the real adapter (F5) will add its base-url/key fields
+    # here when it lands. Selection only for now.
+    cinematic_provider: str = Field(
+        "fake", validation_alias=_llm_alias("REEL_HARNESS_CINEMATIC_PROVIDER", "CINEMATIC_PROVIDER"))
+    cinematic_model: str = Field(
+        "veo-3.1-fast-generate-001", validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_MODEL", "CINEMATIC_MODEL"))
+    # Published list price per generated SECOND. Configurable rather than
+    # hardcoded for the same reason as the image price -- a vendor's
+    # tariff is not this project's to promise. Unset it and estimates
+    # report unknown, which makes a budgeted project refuse to run.
+    cinematic_price_per_second_usd: float | None = Field(
+        0.15, validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_PRICE_PER_SECOND_USD", "CINEMATIC_PRICE_PER_SECOND_USD"))
+    # Veo generates native audio. Left on by default because a silent
+    # clip is a worse default than one with sound the editor can mute.
+    cinematic_generate_audio: bool = Field(
+        True, validation_alias=_llm_alias(
+            "REEL_HARNESS_CINEMATIC_GENERATE_AUDIO", "CINEMATIC_GENERATE_AUDIO"))
+    # Film assembly (media.film_editor). "cut" is the default because a
+    # hard cut is a lossless stream COPY -- every other option blends
+    # pixels and therefore costs a full re-encode.
+    fable_transition: str = Field(
+        "cut", validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TRANSITION", "FABLE_TRANSITION"))
+    fable_transition_seconds: float = Field(
+        0.5, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TRANSITION_SECONDS", "FABLE_TRANSITION_SECONDS"))
+    fable_fade_in_seconds: float = Field(
+        0.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_FADE_IN_SECONDS", "FABLE_FADE_IN_SECONDS"))
+    fable_fade_out_seconds: float = Field(
+        0.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_FADE_OUT_SECONDS", "FABLE_FADE_OUT_SECONDS"))
+    # Muting is an explicit editorial choice. Veo generates native audio,
+    # and silently dropping it would be a surprising default.
+    fable_mute_audio: bool = Field(
+        False, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_MUTE_AUDIO", "FABLE_MUTE_AUDIO"))
+    # A transition-bearing assembly re-encodes every frame; the default
+    # subprocess timeout is sized for a stream copy, not for that.
+    fable_render_timeout_seconds: float = Field(
+        1800.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_RENDER_TIMEOUT_SECONDS", "FABLE_RENDER_TIMEOUT_SECONDS"))
+    # Narrative Director (story -> shot plan). "openai-compatible" reuses
+    # the REEL_HARNESS_LLM_* endpoint/credentials above -- adaptation is a
+    # chat-completions call against the same kind of endpoint, so a second
+    # set of connection settings would be duplication, not isolation.
+    narrative_provider: str = Field(
+        "fake", validation_alias=_llm_alias("REEL_HARNESS_NARRATIVE_PROVIDER", "NARRATIVE_PROVIDER"))
+    # An adaptation is a much larger generation than a short-form script
+    # (bible + characters + locations + scenes + shots), so it gets its
+    # own output budget and read timeout rather than reusing the script
+    # call's much smaller ones.
+    narrative_max_output_tokens: int = Field(
+        6000, validation_alias=_llm_alias(
+            "REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS", "NARRATIVE_MAX_OUTPUT_TOKENS"))
+    narrative_read_timeout_seconds: float = Field(
+        120.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_NARRATIVE_READ_TIMEOUT", "NARRATIVE_READ_TIMEOUT_SECONDS"))
+    # Reference-image generation (virtual actor / location stills).
+    reference_image_provider: str = Field(
+        "fake", validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_PROVIDER", "REFERENCE_IMAGE_PROVIDER"))
+    # gemini-2.5-flash-image rather than the newer 3.1: 3.1 appears in
+    # the model list but a live probe of four candidates on a real
+    # project returned 404 for it, so the previous default was a name
+    # that could not actually be called. A default that fails on a fresh
+    # account is worse than an older model that works; override the env
+    # var once 3.1 is generally reachable.
+    reference_image_model: str = Field(
+        "gemini-2.5-flash-image", validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_MODEL", "REFERENCE_IMAGE_MODEL"))
+    # Published list price per generated image. Configurable rather than
+    # hardcoded because a vendor's price list is not this project's to
+    # promise -- set it to 0 to force `known=False` estimates (and so
+    # refuse to run under a budget) when the real tariff is unknown.
+    reference_image_price_usd: float | None = Field(
+        0.067, validation_alias=_llm_alias(
+            "REEL_HARNESS_REFERENCE_IMAGE_PRICE_USD", "REFERENCE_IMAGE_PRICE_USD"))
+    # Google credentials, shared by the reference-image adapter and (F5)
+    # the Veo video adapter -- ONE SDK and ONE credential for both is why
+    # this vendor was chosen. Two auth paths: an API key against the
+    # Gemini Developer API, or Vertex AI with a project/location using
+    # ambient application-default credentials.
+    google_api_key: SecretStr = Field(
+        SecretStr(""), validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_API_KEY", "GOOGLE_API_KEY"))
+    google_project: str = Field(
+        "", validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_PROJECT", "GOOGLE_PROJECT"))
+    # us-central1 only for Veo's GA endpoint (docs/STATUS.md's research);
+    # the default matches so F5 needs no second decision.
+    google_location: str = Field(
+        "us-central1", validation_alias=_llm_alias(
+            "REEL_HARNESS_GOOGLE_LOCATION", "GOOGLE_LOCATION"))
+    google_use_vertex: bool = Field(
+        False, validation_alias=_llm_alias("REEL_HARNESS_GOOGLE_USE_VERTEX", "GOOGLE_USE_VERTEX"))
+    # How many candidate takes to generate per shot (1, 2 or 4). Each take
+    # is a separate paid generation, so the default is 1 -- more candidates
+    # is an explicit choice to spend N times as much for something to
+    # choose between. A project may override this for itself.
+    fable_takes_per_shot: int = Field(
+        1, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_TAKES_PER_SHOT", "FABLE_TAKES_PER_SHOT"))
+
     # Stock-media (asset) provider selection and adapter configuration. Same
     # conventions as the LLM/TTS blocks: "fake" needs nothing, "pexels" talks
     # to the real Pexels Video API, the API key is a SecretStr registered for
@@ -181,6 +295,17 @@ class Settings(BaseSettings):
     # both true. `private` is always available with no extra confirmation.
     allow_public_upload: bool = Field(
         False, validation_alias=_llm_alias("REEL_HARNESS_ALLOW_PUBLIC_UPLOAD", "ALLOW_PUBLIC_UPLOAD"))
+
+    # Fable (Phase F3) global spend switch, deliberately shaped exactly like
+    # allow_public_upload above: a cost-incurring cinematic/reference-image
+    # provider runs only when this is true AND the project itself carries an
+    # explicit budget limit (core.cost_service.assert_paid_generation_allowed).
+    # Two independent decisions -- one operator-wide, one per project -- so
+    # neither can be inferred from the other. The offline fake/demo tiers cost
+    # nothing and are never gated by this.
+    allow_paid_generation: bool = Field(
+        False, validation_alias=_llm_alias(
+            "REEL_HARNESS_ALLOW_PAID_GENERATION", "ALLOW_PAID_GENERATION"))
 
     # YouTube OAuth (installed-app/loopback flow -- see docs/PUBLISHING.md
     # and publisher.oauth_youtube). The client id/secret come from a Google
@@ -396,6 +521,146 @@ def _validate_tts_settings(settings: Settings) -> None:
         )
 
 
+def _validate_cinematic_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import CINEMATIC_VIDEO_PROVIDERS
+
+    name = normalize_provider_name(settings.cinematic_provider)
+    if name not in CINEMATIC_VIDEO_PROVIDERS:
+        raise ProviderConfigurationError(
+            f"unknown cinematic provider {settings.cinematic_provider!r} "
+            f"(supported: {', '.join(sorted(CINEMATIC_VIDEO_PROVIDERS))})"
+        )
+    if name != "google":
+        return
+    # Selecting the real adapter without a way to authenticate -- or
+    # pinned to a region the model is not served from -- fails HERE, at
+    # startup, with the exact variable names. Never at first use, halfway
+    # through a paid generation run.
+    from reel_harness.providers.google_cinematic_video import SUPPORTED_LOCATION
+
+    if settings.google_use_vertex:
+        if not settings.google_project:
+            raise ProviderConfigurationError(
+                f"cinematic provider {name!r} is selected but credentials are not "
+                "configured: missing REEL_HARNESS_GOOGLE_PROJECT"
+            )
+        if settings.google_location != SUPPORTED_LOCATION:
+            raise ProviderConfigurationError(
+                f"{settings.cinematic_model} is only served from "
+                f"{SUPPORTED_LOCATION!r}, but REEL_HARNESS_GOOGLE_LOCATION is "
+                f"{settings.google_location!r}"
+            )
+    elif not settings.google_api_key.get_secret_value():
+        raise ProviderConfigurationError(
+            f"cinematic provider {name!r} is selected but credentials are not "
+            "configured: missing REEL_HARNESS_GOOGLE_API_KEY"
+        )
+
+
+def _validate_narrative_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import NARRATIVE_DIRECTORS
+
+    name = normalize_provider_name(settings.narrative_provider)
+    if name not in NARRATIVE_DIRECTORS:
+        raise ProviderConfigurationError(
+            f"unknown narrative provider {settings.narrative_provider!r} "
+            f"(supported: {', '.join(sorted(NARRATIVE_DIRECTORS))})"
+        )
+    if name == "fake":
+        return
+    # Adaptation reuses the LLM endpoint block -- report the exact vars.
+    missing = [
+        var for var, value in (
+            ("REEL_HARNESS_LLM_BASE_URL", settings.llm_base_url),
+            ("REEL_HARNESS_LLM_MODEL", settings.llm_model),
+            ("REEL_HARNESS_LLM_API_KEY", settings.llm_api_key.get_secret_value()),
+        ) if not value
+    ]
+    if missing:
+        raise ProviderConfigurationError(
+            f"narrative provider {name!r} is selected but credentials are not "
+            "configured: missing " + ", ".join(missing)
+        )
+
+
+def _validate_edit_plan(settings: Settings) -> None:
+    """A malformed edit plan fails at STARTUP rather than after every shot
+    has been generated and paid for -- the final render is the very last
+    step, and discovering an unsupported transition there would waste the
+    whole run."""
+    from reel_harness.media.film_editor import SUPPORTED_TRANSITIONS, EditPlan, validate_plan
+
+    if settings.fable_transition not in SUPPORTED_TRANSITIONS:
+        raise ProviderConfigurationError(
+            f"unsupported fable transition {settings.fable_transition!r} "
+            f"(supported: {', '.join(sorted(SUPPORTED_TRANSITIONS))})"
+        )
+    plan = edit_plan_from_settings(settings)
+    try:
+        # Validated against a nominal 8s clip pair -- the real durations
+        # are re-checked at render time against the actual footage.
+        validate_plan(plan, [8.0, 8.0])
+    except ValueError as exc:
+        raise ProviderConfigurationError(f"invalid fable edit plan: {exc}") from exc
+    assert isinstance(plan, EditPlan)
+
+
+def edit_plan_from_settings(settings: Settings):
+    """The one place settings become an EditPlan, so the startup check and
+    the renderer can never disagree about what was configured."""
+    from reel_harness.media.film_editor import EditPlan
+
+    return EditPlan(
+        transition=settings.fable_transition,
+        transition_sec=settings.fable_transition_seconds,
+        fade_in_sec=settings.fable_fade_in_seconds,
+        fade_out_sec=settings.fable_fade_out_seconds,
+        mute_audio=settings.fable_mute_audio,
+    )
+
+
+def _validate_takes_per_shot(settings: Settings) -> None:
+    from reel_harness.core.cinematic_state import SUPPORTED_TAKES_PER_SHOT
+
+    if settings.fable_takes_per_shot not in SUPPORTED_TAKES_PER_SHOT:
+        raise ProviderConfigurationError(
+            f"unsupported fable_takes_per_shot {settings.fable_takes_per_shot!r} "
+            f"(supported: {', '.join(str(n) for n in sorted(SUPPORTED_TAKES_PER_SHOT))})"
+        )
+
+
+def _validate_reference_image_settings(settings: Settings) -> None:
+    from reel_harness.providers.registry import REFERENCE_IMAGE_PROVIDERS
+
+    name = normalize_provider_name(settings.reference_image_provider)
+    if name not in REFERENCE_IMAGE_PROVIDERS:
+        raise ProviderConfigurationError(
+            f"unknown reference image provider {settings.reference_image_provider!r} "
+            f"(supported: {', '.join(sorted(REFERENCE_IMAGE_PROVIDERS))})"
+        )
+    if name != "google":
+        return
+    # Selecting the real adapter without a way to authenticate fails HERE,
+    # at startup, with the exact missing variable names -- never at first
+    # use, halfway through a paid casting run.
+    if settings.google_use_vertex:
+        missing = [
+            var for var, value in (
+                ("REEL_HARNESS_GOOGLE_PROJECT", settings.google_project),
+                ("REEL_HARNESS_GOOGLE_LOCATION", settings.google_location),
+            ) if not value
+        ]
+    else:
+        missing = [
+            "REEL_HARNESS_GOOGLE_API_KEY",
+        ] if not settings.google_api_key.get_secret_value() else []
+    if missing:
+        raise ProviderConfigurationError(
+            f"reference image provider {name!r} is selected but credentials are not "
+            "configured: missing " + ", ".join(missing)
+        )
+
+
 def _validate_asset_settings(settings: Settings) -> None:
     if settings.asset_orientation not in ASSET_SUPPORTED_ORIENTATIONS:
         raise ProviderConfigurationError(
@@ -575,6 +840,11 @@ def validate_provider_settings(settings: Settings) -> None:
     _validate_database_url(settings)
     _validate_llm_settings(settings)
     _validate_tts_settings(settings)
+    _validate_cinematic_settings(settings)
+    _validate_narrative_settings(settings)
+    _validate_reference_image_settings(settings)
+    _validate_takes_per_shot(settings)
+    _validate_edit_plan(settings)
     _validate_asset_settings(settings)
     _validate_youtube_settings(settings)
     _validate_tiktok_settings(settings)

@@ -1,0 +1,26 @@
+{# Self-terminating poll: the hx-get is only re-included while the project
+   is genuinely still working. A project waiting on a person (any review
+   gate, or FAILED) stops polling instead of hammering the DB forever --
+   the same rule fragments/job_status.html follows.
+
+   Scope note: this fragment used to carry the whole status message, the
+   budget and the shot table. The detail page now says what state the
+   project is in far more usefully in the "now" panel, so what is left
+   here is exactly what has to survive a poll: the failure detail, and the
+   status value that tells app.js the page has gone stale and should
+   reload itself. #}
+<div id="fable-status" data-status="{{ project.status }}"
+     {% if not project.is_terminal and not project.needs_action %}
+     hx-get="/fable/{{ project.project_id }}/status" hx-trigger="every 2s [document.visibilityState=='visible']" hx-swap="outerHTML"
+     {% endif %}>
+
+  {% if project.failure_summary %}
+  <div class="alert alert-error" role="alert">
+    <p>{{ project.failure_summary }}</p>
+    <details>
+      <summary class="meta">기술 세부정보</summary>
+      <dl class="kv"><dt>failure_code</dt><dd class="mono">{{ project.failure_code }}</dd></dl>
+    </details>
+  </div>
+  {% endif %}
+</div>

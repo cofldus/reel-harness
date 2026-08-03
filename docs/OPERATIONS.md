@@ -933,6 +933,427 @@ upload, analytics collection, comments management, a web dashboard (now
 exists — Phase 5A/5B), PostgreSQL (now exists — Phase 6A-1), a cloud
 queue, a forced cloud-storage vendor, and arbitrary tunneling software.
 
+## Fable cinematic projects (F1/F2)
+
+A separate pipeline from the short-form job flow: a story becomes a shot
+plan, each shot is generated as a video clip, you pick takes, and the
+selected takes are cut into a film. Artifacts live under
+`REEL_HARNESS_FABLE_PROJECTS_DIR` (default `./fable_projects`), never
+mixed into `jobs/`.
+
+```
+uv run reel-harness fable-create --title "비 오는 밤" --story-file story.txt
+uv run reel-harness fable-adapt <project_id>
+uv run reel-harness fable-approve <project_id> --step story   # -> CASTING
+uv run reel-harness fable-generate-references <project_id>    # -> CHARACTER_REVIEW
+uv run reel-harness fable-reference <character_id>            # approve the sheet
+uv run reel-harness fable-approve <project_id> --step characters
+uv run reel-harness fable-estimate <project_id>                  # what it would cost
+uv run reel-harness fable-budget <project_id> --limit 5 --currency USD
+uv run reel-harness fable-approve <project_id> --step shots      # cost gate
+uv run reel-harness fable-worker-run --idle-exit-after 5
+uv run reel-harness fable-status <project_id>
+uv run reel-harness fable-select-take <take_id>
+uv run reel-harness fable-render <project_id>
+uv run reel-harness fable-approve <project_id> --step final
+```
+
+**Nothing advances without you.** Every `*_REVIEW` state requires an
+explicit approval command; `--step shots` is the single entry into
+generation, which is the only phase that can cost money. `serve
+--fable-workers N` (default 0) runs the generation lane alongside the
+other workers.
+
+### Casting: character reference sheets
+
+`fable-generate-references` produces a four-view reference sheet per
+character — a face portrait, a three-quarter view, a full-body view, and
+a wardrobe detail — and moves the project `CASTING -> CHARACTER_REVIEW`.
+
+**The face is generated first, and the other three are generated from
+it.** Each later view is sent with the face image attached as a character
+reference. This is not an optimization: generating the four
+independently produces four different-looking people, and since every
+shot's footage imitates this sheet, that would make the film's lead
+change face between shots. The order lives in
+`pipeline/reference_prompt.py`, not in the caller.
+
+Generation is not approval. Each sheet arrives unapproved, and
+`fable-approve --step characters` refuses until every character's sheet
+has been approved with `fable-reference <character_id>`. Approving the
+cast means approving the actor you actually looked at.
+
+- `fable-reference <character_id> --reject` un-approves a sheet and
+  clears its fingerprint, so the next `fable-generate-references` run
+  regenerates it. The images stay on disk — they were paid for, and
+  deleting them would destroy the evidence of what was rejected.
+- Re-running `fable-generate-references` with an unchanged character
+  bible is a **replay**, not four more paid calls. Changing the bible
+  changes the sheet's fingerprint, which regenerates it *and* revokes any
+  previous approval — you are looking at a different actor now.
+- A **safety refusal** does not fail the project. The reason is recorded
+  on the character (`reference_failure_code`), whatever views were
+  generated are kept, and the project still reaches `CHARACTER_REVIEW` so
+  you meet every refusal at once and decide there: edit the character
+  bible and regenerate, or drop the character. An incomplete sheet cannot
+  be approved.
+- Reference images cost money like any other generation: the same double
+  gate applies, the whole cast is priced up front (affording half a cast
+  is not affording it), and each character's sheet is a line item in the
+  spend audit.
+
+### Choosing the cinematic video provider
+
+`REEL_HARNESS_CINEMATIC_PROVIDER`:
+
+- **`fake`** (default) — deterministic, renders real mp4s via local
+  ffmpeg, no network. Stamped `FAKE_TEST_LICENSE`.
+- **`google`** — Vertex AI Veo (`veo-3.1-fast-generate-001`). Needs the
+  optional `google` extra and a credential; shares both with the
+  reference-image adapter.
+
+```
+REEL_HARNESS_CINEMATIC_PROVIDER=google
+REEL_HARNESS_GOOGLE_USE_VERTEX=true
+REEL_HARNESS_GOOGLE_PROJECT=my-project
+REEL_HARNESS_GOOGLE_LOCATION=us-central1     # the ONLY supported region
+```
+
+Three documented constraints are enforced locally, before any request is
+sent, because each one costs a generation to learn the hard way:
+
+- **Reference-driven runs are fixed at 8s / 720p.** Not a preference —
+  attaching character references makes the API fix both, so asking for
+  anything else silently returns something different. Requesting a
+  mismatch is refused here instead.
+- **At most 3 reference images**, sent as type `asset` (which transfers
+  identity; `style` would transfer look).
+- **`person_generation=allow_adult`**, stated at the API boundary as well
+  as in every prompt.
+
+`us-central1` is the only region the GA endpoint serves, so a project
+pinned elsewhere fails at **startup** with the right region named — not
+at generation time, after you believed it was configured.
+
+**Generated videos are deleted after two days.** The adapter downloads
+bytes immediately; the local file under `fable_projects/` is the
+artifact, and no provider URI is ever treated as durable storage.
+
+A safety-filtered result surfaces as `moderated`, which routes the shot
+to `REVIEW_REQUIRED` — never a blind retry, since the same prompt would
+be filtered again. **Cancellation is local-only**: the SDK exposes no
+cancel for a video operation, so `cancel_generation` forgets the handle
+and does not claim to have stopped a generation you will still be billed
+for.
+
+### Film assembly: transitions, fades and audio
+
+The final render defaults to **hard cuts**, assembled with a lossless
+stream copy. Anything that blends pixels needs a full re-encode, so it is
+opt-in rather than on by default:
+
+```
+REEL_HARNESS_FABLE_TRANSITION=dissolve        # cut | dissolve | fade_black
+REEL_HARNESS_FABLE_TRANSITION_SECONDS=0.5
+REEL_HARNESS_FABLE_FADE_IN_SECONDS=0.5
+REEL_HARNESS_FABLE_FADE_OUT_SECONDS=1.0
+REEL_HARNESS_FABLE_MUTE_AUDIO=false
+```
+
+Points worth knowing:
+
+- **A transition overlaps the two shots it joins**, so each one makes the
+  film *shorter*. Four 8s shots with 0.5s dissolves run 30.5s, not 32s.
+- Audio crossfades alongside the video, so sound does not jump ahead of
+  picture. Veo generates native audio; muting is an explicit editorial
+  choice, never a silent side effect of assembly.
+- A plan that cannot work — a transition longer than the shortest clip,
+  fades longer than the film — is refused at **startup**, and again
+  before ffmpeg runs. Discovering it at the final render would waste an
+  entire paid generation run.
+- `REEL_HARNESS_FABLE_RENDER_TIMEOUT_SECONDS` (default 1800) exists
+  because re-encoding a film takes far longer than copying one.
+
+### Choosing the reference-image provider
+
+`REEL_HARNESS_REFERENCE_IMAGE_PROVIDER`:
+
+- **`fake`** (default) — deterministic colour panels, no network. For
+  tests and for exercising the workflow.
+- **`demo`** — the same idea with a per-character palette so a sheet is
+  eyeball-able offline: one hue per character, one shade per view. Every
+  image is stamped `DEMO_TEST_LICENSE` and can never pass a publish gate.
+  Deliberately **synthetic rather than bundled photos**: shipping sample
+  "people" with a local-first tool would mean shipping either a real
+  person's likeness or AI output this tier explicitly does not produce.
+- **`google`** — the real thing: `gemini-2.5-flash-image` via the
+  `google-genai` SDK. Needs the optional extra
+  (`uv sync --extra google`) and a credential. Never a hard dependency —
+  the whole Fable pipeline runs offline on the other two tiers.
+
+Two auth paths, sharing one credential with F5's Veo adapter (the reason
+this vendor was chosen):
+
+```
+REEL_HARNESS_REFERENCE_IMAGE_PROVIDER=google
+REEL_HARNESS_GOOGLE_API_KEY=...                  # Gemini Developer API
+# ...or Vertex AI with application-default credentials:
+REEL_HARNESS_GOOGLE_USE_VERTEX=true
+REEL_HARNESS_GOOGLE_PROJECT=my-project
+REEL_HARNESS_GOOGLE_LOCATION=us-central1
+```
+
+Selecting `google` without a usable credential fails **at startup** with
+the exact missing variable names — never at first use, halfway through a
+paid casting run.
+
+Two deliberate limits on the real adapter:
+
+- **Only 512 and 1K resolutions are offered.** Veo caps reference-driven
+  runs at 720p, so a 2K or 4K reference costs more and buys nothing any
+  shot could use. Offering it would be a trap, not a feature.
+- **`REEL_HARNESS_REFERENCE_IMAGE_PRICE_USD`** (default `0.067`) is the
+  published list price, configurable because a vendor's tariff is not
+  this project's to promise. Unset it and estimates report `unknown`,
+  which makes a budgeted project refuse to run rather than spend against
+  a number nobody stands behind.
+
+**Every generated image carries a SynthID watermark**, recorded on the
+result. Google applies it to all generated imagery with no removal
+option. Whether Veo accepts SynthID-watermarked images as
+character-reference input is an **open question no documentation
+answers** — if it does not, the whole consistency strategy needs
+rethinking.
+
+### `fable-reference-smoke`
+
+```
+uv run reel-harness fable-reference-smoke --keep-output ./smoke
+uv run reel-harness fable-reference-smoke --confirm-paid-generation   # real provider
+```
+
+One real reference-image chain — a face, then a three-quarter view
+generated *from* it — against whichever provider is configured. It
+answers with actual bytes what the test suite structurally cannot: that
+the adapter reaches the provider, and that the model accepts its own
+generated image back as a character reference.
+
+It spends real money on a real tier, so it refuses without
+`--confirm-paid-generation` and tells you what it would cost first
+(exit code 4). Against `fake`/`demo` it is a free wiring check.
+
+The output states its own limits in a `does_not_prove` field, so a pasted
+result can never be read as more than it is. In particular it does **not**
+establish that the two images depict a recognizably identical person —
+nothing automated judges that, so look at them (`--keep-output`) — and it
+does not answer the Veo/SynthID question, which needs F5's video adapter.
+
+Run it as soon as GCP credentials exist. It is the cheapest way to find
+out whether the consistency strategy holds before F5 builds on it.
+
+### Multiple candidate takes per shot
+
+`REEL_HARNESS_FABLE_TAKES_PER_SHOT` (1, 2 or 4; default 1), overridable
+per project with `fable-create --takes-per-shot N`. Each take is a
+**separate paid generation**, so asking for 4 costs four times as much —
+the default is 1 and more is an explicit choice to spend N times as much
+for something to choose between.
+
+- Each take gets a **distinct seed**, deterministically derived from the
+  prompt fingerprint and the attempt number. Distinct because N takes
+  from one prompt with one seed are N copies of the same clip;
+  deterministic because a re-run after a crash must reproduce the take it
+  already paid for rather than buy a different one.
+- The budget is checked **per take**, not per shot. A project that can
+  afford two takes but not four generates two and stops with the shot
+  reviewable — refusing to produce any would waste the ones it could pay
+  for.
+- A failure on a later take **never discards the earlier ones**. A shot
+  with two good takes and a third that timed out lands in
+  `REVIEW_REQUIRED` with the failure recorded, not `FAILED`. A shot only
+  fails when it produced nothing at all.
+- Re-running a complete batch **buys nothing**: the takes are already
+  there, so the run replays.
+- Selecting one take **retains the others**, media included. Rejected
+  candidates are never deleted on selection.
+- Only 1, 2 and 4 are accepted. `40` is a typo that would spend forty
+  times the estimate a human approved.
+
+### Cost, budgets, and the paid-generation gate
+
+Generation is the only phase that spends money, and two independent
+switches must both be on before a cost-incurring provider will run:
+
+1. `REEL_HARNESS_ALLOW_PAID_GENERATION=true` — the operator-wide switch,
+   off by default.
+2. `fable-budget <project_id> --limit N --currency X` — that project's own
+   explicit ceiling.
+
+Neither implies the other, deliberately: the same shape as
+`REEL_HARNESS_ALLOW_PUBLIC_UPLOAD` plus `--confirm-public-upload`. A
+project with **no** limit set is not "unlimited" — it is "no decision
+made", and a paid provider is refused outright. The offline `fake`/`demo`
+tiers cost nothing and are never gated by either switch.
+
+`fable-approve --step shots` prices the whole shot plan before making any
+shot claimable, and refuses if the total would pass the limit — failing
+there costs nothing, whereas failing later means shots were queued that
+could never all be paid for. The worker re-checks per shot anyway, since
+config and budget can both change after approval.
+
+**Running out of budget is a review, not a failure.** A shot the project
+cannot pay for stops at `REVIEW_REQUIRED` with `failure_code` =
+`BUDGET_EXCEEDED` (or `PAID_GENERATION_NOT_ALLOWED`) *before* any provider
+call, so nothing was charged and no take exists. Raise the limit and the
+shot re-queues through the same path a rejected take uses.
+
+What the numbers mean, precisely:
+
+- **Estimates never move spend.** `budget_spent_amount` only ever
+  accumulates a cost the provider *reported* for a generation that
+  actually completed, recorded in the same transaction as the take it
+  belongs to.
+- **Unknown stays unknown.** A provider that publishes no price yields
+  `known: false` from `fable-estimate` — never a guessed number. Under a
+  live budget an unpriceable generation is *refused*, since allowing an
+  unbounded charge is precisely what a ceiling forbids.
+- **`unpriced_take_count`** in `fable-status`/`fable-budget` counts
+  completed takes the provider gave no figure for. Non-zero means the
+  reported spend is a lower bound, and it says so rather than quietly
+  under-reporting.
+- **Currencies are never converted.** A provider quoting or billing in a
+  currency the budget is not denominated in is refused
+  (`BUDGET_CURRENCY_MISMATCH`), never converted at an invented rate.
+
+Lowering a limit below what a project has already spent is refused;
+clearing a limit (`--clear`) is always allowed, re-closes the paid gate,
+and un-spends nothing.
+
+### The Fable web UI
+
+`reel-harness serve` exposes the whole lifecycle at `/fable`, alongside
+the job and publication screens. Three pages: a project list, a create
+form, and a project detail page that carries every gate action, the
+casting review, the shot/take table and the budget controls.
+
+Two rules the pages follow, both inherited from Phase 5A/5B:
+
+- **A button that is shown is one the service will accept.** Every
+  `can_*` mirrors the real `FableService` precondition rather than a
+  guess from the transition table, so the page can never offer an action
+  that 409s. When the character gate is blocked, the page says *why*
+  ("2 unapproved reference sheets") instead of silently hiding a button.
+- **Forms are disabled, never removed.** A page that hides a whole form
+  also hides its CSRF field, which was a real bug in Phase 5A.
+
+Every mutating route is CSRF-protected (double-submit cookie) and
+answers with Post/Redirect/Get, so a browser refresh can never
+re-submit a generation that costs money. A refusal comes back as a
+readable message on the page, not a traceback — refusals here are normal
+(a gate not reached, a budget exhausted) and the reason is the useful
+part.
+
+### The `/v1/fable/*` API
+
+Every CLI action above has an HTTP equivalent, bearer-token authenticated
+like the rest of `/v1/*`. The routes add **no domain logic and no new
+permission**: each one calls the same `FableService` method the CLI does,
+so every gate that refuses the CLI refuses the API identically.
+
+```
+POST   /v1/fable/projects                      create
+GET    /v1/fable/projects                      list
+GET    /v1/fable/projects/{id}                 status
+GET    /v1/fable/projects/{id}/shots           shots + their takes
+GET    /v1/fable/projects/{id}/characters      cast + reference sheet state
+GET    /v1/fable/projects/{id}/budget          spend position
+PUT    /v1/fable/projects/{id}/budget          set/clear the limit
+GET    /v1/fable/projects/{id}/estimate        price the plan (read-only)
+POST   /v1/fable/projects/{id}/adapt           DRAFT -> STORY_REVIEW
+POST   /v1/fable/projects/{id}/references      CASTING -> CHARACTER_REVIEW
+POST   /v1/fable/characters/{id}/approve       approve one sheet
+POST   /v1/fable/characters/{id}/reject        reject one sheet
+POST   /v1/fable/projects/{id}/approve         {"step": story|characters|shots|final}
+POST   /v1/fable/takes/{id}/select             select one take for its shot
+POST   /v1/fable/projects/{id}/render          cut the final film
+POST   /v1/fable/projects/{id}/cancel          cancel
+```
+
+One uniform error contract: **404** for something that does not exist,
+**409** for an action that is not valid on this project right now (a
+review gate not reached, an unapproved reference sheet, a budget
+exhausted), **422** for a malformed request, **502** for a provider that
+failed underneath.
+
+Response models are explicit rather than serialized ORM rows, so a column
+added to `StoryProject` can never leak through the API by accident — the
+source text and local filesystem paths are never returned.
+
+### Choosing the Narrative Director
+
+`REEL_HARNESS_NARRATIVE_PROVIDER`:
+
+- **`fake`** (default) — deterministic, no network. Produces a complete
+  adaptation that passes every real validator; useful for exercising the
+  whole flow offline. Never presented as a real adaptation.
+- **`openai-compatible`** — a real LLM. Reuses the
+  `REEL_HARNESS_LLM_BASE_URL` / `_MODEL` / `_API_KEY` block (adaptation
+  is a chat-completions call against the same kind of endpoint), with its
+  own output budget and read timeout since a shot plan is much larger
+  than a short-form script:
+  `REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS` (default 6000),
+  `REEL_HARNESS_NARRATIVE_READ_TIMEOUT` (default 120s).
+
+Selecting `openai-compatible` without those credentials fails at startup
+with the exact missing variable names, never at first use.
+
+### What the adaptation is checked against
+
+The model's output is validated before anything is persisted; a failure
+returns the exact errors to the model for at most **two** repair attempts
+(three calls total) and then fails the stage. A refusal or empty response
+is not repaired at all — re-asking with the same source only burns quota.
+
+- Characters must be fictional **adults** (age bracket whitelist plus an
+  explicit adult flag). A minor-looking character fails parsing outright.
+- One filmable action per shot; exactly one camera movement per shot;
+  shot size/angle/movement must be real film-grammar values.
+- 1–2 characters, 1–3 locations, 1–6 scenes, 4–15 shots, 2–8s per shot.
+- Every scene must quote the **actual source text** it dramatizes;
+  fabricated citations are rejected.
+- Multi-speaker scenes must alternate subjects (shot/reverse-shot).
+
+**Scope of the automated fidelity check**: it catches obvious drift —
+invented source quotes, a dropped ending. It does **not** judge whether
+the adaptation is a *good* reading of your story. That is what the
+STORY_REVIEW gate is for; approve it yourself before casting.
+
+### Idempotency and recovery
+
+Re-running `fable-adapt` with unchanged input replays the stored
+adaptation instead of paying for a second call. Changing the source text
+of an already-adapted project is refused — reject the story review to
+re-adapt instead. If adaptation crashes mid-flight, the project stays in
+`ADAPTING` with no children written; simply re-run `fable-adapt`.
+Re-adaptation refuses outright once any shot has takes, so generated
+footage can never be orphaned by a plan change.
+
+### Live verification status
+
+The real-provider adapter is covered by contract tests against a mock
+transport (protocol conformance, retries, rate-limit handling, auth
+failures that never echo the credential). Contract-test success is never
+reported as live success.
+
+**Live adaptation: RUN and PASSED** (2026-07-31, `openai-compatible`
+against `gpt-4o`). A real Korean short story produced a valid shot plan
+in ~26 seconds — 1 adult character, 1 location, 2 scenes, 4 shots (18s
+total) — passing every validator on the first attempt with no repair
+needed. Adaptation is a single LLM call of a few thousand output tokens,
+so cost per adaptation is roughly that of one large chat completion;
+budget controls for the far more expensive video-generation phase arrive
+in F3.
+
 ## Cancelling a job
 
 `reel-harness job-cancel <id>` / `POST /v1/jobs/{id}/cancel` share one

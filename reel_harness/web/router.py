@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -8,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from reel_harness.api.app import get_context
 from reel_harness.bootstrap import AppContext
 from reel_harness.config import ProviderConfigurationError, validate_provider_settings
+from reel_harness.core.cinematic_state import SUPPORTED_TAKES_PER_SHOT, FableProjectStatus
 from reel_harness.core.publish_service import (
     PublicationInvalidActionError,
     PublicationNotEligibleError,
@@ -20,6 +23,14 @@ from reel_harness.web.dependencies import (
     ensure_csrf_cookie,
     get_templates,
     require_csrf,
+)
+from reel_harness.web.fable_forms import validate_budget_form, validate_new_fable_form
+from reel_harness.web.fable_view_models import (
+    PROJECT_GROUPS,
+    build_character_view,
+    build_fable_detail_view,
+    build_fable_summary_view,
+    build_next_action,
 )
 from reel_harness.web.forms import ALLOWED_LANGUAGES, ALLOWED_STYLES, validate_new_job_form
 from reel_harness.web.publication_forms import validate_create_publication_form
@@ -38,6 +49,9 @@ from reel_harness.web.view_models import (
 router = APIRouter()
 
 FINAL_VIDEO_REL_PATH = "final/final.mp4"
+# The Fable final film lives under the SEPARATE fable_projects storage
+# root, at the same relative path within a project's tree.
+FABLE_FINAL_REL_PATH = "final/final.mp4"
 _FAKE_PROFILE_ENV_FLAG = "REEL_HARNESS_UI_SHOW_FAKE_PROFILE"
 
 # The only three publisher ids a browser can ever connect an OAuth account
@@ -155,7 +169,16 @@ def _publisher_credentials_configured(provider: str, settings) -> tuple[bool, st
 def dashboard(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
     status_view = build_system_status_view(ctx)
     recent_jobs = [build_job_summary_view(j) for j in ctx.jobs.list_jobs(limit=5)]
-    return _render(request, "dashboard.html", {"status": status_view, "recent_jobs": recent_jobs})
+    # Fable is what this product is for, so the home page leads with work
+    # in progress rather than with queue counters.
+    recent = ctx.fable.list_projects()[:4]
+    covers = ctx.fable.project_cover_refs([p.id for p in recent])
+    recent_projects = [build_fable_summary_view(p, covers.get(p.id)) for p in recent]
+    return _render(request, "dashboard.html", {
+        "status": status_view,
+        "recent_jobs": recent_jobs,
+        "recent_projects": recent_projects,
+    })
 
 
 _FILTERABLE_STATUSES = (
@@ -192,6 +215,8 @@ def new_job_form(request: Request, ctx: AppContext = Depends(get_context)) -> HT
         "fake_visible": _fake_profile_visible(ctx.settings),
         "idempotency_key": str(uuid.uuid4()),
         "errors": {}, "values": {},
+        # Refinement proposal state -- absent on a normal GET.
+        "refinement": None, "refine_error": None, "refine_accepted": False,
     })
 
 
@@ -922,3 +947,458 @@ def publisher_disconnect(
     _require_real_publisher_provider(provider)
     ctx.credential_backend().revoke_credential(provider, account_reference)
     return _redirect_to_accounts()
+
+
+# --- Fable cinematic projects (Phase F4) -----------------------------------
+# Unprefixed web routes alongside /v1/fable/* on the API, the same pattern
+# Phase 5A established for jobs. Every action calls the same FableService
+# method the CLI and the API do; nothing here decides domain rules.
+
+
+def _fable_or_404(ctx: AppContext, project_id: str):
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        return ctx.fable.get_project(project_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="fable project not found") from exc
+
+
+def _fable_detail_context(ctx: AppContext, project_id: str) -> dict:
+    project = _fable_or_404(ctx, project_id)
+    shots = ctx.fable.project_shots(project_id)
+    shots_with_takes = [(shot, ctx.fable.shot_takes(shot.id)) for shot in shots]
+    view = build_fable_detail_view(
+        project, ctx.fable.project_characters(project_id), shots_with_takes,
+        ctx.fable.budget_status(project_id),
+    )
+    has_video = ctx.fable_storage.path_for(project_id, FABLE_FINAL_REL_PATH).is_file()
+    # Offered only at the casting gate, where reuse_character is the only
+    # place the service accepts it -- listing actors the operator cannot
+    # actually cast right now would be a button that always refuses.
+    reusable = (
+        [
+            build_character_view(character, character.project_id)
+            for character in ctx.fable.reusable_characters(exclude_project_id=project_id)
+        ]
+        if view.status == FableProjectStatus.CASTING.value else []
+    )
+    # Only at the two gates that spend money -- an estimate priced at any
+    # other moment is noise, and pricing walks every shot through the
+    # provider, which is not free work to do on every page view.
+    #
+    # A provider that cannot price the request raises rather than
+    # returning a number, and that is a legitimate outcome (see
+    # cost_service): the gate then says "unknown" instead of a figure. It
+    # is deliberately NOT a bare `except Exception` -- swallowing every
+    # error here would hide a real bug as a silently missing price, which
+    # is exactly how the first version of this shipped broken.
+    estimate = None
+    if view.can_generate_references or view.can_approve_shots:
+        from reel_harness.core.errors import PipelineError
+
+        try:
+            estimate = ctx.fable.estimate_cost(project_id)
+        except (PipelineError, NotImplementedError):
+            estimate = None
+    return {
+        "project": view, "has_video": has_video,
+        "reusable_characters": reusable, "estimate": estimate,
+        # Resolved on the server so the page can state the next step
+        # outright instead of leaving the reader to find whichever of
+        # seven buttons happens to be live.
+        "next_action": build_next_action(view),
+    }
+
+
+def _fable_redirect(project_id: str, error: str | None = None) -> RedirectResponse:
+    """Post/Redirect/Get after every mutating action, so a browser refresh
+    can never re-submit a generation that costs money."""
+    suffix = f"?error={quote(error)}" if error else ""
+    return RedirectResponse(url=f"/fable/{project_id}{suffix}", status_code=303)
+
+
+def _run_fable_action(project_id: str, action, *args) -> RedirectResponse:
+    """One error contract for every project action: a refusal comes back
+    as a message on the page, not a traceback. Refusals here are normal
+    (a gate not reached, a budget exhausted) and the operator needs to
+    read WHY, so the reason is carried through rather than flattened."""
+    from reel_harness.core.errors import PipelineError
+
+    try:
+        action(project_id, *args)
+    except InvalidActionError as exc:
+        return _fable_redirect(project_id, error=str(exc)[:300])
+    except PipelineError as exc:
+        return _fable_redirect(project_id, error=f"{exc.code}: {str(exc)[:250]}")
+    return _fable_redirect(project_id)
+
+
+@router.get("/fable", response_class=HTMLResponse)
+def fable_list(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
+    projects = ctx.fable.list_projects()
+    covers = ctx.fable.project_cover_refs([p.id for p in projects])
+    return _render(request, "fable_list.html", {
+        "projects": [build_fable_summary_view(p, covers.get(p.id)) for p in projects],
+        "groups": PROJECT_GROUPS,
+    })
+
+
+def _new_fable_context(ctx: AppContext, **overrides) -> dict:
+    """One place builds the new-project form's context so the GET and the
+    validation-failure re-render can never offer different choices."""
+    from reel_harness.web.fable_forms import (
+        DEFAULT_DURATION_SEC,
+        DURATION_CHOICES,
+        GENRE_CHOICES,
+        TONE_CHOICES,
+        WRITING_GUIDE,
+    )
+
+    context = {
+        "idempotency_key": str(uuid.uuid4()),
+        "takes_choices": sorted(SUPPORTED_TAKES_PER_SHOT),
+        "default_takes": ctx.settings.fable_takes_per_shot,
+        "genre_choices": GENRE_CHOICES,
+        "tone_choices": TONE_CHOICES,
+        "duration_choices": DURATION_CHOICES,
+        "default_duration": DEFAULT_DURATION_SEC,
+        "writing_guide": WRITING_GUIDE,
+        "errors": {}, "values": {},
+    }
+    context.update(overrides)
+    return context
+
+
+@router.get("/fable/new", response_class=HTMLResponse)
+def new_fable_form(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
+    return _render(request, "fable_new.html", _new_fable_context(ctx))
+
+
+@router.post("/fable/refine", response_class=HTMLResponse,
+             dependencies=[Depends(require_csrf)])
+def refine_fable_source(
+    request: Request,
+    title: str = Form(""), source_text: str = Form(""), language: str = Form("ko"),
+    aspect_ratio: str = Form("9:16"), takes_per_shot: int = Form(0),
+    genre: str = Form(""), tone: str = Form(""), target_duration_sec: int = Form(32),
+    idempotency_key: str = Form(""), proposal: str = Form(""), decision: str = Form("refine"),
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """Ask the director to rewrite the story, and show the result for
+    approval.
+
+    Deliberately a plain form POST that re-renders the page rather than a
+    fetch: the user has half a form filled in, and every field comes back
+    exactly as they left it. It also means the feature works with no
+    JavaScript at all.
+
+    The proposal is NEVER written into the story field by the server. It
+    is rendered beside the original and the user presses 'use this' --
+    their own writing is theirs, and a tool that silently replaces it has
+    overstepped.
+    """
+    values = {
+        "title": title, "source_text": source_text, "language": language,
+        "aspect_ratio": aspect_ratio, "takes_per_shot": takes_per_shot,
+        "genre": genre, "tone": tone, "target_duration_sec": target_duration_sec,
+    }
+
+    if decision == "accept" and proposal.strip():
+        values["source_text"] = proposal
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+            refine_accepted=True,
+        ))
+    if decision == "discard":
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+        ))
+
+    from reel_harness.core.errors import PaidGenerationNotAllowedError, PipelineError
+
+    refine_error = None
+    refinement = None
+    try:
+        refinement = ctx.fable.refine_source_text(
+            source_text, language=language, genre=genre or None, tone=tone or None,
+        )
+    except InvalidActionError:
+        refine_error = "보정할 이야기를 먼저 입력하세요."
+    except PaidGenerationNotAllowedError:
+        refine_error = (
+            "보정은 유료 LLM 호출입니다. 설정에서 유료 생성을 허용해야 사용할 수 있습니다."
+        )
+    except (PipelineError, ValueError) as exc:
+        # Not retried: this is one optional convenience, and a second
+        # opinion nobody asked for would just cost money again.
+        refine_error = f"보정에 실패했습니다. 원문은 그대로 두었습니다. ({type(exc).__name__})"
+
+    return _render(request, "fable_new.html", _new_fable_context(
+        ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+        refinement=refinement, refine_error=refine_error,
+    ))
+
+
+# response_model=None because the return type is a Union of two Starlette
+# response classes, which FastAPI would otherwise try to build a Pydantic
+# response model from -- crashing the app at import time. Same fix, same
+# reason as POST /jobs (see Phase 5A's note in docs/STATUS.md).
+@router.post("/fable", response_class=HTMLResponse, dependencies=[Depends(require_csrf)],
+             response_model=None)
+def create_fable_project(
+    request: Request,
+    title: str = Form(""), source_text: str = Form(""), language: str = Form("ko"),
+    aspect_ratio: str = Form("9:16"), takes_per_shot: int = Form(0),
+    genre: str = Form(""), tone: str = Form(""), target_duration_sec: int = Form(32),
+    idempotency_key: str = Form(""),
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse | RedirectResponse:
+    # Every field defaults rather than being Form(...) required, so an
+    # empty submission reaches our own validation and its friendly
+    # per-field errors instead of FastAPI's generic 422 JSON.
+    if not idempotency_key:
+        idempotency_key = str(uuid.uuid4())
+    result = validate_new_fable_form(
+        title=title, source_text=source_text, language=language,
+        aspect_ratio=aspect_ratio, takes_per_shot=takes_per_shot,
+        genre=genre, tone=tone, target_duration_sec=target_duration_sec,
+    )
+    if not result.ok or result.value is None:
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx,
+            idempotency_key=idempotency_key,
+            errors=result.errors,
+            values={
+                "title": title, "source_text": source_text, "language": language,
+                "aspect_ratio": aspect_ratio, "takes_per_shot": takes_per_shot,
+                "genre": genre, "tone": tone, "target_duration_sec": target_duration_sec,
+            },
+        ), status_code=422)
+
+    value = result.value
+    try:
+        project, _ = ctx.fable.create_project(
+            title=value.title, source_text=value.source_text,
+            idempotency_key=idempotency_key, language=value.language,
+            aspect_ratio=value.aspect_ratio, takes_per_shot=value.takes_per_shot,
+            genre=value.genre, tone=value.tone,
+            target_duration_sec=value.target_duration_sec,
+        )
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/fable/{project.id}", status_code=303)
+
+
+@router.get("/fable/{project_id}", response_class=HTMLResponse)
+def fable_detail(
+    request: Request, project_id: str, error: str | None = None,
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    return _render(request, "fable_detail.html", {
+        **_fable_detail_context(ctx, project_id), "error": error,
+    })
+
+
+@router.get("/fable/{project_id}/status", response_class=HTMLResponse)
+def fable_status_fragment(
+    request: Request, project_id: str, ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """HTMX progress fragment. Self-terminating: the swapped-in markup only
+    re-includes its poll trigger while the project is still working, so a
+    project waiting on a person stops polling instead of hammering the DB
+    forever -- the same rule the job detail page follows."""
+    return _render(request, "fragments/fable_status.html", _fable_detail_context(ctx, project_id))
+
+
+@router.post("/fable/{project_id}/adapt", dependencies=[Depends(require_csrf)])
+def fable_adapt(project_id: str, ctx: AppContext = Depends(get_context)) -> RedirectResponse:
+    _fable_or_404(ctx, project_id)
+    return _run_fable_action(project_id, ctx.fable.adapt_project)
+
+
+@router.post("/fable/{project_id}/references", dependencies=[Depends(require_csrf)])
+def fable_generate_references(
+    project_id: str, ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Spends money on a paid tier, gated exactly as the CLI is. This route
+    grants no permission of its own."""
+    _fable_or_404(ctx, project_id)
+    return _run_fable_action(project_id, ctx.fable.generate_references)
+
+
+@router.post("/fable/{project_id}/approve", dependencies=[Depends(require_csrf)])
+def fable_approve(
+    project_id: str, step: str = Form(...), ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    _fable_or_404(ctx, project_id)
+    actions = {
+        "story": ctx.fable.approve_story,
+        "characters": ctx.fable.approve_characters,
+        "shots": ctx.fable.approve_shots,
+        "final": ctx.fable.approve_final,
+    }
+    action = actions.get(step)
+    if action is None:
+        raise HTTPException(status_code=422, detail=f"unknown step {step!r}")
+    return _run_fable_action(project_id, action)
+
+
+@router.post("/fable/{project_id}/budget", dependencies=[Depends(require_csrf)])
+def fable_set_budget(
+    project_id: str, limit_amount: str = Form(""), currency: str = Form(""),
+    clear: bool = Form(False), ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    _fable_or_404(ctx, project_id)
+    if clear:
+        return _run_fable_action(project_id, ctx.fable.set_budget, None, None)
+    result = validate_budget_form(limit_amount=limit_amount, currency=currency)
+    if not result.ok or result.value is None:
+        return _fable_redirect(project_id, error="; ".join(result.errors.values()))
+    return _run_fable_action(
+        project_id, ctx.fable.set_budget, result.value.limit_amount, result.value.currency,
+    )
+
+
+@router.post("/fable/characters/{character_id}/reference", dependencies=[Depends(require_csrf)])
+def fable_reference_decision(
+    character_id: str, project_id: str = Form(...), decision: str = Form("approve"),
+    ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    action = ctx.fable.reject_reference if decision == "reject" else ctx.fable.approve_reference
+    try:
+        action(character_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="character not found") from exc
+    except InvalidActionError as exc:
+        return _fable_redirect(project_id, error=str(exc)[:300])
+    return _fable_redirect(project_id)
+
+
+@router.post("/fable/takes/{take_id}/select", dependencies=[Depends(require_csrf)])
+def fable_select_take(
+    take_id: str, project_id: str = Form(...), ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        ctx.fable.select_take(take_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="take not found") from exc
+    except InvalidActionError as exc:
+        return _fable_redirect(project_id, error=str(exc)[:300])
+    return _fable_redirect(project_id)
+
+
+@router.post("/fable/{project_id}/render", dependencies=[Depends(require_csrf)])
+def fable_render(project_id: str, ctx: AppContext = Depends(get_context)) -> RedirectResponse:
+    _fable_or_404(ctx, project_id)
+    return _run_fable_action(project_id, ctx.fable.render_final)
+
+
+@router.post("/fable/{project_id}/cancel", dependencies=[Depends(require_csrf)])
+def fable_cancel(project_id: str, ctx: AppContext = Depends(get_context)) -> RedirectResponse:
+    _fable_or_404(ctx, project_id)
+    return _run_fable_action(project_id, ctx.fable.cancel_project)
+
+
+@router.post("/fable/{project_id}/cast", dependencies=[Depends(require_csrf)])
+def fable_cast_existing(
+    project_id: str, source_character_id: str = Form(""),
+    ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Casts a previously approved actor into this project instead of
+    paying to generate a new face."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    _fable_or_404(ctx, project_id)
+    if not source_character_id:
+        raise HTTPException(status_code=422, detail="source_character_id is required")
+    try:
+        ctx.fable.reuse_character(project_id, source_character_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/fable/{project_id}", status_code=303)
+
+
+@router.get("/fable/{project_id}/characters/{character_id}/reference/{view}")
+def fable_reference_image(
+    project_id: str, character_id: str, view: str, ctx: AppContext = Depends(get_context),
+) -> FileResponse:
+    """Serves one reference still so the casting gate can actually SHOW
+    the actor being approved. Approving a face you cannot see is not a
+    review, and until this existed the page listed only 있음/없음.
+
+    The path comes from the character's own stored sheet, so it is data
+    and is never trusted to stay inside the root just because it was
+    written there -- it is re-resolved and confirmed to sit inside the
+    Fable storage root before anything is served.
+
+    That containment check is against the STORAGE ROOT rather than this
+    one project's directory, because a reused actor's stills legitimately
+    live in the project that first cast them (see
+    FableService.reuse_character). Narrowing it to the project directory
+    would 404 exactly the images reuse exists to share, while a traversal
+    attempt still cannot leave the root.
+    """
+    _fable_or_404(ctx, project_id)
+    character = next(
+        (c for c in ctx.fable.project_characters(project_id) if c.id == character_id), None,
+    )
+    if character is None:
+        raise HTTPException(status_code=404, detail="character not found")
+    stored = (character.reference_images or {}).get(view)
+    if not stored:
+        raise HTTPException(status_code=404, detail="reference view not generated")
+
+    path = Path(stored).resolve()
+    root = Path(ctx.settings.fable_projects_dir).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="reference image not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/fable/{project_id}/takes/{take_id}/video")
+def fable_take_video(
+    project_id: str, take_id: str, ctx: AppContext = Depends(get_context),
+) -> FileResponse:
+    """Streams one candidate take so the take gate can be a real choice.
+
+    Picking between candidates is the most visual decision in the whole
+    product, and it was previously made from a table of "#1 / #2" with no
+    video on the page at all. Same containment rule as the reference
+    stills: the stored path is data, so it is re-resolved and confirmed
+    inside the Fable storage root before anything is served."""
+    _fable_or_404(ctx, project_id)
+    take = next(
+        (
+            candidate
+            for shot in ctx.fable.project_shots(project_id)
+            for candidate in ctx.fable.shot_takes(shot.id)
+            if candidate.id == take_id
+        ),
+        None,
+    )
+    if take is None or not take.media_path:
+        raise HTTPException(status_code=404, detail="take video not found")
+    path = Path(take.media_path).resolve()
+    root = Path(ctx.settings.fable_projects_dir).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="take video not found")
+    return FileResponse(path, media_type="video/mp4")
+
+
+@router.get("/fable/{project_id}/video")
+def fable_final_video(project_id: str, ctx: AppContext = Depends(get_context)) -> FileResponse:
+    """Streams the finished film. Starlette's FileResponse handles Range/206
+    natively, and the path is resolved exclusively through the storage
+    backend so a project id can never escape its own tree."""
+    _fable_or_404(ctx, project_id)
+    path = ctx.fable_storage.path_for(project_id, FABLE_FINAL_REL_PATH)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="final video not found")
+    return FileResponse(path, media_type="video/mp4", filename=f"{project_id}.mp4")

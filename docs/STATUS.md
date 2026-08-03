@@ -1,12 +1,621 @@
 # Status
 
-Last updated: 2026-07-31 (Phase 6A-1 dual DB backend, on branch
-`phase6/deployment-foundation`). Phase 2A through Phase 5B (Publishing Web
-UI) are merged into `main` as of `v0.4.0rc1`.
+Last updated: 2026-08-03 (Fable F1-F6 complete, UI v1 frozen, v0.5.0rc1 ready to tag, on branch
+`phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
+sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
+The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
+Fable cinematic engine is the active track and owns `v0.5.0rc1`.
+
+---
+
+# HANDOFF — read this first if you are picking up mid-flight
+
+Branch: **`phase6/fable-cinematic-engine`** (always push here; `main`
+holds everything through 6A-1). Working tree should be clean and in sync
+with origin — if it is not, inspect before doing anything else.
+
+## Where the work stands
+
+Fable is a five-sub-phase build: **all five are done.** The remaining
+work is not implementation -- it is LIVE VERIFICATION, which needs GCP
+credentials this machine does not have.
+
+- **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
+  state machines, `CinematicVideoProvider` Protocol + fake tier, project
+  service + separate storage root + CLI, third worker/lease lane,
+  offline vertical slice e2e.
+- **F2 (done)** — real Narrative Director: strict schema, whole-document
+  validation, bounded repair loop, fake + openai-compatible adapters,
+  canonical shot-prompt compiler. **Live-verified against gpt-4o.**
+- **F3 (done)** — reference images, cost/budget, demo + google
+  image adapters, multiple candidate takes. Commits 1 (reference provider
+  contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
+  sheets, schema v11), 4 (demo + google adapters), 5 (multiple takes,
+  schema v12) and 6 (e2e + reference smoke) are all done and pushed.
+- **F4 (done)** — `/v1/fable/*` API and the `/fable` web UI: the whole
+  lifecycle by clicking, following the Phase 5A/5B patterns with no new
+  domain logic.
+- **F5 (done)** — Vertex AI Veo adapter, film editor (dissolves, fades,
+  audio crossfade), and the `v0.5.0rc1` release. `release-check` reports
+  `ready_to_tag: True`; **the tag has not been created** -- see below.
+
+## The immediate work: live verification
+
+Everything is implemented. Nothing that talks to Google has ever been
+run against Google, because there are no credentials on this machine.
+In priority order:
+
+1. **`fable-reference-smoke --confirm-paid-generation`** (~$0.13). The
+   cheapest possible answer to "does the real image model accept its own
+   output back as a character reference, and do the two images look like
+   the same person?" The second half needs human eyes -- use
+   `--keep-output` and look.
+2. **One reference-driven Veo generation.** This is what answers the open
+   SynthID question below. If Veo rejects watermarked images as
+   character references, the consistency strategy needs rethinking, and
+   finding that out costs one 8s clip.
+3. **Tag `v0.5.0rc1`** once (1) and (2) either pass or have their results
+   recorded in the CHANGELOG's known-limitations section. The release
+   check already passes; the tag was deliberately NOT created by the
+   session that built this, because tagging a release whose two real
+   adapters have never made a single live call would be stamping a
+   version on something nobody has watched work.
+
+## Fable F6 — product design pass and source refinement
+
+The engine worked end to end after F5, but the interface it worked behind
+was still the operations console the short-form pipeline had grown: every
+section a card of equal weight, the paid-generation controls in a sidebar
+that outshouted the work, and no answer anywhere to "what do I do next".
+F6 is a design phase, plus the one feature that pass made obvious.
+
+**Brand.** Fable Studio — "Cinematic Story-to-Video Studio". The header
+brand is a template block, so Fable owns its identity inside its own
+section while the job queue and publish log keep the console's.
+
+**Design system** (`web/static/app.css`, rewritten). One spacing ramp, one
+radius set, one weight ramp. Ink-charcoal ground with a champagne-gold
+accent reserved for exactly three meanings (primary action, current step,
+selected); a cinema violet used ONLY to mark machine-authored content, so
+"the AI wrote this" is legible at a glance without a second brand colour.
+Type is SUITE for the wordmark and headings, SUIT for everything else,
+both self-hosted (see `static/fonts/NOTICE.md`) because a CDN font breaks
+offline use and leaks usage. `word-break: keep-all` is load-bearing:
+without it Korean splits mid-word.
+
+**Information architecture.** The detail page now resolves the next action
+on the SERVER (`build_next_action`) and states it once, at the top, with
+its cost on the button that spends it. Everything below is reference
+material, styled quieter. The budget dropped from a sidebar column to a
+collapsible bar. On phones the primary action also rides in a sticky
+footer above a four-item tab bar.
+
+**Source refinement** (F6's one new capability). Adaptation quality is
+bounded by the source text, and what matters is craft knowledge a
+first-time writer has no reason to have — a character's clothes become
+the reference image, summarised speech yields no dialogue line, an inner
+state no camera can see yields no shot. Two answers ship: a live
+checklist beside the box (keyword heuristics, advisory, never gating),
+and `NarrativeDirector.refine_source` — a paid LLM rewrite that is shown
+as a PROPOSAL beside the original and never replaces the user's own words
+without an explicit press. Gated by `allow_paid_generation` like every
+other paid call, and not retried: it is one optional convenience, and a
+second opinion nobody asked for still costs money.
+
+**A real bug this phase found.** The app sends `style-src 'self'` with no
+`'unsafe-inline'`, so every `style=""` attribute in every template was
+being silently dropped by the browser — the project progress bars and the
+budget meter had never once rendered their value. The CSP is correct, so
+the markup was fixed: presentation moved into the stylesheet, per-element
+fill expressed as `.fill-N` classes at 5% steps, and two tests now guard
+both halves (no template may carry an inline style; the CSP must keep
+forbidding them).
+
+**Screenshot verification.** Every screen is captured in both schemes plus
+mobile before being called done — the placeholder-collapse, the Korean
+word-break and the CSP bug were all found by looking, not by reading the
+source.
+
+---
+
+## Fable F5 — Veo adapter, film editor, and the v0.5.0rc1 release
+
+- **Vertex AI Veo adapter** (`providers/google_cinematic_video.py`),
+  written against the INSTALLED SDK's real types
+  (`GenerateVideosConfig`, `VideoGenerationReferenceType.ASSET`,
+  `GenerateVideosOperation.done/.error/.response`,
+  `rai_media_filtered_count/_reasons`, `Video.video_bytes`) --
+  introspected, not recalled, the approach that caught the published docs
+  contradicting themselves during F3. Three documented constraints are
+  enforced BEFORE submission because each costs a generation to learn the
+  hard way: reference-driven runs are fixed at 8s/720p (asking otherwise
+  silently returns something else), max 3 reference images, and
+  `person_generation=allow_adult`. A safety-filtered result is
+  `moderated`, never `failed`. `us-central1` is enforced at startup, not
+  defaulted. Videos are downloaded immediately (they are deleted after
+  two days). `cancel_generation` is honest about being local-only -- the
+  SDK has no cancel for a video operation, and claiming otherwise would
+  leave an operator believing a paid generation stopped.
+- **Film editor** (`media/film_editor.py`). F1's `-c copy` concat can
+  only produce hard cuts, because stream copy cannot blend two clips.
+  This builds the xfade/acrossfade filtergraph that can. The arithmetic
+  is the reviewable part: a transition OVERLAPS the two clips it joins,
+  so each one shortens the film and shifts where the next lands --
+  offsets track the running duration rather than a fixed multiple, and
+  the fade-out is computed from the shortened total. `render_final` picks
+  its path from the plan: no pixel mixing keeps the lossless copy, and
+  only a dissolve/fade/mute pays for a re-encode. Clip durations are
+  re-measured with ffprobe at render time, because a provider returning
+  7.9s for an 8s request would otherwise misplace every later transition.
+  An impossible plan is refused at startup AND before ffmpeg runs, so it
+  cannot waste a whole paid run before surfacing at the last step.
+- **Verification**: 1529 passed / 9 skipped, mypy clean on both platforms,
+  ruff clean, `release-check` PASS. The editor is exercised against REAL
+  ffmpeg -- a dissolve renders and measures shorter than the clip sum,
+  and every transition name offered is confirmed to be one ffmpeg
+  actually implements. **The Veo adapter has never made a live call.**
+
+## Fable F4 — web UI and the /v1/fable/* API
+
+Two commits. Neither adds domain logic: every route in both layers calls
+the same `FableService` method the CLI already uses, so every gate that
+refuses the CLI refuses them identically (the tests assert those
+refusals over HTTP rather than assuming they carry over).
+
+- **API** (`/v1/fable/*`): create/list/read, shots with their takes,
+  characters with their reference-sheet state, budget get/set, a
+  read-only estimate, and every action (adapt, references, per-character
+  approve/reject, the four gates, take selection, render, cancel). One
+  uniform error contract -- 404 missing, 409 not-valid-now, 422
+  malformed, 502 provider failed -- so an out-of-order gate approval is a
+  refusal rather than a 500 with a transition traceback. Response models
+  are explicit rather than serialized ORM rows, and a test pins the exact
+  field set so a new column cannot leak.
+- **Web UI** (`/fable`): list, create form, detail page. Every `can_*`
+  mirrors the real service precondition, so a shown button is an accepted
+  one; a blocked character gate states which characters are unapproved
+  rather than silently hiding the button. Forms are disabled rather than
+  removed (hiding a form hides its CSRF field -- a real Phase 5A bug),
+  every mutating route is CSRF-gated and answers Post/Redirect/Get so a
+  refresh cannot re-submit a paid generation, and the status fragment
+  self-terminates its poll once a person is what's needed.
+- Hit the same FastAPI trap Phase 5A documented -- a route returning
+  `HTMLResponse | RedirectResponse` crashes the app at import time
+  because FastAPI tries to build a Pydantic model from a Union of
+  Starlette classes. `response_model=None`, same fix as POST /jobs.
+- **Verification**: 49 new tests, plus a real `serve` process smoke
+  (create -> adapt over the API, the detail page rendering the right
+  next-step button, the estimate pricing the plan, the CSRF cookie set,
+  an unauthenticated `/v1/fable/*` call refused 401). The Playwright
+  browser E2E was NOT extended to Fable -- Playwright is not installed on
+  this machine and those tests skip here, so adding a scenario that never
+  runs would be a claim without a check behind it.
+
+## 이어서 시작할 때 (다음 세션용)
+
+브랜치 `phase6/fable-cinematic-engine`. **커밋은 전부 푸시되어 있고 로컬에만
+있는 작업은 없다.** 전체 스위트 1590 passed / 5 skipped, mypy는 win32와
+linux 양쪽 clean, ruff clean, 실제 Chromium E2E 포함 전부 green.
+
+### 바로 할 수 있는 일 (막힌 것 없음)
+
+1. **`v0.5.0rc1` 태그 + `main` 머지.** `reel-harness release-check`를 먼저
+   돌린다(8분 정도). 기존 태그 6개(v0.1.0 ~ v0.4.0rc1)는 절대 옮기거나
+   지우지 않는다. 지금 다는 건 일곱 번째 새 태그다.
+
+2. **완성작 1편을 실제 제공자로 만들어 보기 — 이것이 진짜 다음 마일스톤.**
+   지금까지 증명된 것은 "부품이 작동한다"까지다. 실제 제공자로 만든 영상은
+   API 확인용 8초 클립 **한 개**뿐이고, **이 파이프라인이 만든 완성된 영화를
+   아직 아무도 본 적이 없다.** 따라서 다음이 전부 미확인이다:
+   - 샷 4개에 걸쳐 같은 배우로 보이는가 (레퍼런스 방식이 실제로 통하는가)
+   - 컷을 이었을 때 영화처럼 흐르는가, 무관한 클립 4개인가
+   - 대사 줄이 실제 음성이 되는가, 최종 영상에 소리가 붙는가
+
+   비용: 각색 ~$0.03 + 레퍼런스 4장 ~$0.27 + Veo 8초x4샷 ~$3.2-4.8
+   = **약 $3.5-5**. 사용자의 명시적 승인 없이는 절대 실행하지 않는다.
+
+### 미결로 남긴 것
+
+- **Veo 단가.** 코드는 0.15/초, 구글 공식은 0.10. 첫 청구서(8초 클립 +
+  스틸 2장 = KRW 1,330 ≈ USD 0.93)는 0.10 쪽을 가리키지만 GCP 결제는
+  지연되므로 결론이 아니다. **Vertex AI SKU 항목의 수량 x 단가**를 봐야
+  끝난다. 그때까지 높은 값을 유지한다 — 낮게 잡으면 예산을 넘겨 쓰고,
+  높게 잡으면 게이트가 일찍 막힐 뿐이라 방향이 대칭이 아니다.
+- **대사 비중.** 대사가 여러 개인 원작에서도 살아남는지 미측정.
+  `reel-harness fable-adapt-eval --story <파일> --show-plans --yes`로 확인.
+
+### 배포 관련 (물어보면 답할 것)
+
+**공개 배포는 아직 안 된다.** 이 앱에는 로그인이 없다(`docs/OPERATIONS.md`가
+명시). 공개 URL에 올리면 누구나 사용자의 OpenAI/Veo 크레딧으로 생성을
+돌릴 수 있다. 인증은 6A-2로 계획만 되어 있고 코드가 없다. 선택지는
+(1) Cloudflare Access/Tailscale 등으로 접근 제한, (2) provider를 전부 fake로
+고정한 무비용 데모 공개, (3) 6A-2를 먼저 구현. 지금은 (1)이나 (2)를 권한다.
+
+### 이 프로젝트에서 지켜온 규칙
+
+- 스크린샷을 보기 전에는 UI 작업을 완료라고 부르지 않는다. 이번 페이즈의
+  실제 결함(자리표시자 붕괴, 한글 단어 중간 줄바꿈, CSP가 인라인 스타일을
+  버리던 문제, 페이크 클립에 구워진 레터박스)은 전부 눈으로 봐서 찾았다.
+- 데모/스크린샷 스크립트는 provider를 **전부** fake로 고정한다. 다섯 개만
+  고정하고 `narrative_provider`를 빠뜨려 실수로 유료 호출이 나간 적이 있다.
+- 유료 API 호출은 사용자가 명시적으로 승인할 때만.
+
+---
+
+## Live verification (real credentials, real spend)
+
+Recorded here because "the contract tests pass" is not the same claim as
+"this works against the vendor", and the difference has been load-bearing
+every time it was checked.
+
+| What | Result | Spend |
+|---|---|---|
+| Narrative Director (GPT-4o) | Verified. Found a real defect: wardrobe was duplicated into every prompt because the identity fragment already carried it. | — |
+| Reference images (Gemini) | Verified. Found that the configured default model was not callable on a real project (404); `gemini-2.5-flash-image` works. | ~$0.13 |
+| Veo 3.1 (Vertex, us-central1) | Verified. One 8s 720p clip from a reference-driven run. | $1.20 |
+| **SynthID + Veo references** | **Answered the open product risk: Veo ACCEPTS SynthID-watermarked stills as character references** (`reference_accepted: true`). The watermark is invisible and pixel-embedded; the PNG also carries a C2PA `caBX` chunk. | (above) |
+| Veo audio | Veo output HAS audio (aac 48kHz stereo), resolving a contradiction in Google's own docs. `generate_audio` exists in the SDK; silent output is roughly 20% cheaper on Fast. | (above) |
+| Adaptation quality | 30 GPT-4o adaptations measured via `fable-adapt-eval`. Drove the craft rules and the worked example -- see the F6 section. | ~$0.85 |
+
+**Unresolved: the Veo price.** `google_cinematic_video._DEFAULT_PRICE_PER_SECOND_USD`
+is 0.15/second; Google publishes 0.10 for the Fast tier.
+
+First real invoice: one 8-second reference-driven clip plus two reference
+stills billed **KRW 1,330**. That is roughly USD 0.93 at any plausible
+rate, which matches 0.10/second (0.80 video + 0.134 images) and not 0.15
+(1.33 total, roughly KRW 1,730-1,930). Images alone would have been about
+KRW 190, so the video did post.
+
+Suggestive, not conclusive -- GCP billing lags and the total may be
+partial. **Settle it from a Vertex AI SKU line showing quantity x unit
+price**, not from a running total. Held at 0.15 meanwhile, because the
+two directions are not symmetric: quoting too low lets a project overrun
+the ceiling its owner set, while quoting too high only makes the gate
+refuse work that was affordable.
+
+---
+
+## Provider decisions already researched (do not re-litigate)
+
+- **Reference images: `gemini-2.5-flash-image`**, with `gemini-3-pro-image`
+  as a configurable escalation. The default was `gemini-3.1-flash-image`
+  until a live probe of four candidates on a real project returned 404
+  for it -- it appears in the model list but was not callable. A default
+  that fails on a fresh account is worse than an older model that works. Chosen because it is
+  the ONLY option sharing one SDK (`google-genai`) and one credential with
+  Veo, has typed character references (4), is GA, and costs ~$0.067/image
+  at 1K. **1K is sufficient** — Veo caps reference-driven runs at 720p, so
+  paying for 2K/4K buys nothing. **Do not build an Imagen adapter**:
+  Imagen shuts down 2026-08-17.
+- **Video (F5): Vertex AI `veo-3.1-fast-generate-001`**, region
+  `us-central1` only. GA (the Gemini-API Veo endpoints are preview and the
+  $300 GCP trial credit does not apply to them). Reference images force
+  8s / 720p, max 3 reference images of type `asset`, `personGeneration`
+  must be `allow_adult`. **Generated videos are deleted after 2 days** —
+  the adapter must download immediately.
+- **Open risk, unresolved by any documentation**: whether Veo accepts
+  SynthID-watermarked images as character-reference input. Google
+  watermarks all generated images with no removal option, so if Veo
+  rejects them the whole consistency strategy needs rethinking. F3's
+  `fable-reference-smoke` command exists to answer this BEFORE F5 builds
+  on it. Run it as soon as GCP credentials exist (~$0.32 for the
+  cheapest GA smoke).
+
+## Working agreements this project follows
+
+- Read `CLAUDE.md` and `.claude/rules/architecture.md` first; they are
+  binding (artifacts only under the job/project storage roots, state
+  changes only via the state machines, vendor names only in
+  `providers/registry.py`, subprocess always `list[str]` + `shell=False`,
+  ffmpeg absence must fail as `BLOCKED_DEPENDENCY`, fake assets always
+  `FAKE_TEST_LICENSE`, `uv` for everything).
+- Each sub-phase gets an approval-gated plan before implementation.
+- Each commit: targeted tests → `mypy` on BOTH platforms
+  (`python -m mypy` and `--platform linux`) → ruff → full suite → push.
+  Never batch commits; push each one as it lands.
+- **Never claim more than was verified.** Contract tests are not live
+  verification. If credentials are absent, report `NOT RUN` explicitly.
+  Where an automated check has limits (e.g. the adaptation fidelity
+  heuristic), say so in the docs rather than implying completeness.
+
+## Environment quirks on the original dev machine
+
+- `ruff.exe` and `pytest.exe` are blocked by a Windows Application
+  Control policy. Use `uv run --no-sync python -m pytest` and
+  `uvx ruff@0.14.14 check reel_harness tests`. On a different machine
+  plain `uv run ruff` may just work — try it first.
+- Local mypy defaults to the win32 platform; CI checks Linux. Always run
+  both, or Linux-only failures reach CI (this actually happened).
+- Tests must never read a developer's real `.env` — a conftest fixture
+  enforces this. Do not remove it.
+
+---
+
+## Fable F3 — references, cost/budget, demo+google adapters, multiple takes
+
+All six commits are on `phase6/fable-cinematic-engine`. Schema went v9 ->
+v12. Casting became real work with its own review gate, generation became
+budgeted, and a shot can now produce several candidates to choose
+between.
+
+- **Commit 1 — character reference provider contract**: the
+  `CharacterReferenceProvider` Protocol (synchronous by contract: every
+  image API surveyed returns inline bytes rather than a polled job,
+  unlike video) plus `ImageCapabilities` (`watermarked` recorded as the
+  provenance fact it is, not hidden) and the fake tier.
+- **Commit 2 — cost estimation and project budget limits**: schema **v10**
+  (`fable_projects.budget_limit_amount` / `budget_currency` /
+  `budget_spent_amount`, plus `fable_takes.cost_amount` / `cost_currency`
+  so the running total can be audited against its own line items rather
+  than trusted). New `core/cost_service.py` holds four rules: an estimate
+  never moves spend (only a provider-REPORTED cost for a completed
+  generation does, written in the same fenced commit as its take);
+  unknown stays unknown (one unpriceable shot makes the whole project
+  estimate `known=False`, reported with the priced subtotal as a stated
+  lower bound, never rounded to zero); currencies are never converted;
+  and every refusal is a review rather than a failure. The **double
+  gate** — `Settings.allow_paid_generation` AND a per-project budget
+  limit, neither implying the other — mirrors `allow_public_upload`
+  exactly, and asks "does this provider charge?" by *excluding* the free
+  tiers (`FREE_PROVIDER_IDS` in `providers/registry.py`), so the real
+  adapters landing in commits 4 and 5 count as paid the moment they
+  exist. `approve_shots` prices the whole plan before any shot becomes
+  claimable (failing there costs nothing); the worker re-checks per shot,
+  because config and budget can both change after approval. A blocked
+  shot lands `READY -> REVIEW_REQUIRED` (a new state-machine edge)
+  carrying `BUDGET_EXCEEDED` / `PAID_GENERATION_NOT_ALLOWED` with no take
+  row — nothing was submitted, so nothing was charged — and re-queues
+  through the same `REVIEW_REQUIRED -> READY` edge a rejected take uses.
+  New `fable-budget` / `fable-estimate` CLI commands, budget block in
+  `fable-status`, a `paid_generation_feature_flag` preflight check, and
+  `allow_paid_generation` in the config fingerprint.
+- **Commit 3 — reference generation workflow and casting gate**: schema
+  **v11**. `approve_story` now lands in `CASTING` and STOPS; casting is
+  real work rather than a passthrough. `generate_references` compiles
+  four views per character (`pipeline/reference_prompt.py`, the sibling
+  of `shot_prompt.py`, sharing its `fixed_identity_values` so the sheet
+  and the footage describe one actor) and generates the FACE from text
+  first, then the other three WITH that image attached as a character
+  reference — chaining encoded in `REFERENCE_VIEWS`' order rather than
+  left to the caller, because independent generation yields four
+  different people. The fingerprint is sheet-level for the same reason: a
+  change that alters the face invalidates the three chained off it.
+  Per-character `approve_reference` / `reject_reference`, and
+  `approve_characters` now refuses any character without an approved
+  sheet. A content-policy refusal records the reason on the character,
+  keeps whatever views were already paid for, and still reaches
+  `CHARACTER_REVIEW` — the human decision an uncertain policy outcome
+  requires — while leaving the sheet unapprovable because it is
+  incomplete. Regeneration always revokes a previous approval. Reference
+  spend is a per-character line item (`reference_cost_amount`), found
+  necessary while building: without it `recorded_spend` audited only
+  takes and would have under-reported every project that generated a
+  cast. New `fable-generate-references` / `fable-reference` CLI commands;
+  characters now appear in `fable-status`.
+- **Commit 4 — demo and google reference-image adapters**. The demo tier
+  is deliberately SYNTHETIC rather than a bundled photo set: shipping
+  sample "people" with a local-first tool means shipping either a real
+  person's likeness or AI output the tier explicitly does not produce, so
+  it draws one hue per character in one shade per view instead --
+  enough to eyeball the casting workflow offline, impossible to mistake
+  for model output, stamped `DEMO_TEST_LICENSE`. The real adapter
+  (`google_reference_image.py`) uses `google-genai` with
+  `gemini-3.1-flash-image` behind a new optional `google` extra, imported
+  inside methods so a machine without the extra still runs everything
+  else. Its request/response mapping was written against the INSTALLED
+  SDK's real type definitions -- `ImageConfig(aspect_ratio, image_size,
+  person_generation)`, the full `FinishReason` set, `BlockedReason`,
+  `errors.ClientError.code`, `Part.from_bytes` -- introspected rather
+  than recalled, after the published docs turned out to disagree with
+  themselves about the config field name. Every refusal finish_reason
+  (SAFETY / PROHIBITED_CONTENT / IMAGE_SAFETY / IMAGE_PROHIBITED_CONTENT
+  / BLOCKLIST / SPII / RECITATION / IMAGE_RECITATION) and a blocked
+  prompt map to `ContentPolicyRefusedError` -> REVIEW_REQUIRED, while
+  NO_IMAGE stays transient -- calling it a policy refusal would strand a
+  shot in review for something a retry might fix. SynthID is recorded on
+  every result. 2K/4K are deliberately NOT offered (Veo caps
+  reference-driven runs at 720p, so they cost more and buy nothing), and
+  the per-image price is configurable rather than hardcoded, reporting
+  `known=False` when unset.
+- **Commit 5 — multiple candidate takes per shot**: schema **v12**
+  (`fable_projects.takes_per_shot`, NULL meaning "use the operator's
+  default", which is a different statement from "one").
+  `Settings.fable_takes_per_shot` accepts only 1/2/4 -- each take is a
+  separate paid generation, so "4" is a considered choice and "40" is a
+  typo that would spend forty times the approved estimate. Each take
+  carries a distinct seed derived from (prompt fingerprint, attempt
+  number): distinct because N takes from one seed are N copies of the
+  same clip, deterministic because a crash replay must reproduce the take
+  already paid for. The budget is checked PER TAKE, so a project that can
+  afford two but not four generates two and stops with the shot
+  reviewable. `run_shot` became a batch: `_run_one_take` reports an
+  outcome and the batch's terminal status is decided in one place, where
+  the rule is "any produced candidate makes this a human decision" -- a
+  shot with two good takes and a third that timed out is REVIEW_REQUIRED
+  with the failure recorded, never FAILED, because failing would discard
+  generations already paid for. That required four new shot-transition
+  edges: `VALIDATING -> SUBMITTED` (the next candidate of the same batch)
+  and `REVIEW_REQUIRED` from SUBMITTED/GENERATING/DOWNLOADING (a batch can
+  be interrupted at any phase of any take). Pricing multiplies by the
+  project's own take count, because a gate that priced one take would
+  approve a quarter of the real bill.
+- **Commit 6 — e2e and the reference smoke command**: an offline e2e
+  driving the whole F3 slice through the real gates and the real daemon
+  (casting refused by a too-small budget, then generated and approved;
+  two candidate takes per shot with distinct seeds; selection retaining
+  rejected siblings; final film; and the books balancing -- the running
+  total equals the sum of its own line items, which is the assertion that
+  makes the budget worth trusting), plus a second e2e proving that
+  running out of money mid-generation leaves every shot REVIEW_REQUIRED
+  with no takes and no charge, and that raising the limit re-queues them
+  through the same path a rejected take uses. New
+  `fable-reference-smoke`: one REAL face-then-chained-view pair against
+  the configured provider, refusing to spend without
+  `--confirm-paid-generation` and reporting the projected cost first. Its
+  output carries its own `does_not_prove` list, so a pasted result cannot
+  be read as establishing either visual identity (nothing automated judges
+  that) or the Veo/SynthID question (F5's adapter answers that).
+- **A real pre-existing defect found and fixed while building this**:
+  `READY -> FAILED` was missing from `ALLOWED_SHOT_TRANSITIONS`, so any
+  failure BEFORE submission (an unconfigured provider refusing to quote
+  or validate) made `fable_runner`'s own failure handler raise
+  `InvalidFableTransitionError` out of `run_shot` and straight past
+  `FableDaemon`'s error isolation — a routine "provider not configured"
+  would have killed the worker lane rather than failing one shot. Found
+  by the new cost gate's regression test, not by inspection; predates F3.
+- **F3 honesty notes so far**: the only registered cinematic/image
+  providers are still the free fake tiers, so the paid gate has been
+  exercised only against a provider id stubbed as paid — never against a
+  real billed call, and no real reference image has ever been generated.
+  The chaining is verified by asserting on the requests the fake provider
+  received, which proves the mechanism is wired correctly but says
+  nothing about whether a real model actually keeps a face consistent.
+  **The google adapter has never been run against the live API** -- no
+  credentials exist on this machine; its tests are contract tests against
+  an injected fake client and prove protocol conformance only. The
+  budget arithmetic rounds at a fixed scale (6 dp) specifically so float
+  accumulation cannot refuse a generation the operator paid for; that is
+  a deliberate tradeoff, not exact decimal money handling.
+
+## Fable F2 — Narrative Director
+
+Replaces F1's stub adaptation with a real, provider-neutral story ->
+shot-plan pipeline. The states, review gates, worker lane, and CLI are
+unchanged; what changed is that the adaptation is now genuinely
+generated and genuinely validated.
+
+- **Contract** (`providers/base.py`): `NarrativeDirector` Protocol
+  (`adapt_story` + `repair_adaptation`) with `AdaptationRequest` /
+  `AdaptationResult`. Separate from `LLMProvider` because the short-form
+  script call's shapes are semantically wrong for film adaptation.
+  Adapters return raw text; validation is downstream, matching the
+  existing script-generation discipline.
+- **Strict schema** (`pipeline/adaptation_schema.py`) enforces the hard
+  rules at the earliest possible point: adult-only characters via
+  `Literal[True]` plus an age-bracket whitelist (a minor-looking
+  character fails parsing before anything is persisted), shot grammar
+  validated against the F1 enums with exactly one camera movement per
+  shot by construction, one filmable action per shot (bounded length +
+  a documented chained-action heuristic), and structural limits (1-2
+  characters, 1-3 locations, 1-6 scenes, 4-15 shots).
+- **Whole-document validation** (`pipeline/adaptation_parser.py`):
+  one bounded lenient-JSON-extraction pass, then subject/location
+  reference integrity, dialogue-line ownership, shot/reverse-shot
+  alternation in multi-speaker scenes, contiguous ordering, and a
+  source-fidelity heuristic that rejects fabricated citations by matching
+  each scene's `source_beat` back into the real source text. Every
+  failure collects the FULL error list -- that list is the repair loop's
+  input contract.
+- **Bounded repair loop** (`core/adaptation_service.py`): max 2 repairs
+  (3 director calls total), each carrying the exact validation errors
+  back to the director. A refusal or empty response is not repaired at
+  all -- re-asking with the same source only burns quota -- so it fails
+  immediately instead of consuming the budget. Exhaustion raises
+  `SCHEMA_INVALID`, so the existing stage-retry classification applies
+  unchanged.
+- **Persistence and idempotency**: `ADAPTING` commits before any network
+  call and the adaptation's own writes land in ONE transaction, so a
+  partial adaptation is never observable and a crash is resumable by
+  re-running the same command. `adaptation_fingerprint` (source +
+  parameters + prompt version; schema v9 additive column -- the first use
+  of the now dialect-portable migration path) makes an unchanged re-run a
+  replay rather than a second paid call, while changed input on an
+  already-adapted project is refused so drift cannot silently discard an
+  approved adaptation. Re-adaptation replaces children and refuses
+  outright if any shot already has takes.
+- **Adapters**: `FakeNarrativeDirector` is deterministic and produces a
+  COMPLETE document that passes the real parser and validators -- its
+  scene beats are genuine quotes from the caller's own source text, so
+  the fidelity check is exercised meaningfully rather than vacuously; its
+  modes drive the repair, exhaustion, adult-rejection, and transient
+  paths. `OpenAICompatibleNarrativeDirector` subclasses the existing
+  OpenAI-compatible LLM provider to inherit its transport contract
+  verbatim (bounded retries, Retry-After, auth never retried and never
+  echoing the credential, bodies never logged), differing only in prompt
+  and output budget (`REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS`,
+  `REEL_HARNESS_NARRATIVE_READ_TIMEOUT`). It reuses the
+  `REEL_HARNESS_LLM_*` endpoint block -- adaptation is a
+  chat-completions call against the same kind of endpoint.
+- **Canonical prompt compiler** (`pipeline/shot_prompt.py`): fifteen
+  slots in fixed order, provider-neutral (vendor dialects are an adapter
+  concern in F5). The character's fixed identity is injected into EVERY
+  shot -- the only mechanism keeping one virtual actor recognizable
+  across separately-generated clips. `prompt_fingerprint` is versioned,
+  and it is what makes paid take generation idempotent via
+  `FableTake`'s unique constraint.
+- **F2 honesty notes**: the fidelity check only rejects obvious drift
+  (fabricated citations, a dropped ending); real semantic faithfulness
+  stays the STORY_REVIEW gate's human decision and nothing claims more.
+  The MockTransport adapter tests prove protocol conformance only, never
+  live success.
+- **Live verification: RUN and PASSED** (2026-07-31, real credentials,
+  `openai-compatible` against `gpt-4o`). A real Korean short story was
+  adapted in ~26s: 1 adult character with fixed identity, 1 location,
+  2 scenes, 4 shots (18s total), every scene beat a genuine source
+  quote, every shot a single filmable action with one camera movement,
+  all validators passed on the first attempt with no repair needed.
+  That run surfaced one real defect -- wardrobe was emitted twice per
+  prompt when fixed_identity already carried it -- now fixed with
+  regression coverage.
+
+## Fable F1 — Cinematic domain + fake vertical slice
+
+## Fable F1 — Cinematic domain + fake vertical slice
+
+First of five Fable sub-phases (F1 domain/fake slice, F2 narrative
+director, F3 references/demo/budget, F4 web UI, F5 real Veo 3.1 adapter +
+film editor + release). F1 ships the complete offline vertical slice
+(its stub adaptation was replaced by the real pipeline in F2):
+story text -> stub adaptation -> explicit review gates -> shot generation
+through a real worker lane -> take selection -> hard-cut final render ->
+COMPLETED, all against the fake provider with zero network.
+
+- **Domain** (`db/cinematic_models.py`, schema v8 — new tables only):
+  `fable_projects` (story_bible as one JSON doc), `fable_characters`
+  (virtual adult actors only; `adult_confirmed`/`reference_approved`
+  default False), `fable_locations`, `fable_scenes`, `fable_shots` (the
+  leasable unit, same lease-fencing columns as Job/Publication),
+  `fable_takes` (append-only; `(shot_id, prompt_fingerprint,
+  attempt_number)` unique constraint is the duplicate-generation guard).
+- **State machines** (`core/cinematic_state.py`, the third pair by the
+  documented non-genericity precedent): project statuses with five
+  explicit `*_REVIEW` gates — `SHOT_REVIEW -> GENERATING` is the only
+  entry into paid generation; shot statuses with shot-level retry that
+  never fails the whole project. Shot grammar enums (one camera movement
+  per shot by construction).
+- **Provider layer**: `CinematicVideoProvider` Protocol (submit/poll/
+  download — the shape every surveyed real API has) + frozen
+  capabilities; a distinct `"moderated"` poll state routes to human
+  review, never a blind retry; cost estimates return unknown rather than
+  invented numbers. Fake provider is deterministic, renders REAL mp4s via
+  local ffmpeg (never bypasses BLOCKED_DEPENDENCY), stamps
+  FAKE_TEST_LICENSE. Registry/snapshot/fail-loud ladder identical to the
+  other provider families; `REEL_HARNESS_CINEMATIC_PROVIDER=fake` only.
+- **Worker lane**: third lease module + daemon
+  (`worker/fable_lease.py`/`fable_runner.py`/`fable_daemon.py`), fenced
+  commits on every status change, crash recovery through the state
+  machine with a bounded re-queue budget, project auto-advance
+  `GENERATING -> TAKE_REVIEW`. `serve --fable-workers N` (default 0) and
+  `fable-worker-run`.
+- **Service + CLI**: `FableService` (idempotent creation, every gate an
+  explicit approval, adult-confirmation enforced at the character gate,
+  single-selected-take with append-only retention, ffprobe-validated
+  final concat under the separate `fable_projects/` storage root); CLI
+  `fable-create/adapt/approve/status/list/select-take/render/cancel`.
+- **F1 honesty notes**: adaptation is a deterministic stub (real
+  NarrativeDirector is F2); no reference images yet (F3); no
+  transitions/audio mix/color (F5); provider polling is inline (a
+  dedicated poll lane comes with the real adapter). Provider research
+  (July 2026 official docs) selected Google Veo 3.1 for F5 — the only
+  surveyed API with first-class multi-image character reference — with
+  Runway as runner-up.
 
 ## Phase 6A-1 — Dual database backend (SQLite + PostgreSQL)
 
-First sub-phase of Phase 6A (production deployment foundation). SQLite
+## Phase 6A-1 — Dual database backend (SQLite + PostgreSQL) [merged to main]
+
+First sub-phase of the (now parked) deployment track. SQLite
 stays the zero-config default; PostgreSQL is now a fully-supported second
 backend. Deliberately the lowest-risk 6A sub-phase: purely additive, no
 security-critical surface, zero behavioral change for existing SQLite

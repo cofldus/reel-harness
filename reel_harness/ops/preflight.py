@@ -135,10 +135,18 @@ def _check_storage(checker: _Checker, settings: Settings) -> None:
     else:
         checker.add("storage_root", "WARN", f"{root} does not exist yet -- will be created on first use")
     _check_write_permission(checker, "storage_root_writable", root)
-    # LocalFilesystemStorage is currently the only StorageBackend; "jobs
-    # root" and "storage root" are the same directory today (see
-    # docs/ARCHITECTURE.md's extension-point note on S3CompatibleStorage).
-    checker.add("jobs_root", "PASS", f"same as storage_root ({root}) -- no separate jobs root exists yet")
+    # LocalFilesystemStorage is the only StorageBackend; the reel jobs root
+    # IS the storage root, and Fable cinematic projects use a second
+    # instance rooted at settings.fable_projects_dir (checked below).
+    checker.add("jobs_root", "PASS", f"same as storage_root ({root})")
+    fable_root = settings.fable_projects_dir.resolve()
+    if fable_root.is_dir():
+        checker.add("fable_projects_root", "PASS", str(fable_root))
+    else:
+        checker.add(
+            "fable_projects_root", "WARN",
+            f"{fable_root} does not exist yet -- will be created on first use",
+        )
 
     try:
         usage = shutil.disk_usage(root if root.is_dir() else root.parent)
@@ -317,6 +325,37 @@ def _check_public_upload_flag(checker: _Checker, settings: Settings) -> None:
         )
 
 
+def _check_paid_generation_flag(checker: _Checker, settings: Settings) -> None:
+    """Reports the Fable spend switch, mirroring the public-upload flag
+    check above. Enabled with only the free tiers selected is a WARN, not
+    a FAIL: it is harmless today, but it means a switch about money is on
+    with nothing behind it -- the state an operator most easily forgets
+    about before selecting a real adapter."""
+    from reel_harness.providers.registry import provider_charges_money
+
+    paid_selected = provider_charges_money(settings.cinematic_provider) or provider_charges_money(
+        settings.reference_image_provider
+    )
+    if not settings.allow_paid_generation:
+        checker.add(
+            "paid_generation_feature_flag", "PASS",
+            "disabled (default) -- only the free fable tiers can generate",
+        )
+        return
+    if paid_selected:
+        checker.add(
+            "paid_generation_feature_flag", "PASS",
+            "enabled, and a cost-incurring fable provider is selected "
+            "(each project still needs its own budget limit)",
+        )
+    else:
+        checker.add(
+            "paid_generation_feature_flag", "WARN",
+            "REEL_HARNESS_ALLOW_PAID_GENERATION=true but every selected fable provider is a "
+            "free tier -- enabled without anything that could spend",
+        )
+
+
 def _check_api_authentication(checker: _Checker, settings: Settings) -> None:
     key = settings.app_api_key
     if not key:
@@ -409,6 +448,7 @@ def run_preflight(
     _check_worker_settings(checker, settings)
     _check_upload_chunk_settings(checker, settings)
     _check_public_upload_flag(checker, settings)
+    _check_paid_generation_flag(checker, settings)
     _check_api_authentication(checker, settings)
     _check_secret_placeholders(checker, settings)
     _check_public_bind_security(checker, settings)

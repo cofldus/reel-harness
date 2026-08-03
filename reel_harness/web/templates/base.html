@@ -3,16 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Reel Harness{% endblock %}</title>
+  <title>{% block title %}Fable Studio — Cinematic Story-to-Video{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <header class="site-header">
-    <a class="brand" href="/">Reel Harness</a>
+    {% block brand %}
+    <a class="brand" href="/">
+      <span class="brand-mark">Fable Studio</span>
+      <span class="brand-note">Cinematic Story-to-Video Studio</span>
+    </a>
+    {% endblock %}
     <nav aria-label="주요 메뉴">
-      <a href="/jobs/new">새 영상 만들기</a>
-      <a href="/jobs">작업 목록</a>
+      <a href="/fable">내 작품</a>
+      <a href="/fable/new">새 작품</a>
+      <a href="/jobs">숏폼 작업</a>
       <a href="/publications">게시 목록</a>
       <a href="/publisher-accounts">계정 연결</a>
       <a href="/system">시스템 상태</a>
@@ -22,6 +28,21 @@
   <main id="main-content">
     {% block content %}{% endblock %}
   </main>
+
+  {# Phone navigation. The header's seven links are unreachable one-handed
+     on a small screen, so the four that carry the workflow become a real
+     tab bar and the header's nav hides at that width. #}
+  <nav class="tabbar" aria-label="주요 메뉴">
+    <a class="tab" href="/" {{ 'aria-current="page"' if nav_active == 'home' }}>
+      <span class="tab-icon" aria-hidden="true">◈</span>홈</a>
+    <a class="tab" href="/fable" {{ 'aria-current="page"' if nav_active == 'projects' }}>
+      <span class="tab-icon" aria-hidden="true">▤</span>작품</a>
+    <a class="tab" href="/fable/new" {{ 'aria-current="page"' if nav_active == 'new' }}>
+      <span class="tab-icon" aria-hidden="true">✦</span>새 작품</a>
+    <a class="tab" href="/settings" {{ 'aria-current="page"' if nav_active == 'settings' }}>
+      <span class="tab-icon" aria-hidden="true">⚙</span>설정</a>
+  </nav>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

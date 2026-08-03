@@ -46,7 +46,7 @@ def test_dashboard_renders(tmp_path) -> None:
     try:
         response = TestClient(app).get("/")
         assert response.status_code == 200
-        assert "새 영상 만들기" in response.text
+        assert "새 작품 시작하기" in response.text
         assert "rh_csrf" in response.cookies
     finally:
         app.dependency_overrides.clear()
@@ -57,7 +57,7 @@ def test_dashboard_shows_empty_state_with_no_jobs(tmp_path) -> None:
     app.dependency_overrides[get_context] = lambda: ctx
     try:
         response = TestClient(app).get("/")
-        assert "아직 만든 영상이 없습니다" in response.text
+        assert "아직 작품이 없습니다" in response.text
     finally:
         app.dependency_overrides.clear()
 

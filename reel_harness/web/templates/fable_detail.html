@@ -1,0 +1,375 @@
+{% extends "base.html" %}
+{% block title %}{{ project.title }} · Fable Studio{% endblock %}
+{% block content %}
+<div class="wide" data-project-status="{{ project.status }}">
+
+<header class="project-head">
+  <div>
+    <h1 class="display">{{ project.title }}</h1>
+    <div class="project-facts">
+      <span>{{ project.aspect_ratio }}</span>
+      <span>샷당 후보 {{ project.takes_per_shot or '기본값' }}</span>
+      <span>{{ project.status_label }}</span>
+    </div>
+  </div>
+  {% if project.can_cancel %}
+  <form method="post" action="/fable/{{ project.project_id }}/cancel" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn-ghost">프로젝트 취소</button>
+  </form>
+  {% endif %}
+</header>
+
+{# Where you stand in the seven gates. Numbered, connected, and stateful:
+   done / current / todo / blocked are four different things and used to
+   render as four nearly identical pills. #}
+<ol class="stepper" aria-label="제작 단계">
+  {% for step in project.pipeline %}
+  <li class="step" data-state="{{ step.state }}"
+      {{ 'aria-current="step"' if step.state == 'current' }}>
+    <span class="step-dot" aria-hidden="true">
+      {%- if step.state == 'done' %}✓{% elif step.state == 'blocked' %}✕{% else %}{{ loop.index }}{% endif -%}
+    </span>
+    <span>{{ step.label }}</span>
+  </li>
+  {% endfor %}
+</ol>
+
+{% if error %}
+<div class="alert alert-error" role="alert"><p>{{ error }}</p></div>
+{% endif %}
+
+{% include "fragments/fable_status.html" %}
+
+{# ---- The one thing to do next --------------------------------------
+   Everything below this block is reference material for making THIS
+   decision. Previously the page offered seven possible buttons across
+   seven equally-weighted sections and left you to find the live one. #}
+<section class="now" data-tone="{{ next_action.tone }}">
+  <div class="now-head">
+    {% if next_action.tone == 'working' %}<span class="now-pulse" aria-hidden="true"></span>{% endif %}
+    <h2 class="now-title">{{ next_action.title }}</h2>
+    {% if next_action.costs_money %}<span class="badge badge-action">유료</span>{% endif %}
+  </div>
+  <p class="now-body">{{ next_action.body }}</p>
+
+  {% if next_action.action %}
+  <div class="now-actions">
+    <form method="post" action="{{ next_action.action }}" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if next_action.step %}<input type="hidden" name="step" value="{{ next_action.step }}">{% endif %}
+      <button type="submit" class="btn btn-primary btn-lg">{{ next_action.label }}</button>
+    </form>
+
+    {# The amount rides on the action that spends it, not in a panel you
+       scroll past. #}
+    {% if next_action.costs_money %}
+    <span class="now-cost">
+      예상 비용
+      {%- if estimate and estimate.known %} <strong>약 {{ estimate.amount }} {{ estimate.currency }}</strong>
+      {%- elif estimate and estimate.amount is not none %} <strong>{{ estimate.amount }} {{ estimate.currency }} 이상</strong>
+      {%- else %} <strong>알 수 없음</strong>
+      {%- endif %}
+    </span>
+    {% endif %}
+  </div>
+  {% if next_action.costs_money and project.budget.limit_amount is none %}
+  <p class="hint">예산 한도를 설정하기 전에는 유료 제공자가 실행되지 않습니다. 아래 예산에서 한도를 정하세요.</p>
+  {% elif next_action.costs_money and estimate and estimate.detail %}
+  <p class="hint">{{ estimate.detail }}</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{# ---- Reference material --------------------------------------------- #}
+
+{% if project.story %}
+<section class="review">
+  <div class="review-head"><h2>각색 결과</h2></div>
+  {% if project.story.logline %}<p class="logline">{{ project.story.logline }}</p>{% endif %}
+  {% if project.story.synopsis %}<p class="prose">{{ project.story.synopsis }}</p>{% endif %}
+  {% if project.story.setting or project.story.theme or project.story.visual_style or project.story.ending_summary %}
+  <details class="advanced">
+    <summary>상세 설정</summary>
+    <div class="advanced-body advanced-body-pad">
+      <dl class="kv">
+        {% if project.story.premise %}<dt>전제</dt><dd>{{ project.story.premise }}</dd>{% endif %}
+        {% if project.story.setting %}<dt>배경</dt><dd>{{ project.story.setting }}</dd>{% endif %}
+        {% if project.story.theme %}<dt>주제</dt><dd>{{ project.story.theme }}</dd>{% endif %}
+        {% if project.story.visual_style %}<dt>영상 톤</dt><dd>{{ project.story.visual_style }}</dd>{% endif %}
+        {% if project.story.ending_summary %}<dt>결말</dt><dd>{{ project.story.ending_summary }}</dd>{% endif %}
+      </dl>
+    </div>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ---- Casting -------------------------------------------------------- #}
+<section class="review">
+  <div class="review-head">
+    <h2>캐스팅 {% if project.characters %}<span class="review-count">{{ project.characters | length }}명</span>{% endif %}</h2>
+  </div>
+
+  {# The free option is offered before the paid one, because a user who
+     scrolls past it pays for a face they already had. #}
+  {% if reusable_characters %}
+  <div class="reuse">
+    <h3>이미 승인된 배우 다시 쓰기</h3>
+    <p class="hint">그대로 캐스팅하면 레퍼런스 생성 비용이 들지 않습니다.</p>
+    <ul class="reuse-list">
+      {% for actor in reusable_characters %}
+      <li class="reuse-item">
+        {% set portrait = actor.images | selectattr('url') | first %}
+        {% if portrait %}
+        <img src="{{ portrait.url }}" alt="{{ actor.name }}" class="cast-portrait" loading="lazy">
+        {% else %}
+        <span class="cast-portrait-empty" aria-hidden="true">없음</span>
+        {% endif %}
+        <span>{{ actor.name }}{% if actor.age_range %} <span class="meta">{{ actor.age_range }}</span>{% endif %}</span>
+        <form method="post" action="/fable/{{ project.project_id }}/cast" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="source_character_id" value="{{ actor.character_id }}">
+          <button type="submit" class="btn btn-sm">이 배우로</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if project.characters %}
+  <ul class="cast-grid">
+    {% for character in project.characters %}
+    <li class="cast-card" data-approved="{{ 'true' if character.reference_approved else 'false' }}">
+      {% set portrait = character.images | selectattr('url') | first %}
+      {% if portrait %}
+      <img src="{{ portrait.url }}" alt="{{ character.name }}" class="cast-portrait" loading="lazy">
+      {% else %}
+      <span class="cast-portrait-empty" aria-hidden="true">생성 전</span>
+      {% endif %}
+
+      <div class="cast-body">
+        <div class="cast-name">
+          <h3>{{ character.name }}</h3>
+          {% if character.age_range %}<span class="meta">{{ character.age_range }}</span>{% endif %}
+          <span class="badge {{ 'badge-ok' if character.reference_approved else 'badge-pending' }}">
+            {{ '승인됨' if character.reference_approved else '미승인' }}
+          </span>
+          {% if not character.sheet_complete %}<span class="badge badge-error">시트 미완성</span>{% endif %}
+        </div>
+
+        {% if character.failure_summary %}
+        <div class="alert alert-error" role="alert">
+          <p>{{ character.failure_summary }}</p>
+          <details><summary class="meta">기술 세부정보</summary><p class="mono">{{ character.failure_code }}</p></details>
+        </div>
+        {% endif %}
+
+        <ul class="cast-views">
+          {% for image in character.images %}
+          <li>
+            {% if image.url %}
+            <a href="{{ image.url }}" target="_blank" rel="noopener" title="{{ image.label }}">
+              <img src="{{ image.url }}" alt="{{ character.name }} — {{ image.label }}" class="cast-thumb" loading="lazy">
+            </a>
+            {% else %}
+            <span class="cast-thumb-empty" title="{{ image.label }} 없음" aria-hidden="true">—</span>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+
+        {% if character.cost_amount %}
+        <p class="meta">시트 비용 {{ character.cost_amount }} {{ character.cost_currency }}</p>
+        {% endif %}
+
+        <div class="actions">
+          {% if character.can_approve %}
+          <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="project_id" value="{{ project.project_id }}">
+            <input type="hidden" name="decision" value="approve">
+            <button type="submit" class="btn btn-primary btn-sm">이 배우로 확정</button>
+          </form>
+          {% endif %}
+          {% if character.can_reject %}
+          <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="project_id" value="{{ project.project_id }}">
+            <input type="hidden" name="decision" value="reject">
+            <button type="submit" class="btn btn-sm">반려 · 다시 생성</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty-state">
+    <h3>아직 등장인물이 없습니다</h3>
+    <p>{% if project.can_adapt %}각색을 실행하면 이야기에서 등장인물을 뽑아냅니다.
+       {% else %}각색이 끝나면 여기에 표시됩니다.{% endif %}</p>
+  </div>
+  {% endif %}
+</section>
+
+{# ---- Storyboard ----------------------------------------------------- #}
+{% if project.shots %}
+<section class="review">
+  <div class="review-head">
+    <h2>스토리보드 <span class="review-count">{{ project.shots | length }}개 샷</span></h2>
+    {% if project.status == 'TAKE_REVIEW' %}<span class="meta">샷마다 쓸 후보를 하나씩 고르세요</span>{% endif %}
+  </div>
+  <ul class="shot-grid">
+    {% for shot in project.shots %}
+    <li class="shot-card" data-status="{{ shot.status }}">
+      <div class="shot-info">
+      <div class="shot-head">
+        <span class="shot-slate">{{ '%02d' | format(shot.shot_order) }}</span>
+        <span class="badge {{ 'badge-ok' if shot.status == 'SELECTED' else 'badge-status' }}">{{ shot.status_label }}</span>
+        {% if shot.failure_code %}<span class="badge badge-error">{{ shot.failure_code }}</span>{% endif %}
+      </div>
+      <p class="shot-action">{{ shot.action or '—' }}</p>
+      {% if shot.dialogue_line %}<p class="shot-dialogue">“{{ shot.dialogue_line }}”</p>{% endif %}
+      <ul class="shot-grammar">
+        {% if shot.subject %}<li>{{ shot.subject }}</li>{% endif %}
+        {% if shot.shot_size %}<li>{{ shot.shot_size.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.camera_angle %}<li>{{ shot.camera_angle.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.camera_movement %}<li>{{ shot.camera_movement.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.duration_sec %}<li>{{ shot.duration_sec }}s</li>{% endif %}
+      </ul>
+      </div>{# /shot-info #}
+
+      {% if shot.takes %}
+      <ul class="take-grid">
+        {% for take in shot.takes %}
+        {# Selection state lives ON the frame -- a ring, a corner mark and
+           a dimmed sibling -- because choosing between clips is done by
+           looking, and a text badge underneath is not something you see
+           while comparing four thumbnails. #}
+        <li class="take {{ 'take-selected' if take.selected }}">
+          <div class="take-frame">
+            {% if take.video_url %}
+            <video controls preload="metadata" src="{{ take.video_url }}"></video>
+            {% else %}
+            <span class="take-placeholder">{{ take.status_label }}</span>
+            {% endif %}
+            <span class="take-tag">TAKE {{ '%02d' | format(take.attempt_number) }}</span>
+            {% if take.selected %}
+            <span class="take-mark" title="선택됨" aria-label="선택됨">✓</span>
+            {% endif %}
+          </div>
+          {% if take.can_select %}
+          <form method="post" action="/fable/takes/{{ take.take_id }}/select" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="project_id" value="{{ project.project_id }}">
+            <button type="submit" class="btn btn-sm btn-block take-pick">이 컷으로</button>
+          </form>
+          {% elif take.selected %}
+          <span class="take-state">선택됨</span>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{# ---- The finished film ---------------------------------------------- #}
+{% if has_video %}
+<section class="review">
+  <div class="review-head"><h2>완성본</h2></div>
+  <div class="final">
+    <video class="final-video" controls preload="metadata" src="/fable/{{ project.project_id }}/video"></video>
+    <div>
+      <p class="prose">
+        선택한 {{ project.shots | length }}개 샷을 순서대로 이어 붙인 결과입니다.
+        마음에 들지 않는 컷이 있으면 위 스토리보드에서 다른 후보를 고른 뒤 다시 렌더하세요.
+      </p>
+      <div class="actions actions-loose">
+        {% if project.can_approve_final %}
+        <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="step" value="final">
+          <button type="submit" class="btn btn-primary">최종 승인</button>
+        </form>
+        {% endif %}
+        <a class="btn" href="/fable/{{ project.project_id }}/video" download>내려받기</a>
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ---- Budget: something you check, not something you read ------------- #}
+<details class="budget">
+  <summary>
+    <span class="eyebrow">예산</span>
+    <span class="budget-figure">
+      {{ project.budget.spent_amount }}{% if project.budget.spend_is_incomplete %}+{% endif %}
+      {%- if project.budget.limit_amount is not none %} / {{ project.budget.limit_amount }}{% endif %}
+      {{ project.budget.currency or '' }}
+    </span>
+    {% if project.budget.limit_amount %}
+    <span class="budget-meter" aria-hidden="true">
+      <span class="fill fill-{{ [100, (project.budget.spent_amount / project.budget.limit_amount * 20) | round | int * 5] | min }}"></span>
+    </span>
+    {% else %}
+    <span class="meta">한도 없음 — 유료 생성이 차단됩니다</span>
+    {% endif %}
+  </summary>
+  <div class="budget-body">
+    {% if project.budget.spend_is_incomplete %}
+    <p class="hint hint-block">
+      가격을 보고하지 않은 생성이 {{ project.budget.unpriced_take_count }}건 있어, 실제 사용액은 표시된 값보다 큽니다.
+    </p>
+    {% endif %}
+    {# Always rendered, disabled rather than hidden: a page that hides a
+       whole form also hides its CSRF field. #}
+    <form method="post" action="/fable/{{ project.project_id }}/budget">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-grid">
+        <div class="form-field">
+          <label for="limit_amount">한도</label>
+          <input type="text" id="limit_amount" name="limit_amount" inputmode="decimal"
+                 value="{{ project.budget.limit_amount if project.budget.limit_amount is not none else '' }}"
+                 {{ 'disabled' if project.is_terminal }}>
+        </div>
+        <div class="form-field">
+          <label for="currency">통화</label>
+          <input type="text" id="currency" name="currency" value="{{ project.budget.currency or '' }}"
+                 placeholder="USD" {{ 'disabled' if project.is_terminal }}>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn btn-primary" {{ 'disabled' if project.is_terminal }}>저장</button>
+      </div>
+    </form>
+    <form method="post" action="/fable/{{ project.project_id }}/budget" class="inline-form inline-form-loose">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="clear" value="true">
+      <button type="submit" class="btn btn-ghost btn-sm" {{ 'disabled' if project.is_terminal }}>한도 해제</button>
+    </form>
+    <p class="hint">해제해도 이미 쓴 금액은 되돌아오지 않으며, 유료 생성 게이트가 다시 닫힙니다.</p>
+  </div>
+</details>
+
+{# On a phone the action would otherwise sit above three screens of
+   storyboard. It rides along instead. #}
+{% if next_action.action %}
+<div class="sticky-cta">
+  <form method="post" action="{{ next_action.action }}" class="inline-form inline-form-grow">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if next_action.step %}<input type="hidden" name="step" value="{{ next_action.step }}">{% endif %}
+    <button type="submit" class="btn btn-primary btn-block">{{ next_action.label }}</button>
+  </form>
+</div>
+{% endif %}
+
+</div>
+{% endblock %}

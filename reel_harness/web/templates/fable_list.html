@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}내 작품 · Fable Studio{% endblock %}
+{% set nav_active = 'projects' %}
+{% block content %}
+
+<header class="page-head">
+  <div class="project-head">
+    <div>
+      <h1 class="display">내 작품</h1>
+      <p class="lede">원작을 각색해 샷으로 나눠 생성하고, 후보를 골라 한 편으로 잇습니다.</p>
+    </div>
+    <a class="btn btn-primary btn-lg" href="/fable/new">새 작품</a>
+  </div>
+</header>
+
+{% if projects %}
+{# Filtering is client-side on purpose: this is a single-user local tool
+   whose project list is tens of rows, not thousands. A round trip per
+   keystroke would be slower and no more correct. #}
+<div class="toolbar" data-project-filter>
+  <div class="segments" role="group" aria-label="상태별 보기">
+    <button type="button" class="segment" data-segment="all" aria-pressed="true">
+      전체 <span class="segment-count">{{ projects | length }}</span>
+    </button>
+    {% for key, label in groups %}
+    {% set count = projects | selectattr('group', 'equalto', key) | list | length %}
+    {% if count %}
+    <button type="button" class="segment" data-segment="{{ key }}" aria-pressed="false">
+      {{ label }} <span class="segment-count">{{ count }}</span>
+    </button>
+    {% endif %}
+    {% endfor %}
+  </div>
+  <div class="toolbar-search">
+    <input type="search" data-project-search placeholder="제목으로 검색" aria-label="제목으로 검색">
+  </div>
+</div>
+
+<ul class="project-grid" data-project-list>
+  {% for project in projects %}
+  <li class="project-card" data-group="{{ project.group }}" data-title="{{ project.title | lower }}">
+    <div class="project-cover">
+      {# Whatever the project has actually produced: the finished film, a
+         chosen candidate clip, or a character's reference still. Videos
+         draw their own first frame from a metadata-only fetch, so none of
+         this costs a stored thumbnail. #}
+      {% if project.cover_kind == 'video' %}
+      <video src="{{ project.cover_url }}" preload="metadata" muted playsinline tabindex="-1" aria-hidden="true"></video>
+      {% elif project.cover_kind == 'image' %}
+      <img src="{{ project.cover_url }}" alt="" loading="lazy">
+      {% else %}
+      <span class="project-slate" aria-hidden="true">Fable</span>
+      {% endif %}
+    </div>
+    <div class="project-card-body">
+      <div class="project-card-title"><a href="{{ project.detail_url }}">{{ project.title }}</a></div>
+      <div class="progress-track" aria-hidden="true"><span class="fill fill-{{ (project.progress / 5) | round | int * 5 }}"></span></div>
+      <div class="project-card-foot">
+        <span class="badge {{ 'badge-action' if project.needs_action else 'badge-status' }}">
+          {{ '확인 필요' if project.needs_action else project.status_label }}
+        </span>
+        <span class="meta">{{ project.elapsed }} 전</span>
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+
+<p class="empty-state" data-empty-filter hidden>검색 조건에 맞는 작품이 없습니다.</p>
+
+{% else %}
+<div class="empty-state">
+  <h3>첫 작품을 시작하세요</h3>
+  <p class="prose prose-center">
+    짧은 이야기 하나면 충분합니다. 각색부터 완성까지 다섯 단계를 거치고,
+    각 단계마다 결과를 확인한 뒤 승인하게 됩니다 — 자동으로 넘어가는 곳은 없습니다.
+  </p>
+  <div class="actions"><a class="btn btn-primary btn-lg" href="/fable/new">새 작품 만들기</a></div>
+</div>
+{% endif %}
+{% endblock %}

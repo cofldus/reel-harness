@@ -158,8 +158,11 @@ row. From that point:
 
 Schema note: `lease_token` was added via the additive-only migration path in
 `db.schema` (`_ADDITIVE_COLUMNS`, schema v2) — `init_db()` applies
-`ALTER TABLE ADD COLUMN` to pre-existing dev databases; anything beyond
-nullable column additions is the trigger to adopt Alembic.
+`ALTER TABLE ADD COLUMN` to pre-existing dev databases. Only column
+*additions* go through it: nullable, or NOT NULL with a server_default that
+gives every existing row a correct value. Anything destructive — a drop, a
+rename, a type change, a backfill that must read other columns — is the
+trigger to adopt Alembic.
 
 ### Manifest atomicity
 

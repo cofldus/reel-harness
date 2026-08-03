@@ -61,8 +61,13 @@ jobs:
       # this job; it lets the engine-construction unit tests run instead of
       # skipping (create_engine eagerly imports the DBAPI module). The real
       # server-backed tests live in the postgres-parity job below.
+      # --extra google: the google-genai SDK only -- no credential and no
+      # network call in this job. It lets the reference-image adapter's
+      # contract tests run (they build requests out of the SDK's own
+      # types) instead of skipping; every call is against an injected fake
+      # client.
       - name: Install dependencies
-        run: uv sync --extra dev --extra demo --extra postgres
+        run: uv sync --extra dev --extra demo --extra postgres --extra google
 
       - name: Import check
         run: uv run python -c "import reel_harness; import reel_harness.api.app; import reel_harness.cli.main"
@@ -97,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git status --porcelain | grep -E '^\?\? (jobs/|.*\.db$)'; then
+          if git status --porcelain | grep -E '^\?\? (jobs/|fable_projects/|.*\.db$)'; then
             echo "::error::a job artifact or database file would be tracked -- check .gitignore"
             exit 1
           fi

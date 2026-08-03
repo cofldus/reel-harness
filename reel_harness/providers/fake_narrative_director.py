@@ -1,0 +1,224 @@
+"""Deterministic stand-in for a real Narrative Director. Zero network,
+unit/integration tests only.
+
+Unlike a stub, this produces a COMPLETE adaptation document that passes
+the real parser, schema, semantic rules, and fidelity heuristic -- the
+whole pipeline runs for real against it, nothing is bypassed. Scene
+`source_beat` values are genuine substrings of the caller's own source
+text (split on sentence boundaries), which is exactly what makes the
+fidelity check meaningful rather than vacuous.
+
+`mode` exercises the repair loop and safety paths without a network:
+  ok             -- valid on the first attempt
+  invalid_once   -- schema-invalid first, valid on the first repair
+  always_invalid -- never valid (repair-exhaustion path)
+  minor_character-- adult-only rejection path
+  timeout        -- transient provider failure
+"""
+from __future__ import annotations
+
+import json
+import re
+from typing import Literal
+
+from reel_harness.core.errors import TransientProviderError
+from reel_harness.pipeline.adaptation_parser import _SPOKEN_RE
+from reel_harness.providers.base import (
+    AdaptationRequest,
+    AdaptationResult,
+    RefinementRequest,
+    RefinementResult,
+)
+from reel_harness.providers.narrative_prompts import (
+    NARRATIVE_PROMPT_VERSION,
+    REFINEMENT_PROMPT_VERSION,
+)
+
+FakeDirectorMode = Literal["ok", "invalid_once", "always_invalid", "minor_character", "timeout"]
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?。？！])\s+|\n+")
+
+
+def _source_beats(source_text: str, count: int) -> list[str]:
+    """Real sentences from the source, so the fidelity check has genuine
+    quotes to match. Falls back to overlapping windows when the source
+    has fewer sentences than scenes."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(source_text.strip()) if s.strip()]
+    if not sentences:
+        sentences = [source_text.strip()[:160] or "story"]
+    beats: list[str] = []
+    for index in range(count):
+        beats.append(sentences[index % len(sentences)][:160])
+    return beats
+
+
+class FakeNarrativeDirector:
+    provider_id = "fake"
+    model_id = "fake-narrative-v1"
+
+    def __init__(self, mode: FakeDirectorMode = "ok") -> None:
+        self.mode = mode
+        self.adapt_calls = 0
+        self.repair_calls = 0
+        self.refine_calls = 0
+        self.last_errors: list[str] = []
+
+    # -- Protocol ---------------------------------------------------------
+
+    def adapt_story(self, request: AdaptationRequest) -> AdaptationResult:
+        self.adapt_calls += 1
+        if self.mode == "timeout":
+            raise TransientProviderError("fake narrative director timed out")
+        if self.mode in ("invalid_once", "always_invalid"):
+            return self._result(self._invalid_document())
+        return self._result(self._document(request))
+
+    def repair_adaptation(
+        self, request: AdaptationRequest, previous_raw: str, errors: list[str],
+    ) -> AdaptationResult:
+        self.repair_calls += 1
+        self.last_errors = list(errors)
+        if self.mode == "always_invalid":
+            return self._result(self._invalid_document())
+        # "invalid_once" (and any other mode reaching repair) now produces
+        # a document that actually satisfies the validators.
+        return self._result(self._document(request))
+
+    def refine_source(self, request: RefinementRequest) -> RefinementResult:
+        """Deterministic refinement: keeps the caller's own sentences and
+        appends the four things the guide asks for.
+
+        It genuinely returns the original text plus concrete additions, so
+        a test can assert the user's writing survived -- which is the one
+        property that actually matters about this call. It does not try to
+        write well; that is the real provider's job."""
+        self.refine_calls += 1
+        if self.mode == "timeout":
+            raise TransientProviderError("fake narrative director timed out")
+
+        body = request.source_text.strip()
+        additions = [
+            "서른쯤의 그는 낡은 회색 코트 차림에 머리를 짧게 자른 모습이었다.",
+            "늦은 밤의 실내, 창밖 가로등 불빛이 바닥에 길게 들어왔다.",
+            "“이제 그만하자.” 그가 낮은 목소리로 말했다.",
+            "한참 뒤, 그는 탁자 위의 사진을 반으로 접어 주머니에 밀어 넣었다.",
+        ]
+        return RefinementResult(
+            refined_text=body + "\n\n" + " ".join(additions),
+            notes=[
+                "인물의 나이와 옷차림을 눈에 보이게 적었습니다.",
+                "장소와 광원을 한 줄 더했습니다.",
+                "요약된 말을 실제 대사로 바꿨습니다.",
+                "마음속 상태를 찍을 수 있는 동작으로 바꿨습니다.",
+            ],
+            provider_id=self.provider_id, model_id=self.model_id,
+            prompt_version=REFINEMENT_PROMPT_VERSION,
+        )
+
+    # -- Document construction -------------------------------------------
+
+    def _result(self, document: dict | str) -> AdaptationResult:
+        raw = document if isinstance(document, str) else json.dumps(document, ensure_ascii=False)
+        return AdaptationResult(
+            raw_text=raw, provider_id=self.provider_id, model_id=self.model_id,
+            prompt_version=NARRATIVE_PROMPT_VERSION,
+        )
+
+    def _invalid_document(self) -> str:
+        return "```json\n{\"logline\": \"missing everything else\"}\n```"
+
+    def _document(self, request: AdaptationRequest) -> dict:
+        # The shot plan is sized from the REQUESTED runtime and varies its
+        # grammar, because the parser's craft rules check exactly that: a
+        # plan of the wrong length, shot entirely from one angle, or never
+        # moving the camera is sent back for repair. A fake whose output
+        # cannot survive the real validators is not a stand-in, it is a
+        # way of never testing them.
+        from reel_harness.pipeline.adaptation_parser import SHOT_SECONDS
+
+        total_shots = max(2, round(request.target_duration_sec / SHOT_SECONDS))
+        scene_count = 2 if total_shots >= 4 else 1
+        beats = _source_beats(request.source_text, scene_count)
+        age_range = "teens" if self.mode == "minor_character" else "30s"
+        character_name = "지우"
+        location_name = "호텔 방"
+
+        # A spoken line in the source has to survive into the film.
+        spoken = _SPOKEN_RE.search(request.source_text or "")
+        dialogue_line = spoken.group(0).strip("“”\"‘’「」")[:80] if spoken else None
+
+        sizes = ["medium", "medium_close_up", "wide", "close_up"]
+        angles = ["eye_level", "low_angle", "high_angle"]
+        moves = ["locked", "dolly_in", "pan", "locked"]
+
+        scenes = []
+        placed_dialogue = False
+        shot_number = 0
+        for scene_index in range(scene_count):
+            # Any remainder lands in the last scene so the total is exact.
+            per_scene = total_shots // scene_count
+            if scene_index == scene_count - 1:
+                per_scene += total_shots - per_scene * scene_count
+            shots = []
+            for shot_index in range(per_scene):
+                line = None
+                if dialogue_line and not placed_dialogue and shot_index == 0:
+                    line, placed_dialogue = dialogue_line, True
+                shots.append({
+                    "shot_order": shot_index + 1,
+                    "shot_size": sizes[shot_number % len(sizes)],
+                    "camera_angle": angles[shot_number % len(angles)],
+                    "camera_movement": moves[shot_number % len(moves)],
+                    "lens_style": "50mm",
+                    "subject": character_name,
+                    "action": (
+                        "창밖을 바라본다" if scene_index == 0 else "천천히 문 쪽으로 돌아선다"
+                    ),
+                    "expression": "절제된 불안",
+                    "blocking": "창가에 선 채",
+                    "lighting": "soft practical",
+                    "duration_sec": 2.0,
+                    "dialogue_line": line,
+                })
+                shot_number += 1
+            scenes.append({
+                "scene_order": scene_index + 1,
+                "location_name": location_name,
+                "story_purpose": "도입" if scene_index == 0 else "전환",
+                "emotional_beat": "정적인 불안",
+                "source_beat": beats[scene_index],
+                "dialogue": [],
+                "shots": shots,
+            })
+
+        return {
+            "logline": "한 인물이 비 오는 밤의 방에서 결심에 이른다.",
+            "synopsis": request.source_text.strip()[:400] or "짧은 이야기",
+            "story_bible": {
+                "premise": request.source_text.strip()[:200] or "짧은 이야기",
+                "theme": request.tone or "quiet tension",
+                "setting": "비 오는 밤의 실내",
+                "time_period": "현대",
+                "visual_style": "soft practical lighting, muted palette",
+                "color_language": {"palette": "cool neutrals", "contrast": "low"},
+                "narrative_point_of_view": "third person",
+                "ending_summary": "인물은 결심한 듯 움직인다.",
+                "prohibited_elements": ["real people", "minors", "explicit content"],
+            },
+            "characters": [{
+                "name": character_name, "role": "protagonist", "is_adult": True,
+                "age_range": age_range,
+                "appearance": "oval face, calm eyes", "wardrobe": "grey coat",
+                "hair": "black short hair", "mannerisms": "slow deliberate movements",
+                "voice_style": "low, restrained",
+                "fixed_identity": {
+                    "face": "oval face, calm eyes", "hair": "black short hair",
+                    "wardrobe": "grey coat",
+                },
+            }],
+            "locations": [{
+                "name": location_name, "description": "a room at night, rain outside",
+                "lighting": "soft practicals", "time_of_day": "night", "weather": "rain",
+            }],
+            "scenes": scenes,
+        }

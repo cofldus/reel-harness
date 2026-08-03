@@ -9,6 +9,9 @@ from reel_harness.pipeline.asset_query import QUERY_VERSION as ASSET_QUERY_VERSI
 from reel_harness.pipeline.asset_selection import SELECTION_VERSION as ASSET_SELECTION_VERSION
 from reel_harness.providers.base import (
     ChannelContext,
+    CinematicGenerationHandle,
+    CinematicGenerationRequest,
+    CinematicVideoProvider,
     CreatorInfo,
     LLMProvider,
     ProcessingStatusResult,
@@ -78,6 +81,92 @@ class _UnconfiguredStockMediaProvider:
         raise ProviderNotConfiguredError(self._reason)
 
     def download(self, candidate, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
+class _UnconfiguredCinematicVideoProvider:
+    """Cinematic counterpart of _UnconfiguredLLMProvider: any generation
+    attempt fails with PROVIDER_NOT_CONFIGURED. `capabilities` is a
+    maximally-restrictive placeholder (everything False/empty) so
+    capability-gate checks that run before any method call stay
+    structurally valid without ever enabling a feature."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        from reel_harness.providers.base import CinematicCapabilities
+
+        self._reason = reason
+        self.capabilities = CinematicCapabilities(
+            text_to_video=False, image_to_video=False, first_frame=False, last_frame=False,
+            character_reference=False, multiple_references=False, video_reference=False,
+            native_audio=False, lip_sync=False, supports_seed=False,
+            supports_negative_prompt=False, supported_durations_sec=frozenset(),
+            supported_aspect_ratios=frozenset(), supported_resolutions=frozenset(),
+            max_concurrent_jobs=None,
+        )
+
+    def validate_request(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def estimate_cost(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def create_generation(self, request: CinematicGenerationRequest):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def get_generation_status(self, handle: CinematicGenerationHandle):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def cancel_generation(self, handle: CinematicGenerationHandle):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def download_result(self, handle: CinematicGenerationHandle, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
+class _UnconfiguredReferenceImageProvider:
+    """Reference-image counterpart of _UnconfiguredLLMProvider: any
+    generation attempt fails with PROVIDER_NOT_CONFIGURED. Capabilities
+    are a maximally-restrictive placeholder so a capability check that
+    runs before any call stays structurally valid without enabling
+    anything."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        from reel_harness.providers.base import ImageCapabilities
+
+        self._reason = reason
+        self.capabilities = ImageCapabilities(
+            text_to_image=False, character_reference=False, max_character_references=0,
+            supported_resolutions=frozenset(), supported_aspect_ratios=frozenset(),
+            watermarked=False,
+        )
+
+    def validate_request(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def estimate_cost(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def generate_reference(self, request, dest_dir):
+        raise ProviderNotConfiguredError(self._reason)
+
+
+class _UnconfiguredNarrativeDirector:
+    """Narrative counterpart of _UnconfiguredLLMProvider: any adaptation
+    attempt fails with PROVIDER_NOT_CONFIGURED."""
+
+    provider_id = "unconfigured"
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def adapt_story(self, request):
+        raise ProviderNotConfiguredError(self._reason)
+
+    def repair_adaptation(self, request, previous_raw, errors):
         raise ProviderNotConfiguredError(self._reason)
 
 
@@ -412,6 +501,40 @@ STOCK_MEDIA_PROVIDERS: dict[str, Callable[[Settings | None], StockMediaProvider]
 }
 
 
+def _build_fake_cinematic_video(settings: Settings | None) -> CinematicVideoProvider:
+    from reel_harness.providers.fake_cinematic_video import FakeCinematicVideoProvider
+
+    return FakeCinematicVideoProvider()
+
+
+def _build_google_cinematic_video(settings: Settings | None) -> CinematicVideoProvider:
+    if settings is None:
+        raise NotImplementedError(
+            "the google cinematic provider requires application settings"
+        )
+    from reel_harness.providers.google_cinematic_video import GoogleCinematicVideoProvider
+
+    return GoogleCinematicVideoProvider(
+        project=settings.google_project,
+        location=settings.google_location,
+        api_key=settings.google_api_key.get_secret_value(),
+        use_vertex=settings.google_use_vertex,
+        model=settings.cinematic_model,
+        price_per_second_usd=settings.cinematic_price_per_second_usd,
+        generate_audio=settings.cinematic_generate_audio,
+    )
+
+
+# Fable cinematic generation. "google" IS a concrete vendor -- video
+# generation with typed character references has no protocol-shaped
+# standard -- so the name lives here and nowhere else, exactly like
+# "pexels" and the reference-image family.
+CINEMATIC_VIDEO_PROVIDERS: dict[str, Callable[[Settings | None], CinematicVideoProvider]] = {
+    "fake": _build_fake_cinematic_video,
+    "google": _build_google_cinematic_video,
+}
+
+
 def resolve_llm_provider(name: str, settings: Settings | None = None) -> LLMProvider:
     try:
         return LLM_PROVIDERS[normalize_provider_name(name)](settings)
@@ -431,6 +554,204 @@ def resolve_stock_media_provider(name: str, settings: Settings | None = None) ->
         return STOCK_MEDIA_PROVIDERS[normalize_provider_name(name)](settings)
     except KeyError as exc:
         raise NotImplementedError(f"Stock media provider '{name}' is not registered yet") from exc
+
+
+def resolve_cinematic_video_provider(name: str, settings: Settings | None = None) -> CinematicVideoProvider:
+    try:
+        return CINEMATIC_VIDEO_PROVIDERS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Cinematic video provider '{name}' is not registered yet") from exc
+
+
+def _build_fake_reference_image(settings: Settings | None):
+    from reel_harness.providers.fake_reference_image import FakeReferenceImageProvider
+
+    return FakeReferenceImageProvider()
+
+
+def _build_demo_reference_image(settings: Settings | None):
+    from reel_harness.providers.demo_reference_image import DemoReferenceImageProvider
+
+    return DemoReferenceImageProvider()
+
+
+def _build_google_reference_image(settings: Settings | None):
+    if settings is None:
+        raise NotImplementedError(
+            "the google reference-image provider requires application settings"
+        )
+    from reel_harness.providers.google_reference_image import GoogleReferenceImageProvider
+
+    return GoogleReferenceImageProvider(
+        api_key=settings.google_api_key.get_secret_value(),
+        project=settings.google_project,
+        location=settings.google_location,
+        use_vertex=settings.google_use_vertex,
+        model=settings.reference_image_model,
+        price_per_image_usd=settings.reference_image_price_usd,
+    )
+
+
+# Reference-image generation (Fable F3). "google" IS a concrete vendor --
+# image generation with typed character references has no protocol-shaped
+# standard the way chat completions does -- so the name lives here and
+# nowhere else, exactly like "pexels".
+REFERENCE_IMAGE_PROVIDERS: dict[str, Callable[[Settings | None], object]] = {
+    "fake": _build_fake_reference_image,
+    "demo": _build_demo_reference_image,
+    "google": _build_google_reference_image,
+}
+
+
+# Provider ids that never bill a real account: the offline tiers plus the
+# unconfigured placeholder (which cannot generate anything at all). Cost
+# gating asks the question by EXCLUSION rather than by listing paid vendor
+# names, so a real adapter registered by a later commit counts as paid the
+# moment it exists, without anyone having to remember to add it here --
+# the safe direction to be wrong in. Vendor names still live only in this
+# module, per the same discipline as every other provider family.
+FREE_PROVIDER_IDS = frozenset({"fake", "demo", "unconfigured"})
+
+
+def provider_charges_money(provider_id: str) -> bool:
+    """Whether generating with this provider spends real money -- the
+    input to Fable's paid-generation double gate (core.cost_service)."""
+    return normalize_provider_name(provider_id) not in FREE_PROVIDER_IDS
+
+
+def resolve_reference_image_provider(name: str, settings: Settings | None = None):
+    try:
+        return REFERENCE_IMAGE_PROVIDERS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Reference image provider '{name}' is not registered yet") from exc
+
+
+def resolve_reference_image_for_snapshot(snapshot: dict | None, settings: Settings | None):
+    """Snapshot-pinned resolution -- identical fail-loud ladder as every
+    other provider family; never a silent fallback."""
+    if not snapshot or "reference_image_provider" not in snapshot:
+        return resolve_reference_image_provider(
+            normalize_provider_name(settings.reference_image_provider) if settings else "fake",
+            settings,
+        )
+    name = normalize_provider_name(snapshot.get("reference_image_provider"))
+    if name not in REFERENCE_IMAGE_PROVIDERS:
+        return _UnconfiguredReferenceImageProvider(
+            f"project is pinned to reference image provider {name!r}, which is not registered"
+        )
+    return REFERENCE_IMAGE_PROVIDERS[name](settings)
+
+
+def _build_fake_narrative_director(settings: Settings | None):
+    from reel_harness.providers.fake_narrative_director import FakeNarrativeDirector
+
+    return FakeNarrativeDirector()
+
+
+def _build_openai_compatible_director(settings: Settings | None):
+    if settings is None:
+        raise NotImplementedError("the openai-compatible narrative director requires settings")
+    from reel_harness.providers.openai_compatible_director import (
+        OpenAICompatibleNarrativeDirector,
+    )
+
+    return OpenAICompatibleNarrativeDirector(
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        api_key=settings.llm_api_key.get_secret_value(),
+        connect_timeout=settings.llm_connect_timeout_seconds,
+        read_timeout=settings.narrative_read_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+        retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+        temperature=settings.llm_temperature,
+        max_output_tokens=settings.narrative_max_output_tokens,
+    )
+
+
+# Narrative Director (Fable F2). "openai-compatible" is a protocol shape,
+# not a vendor -- the concrete vendor is chosen purely by the configured
+# LLM base URL and model, exactly as for script generation.
+NARRATIVE_DIRECTORS: dict[str, Callable[[Settings | None], object]] = {
+    "fake": _build_fake_narrative_director,
+    "openai-compatible": _build_openai_compatible_director,
+}
+
+
+def resolve_narrative_director(name: str, settings: Settings | None = None):
+    try:
+        return NARRATIVE_DIRECTORS[normalize_provider_name(name)](settings)
+    except KeyError as exc:
+        raise NotImplementedError(f"Narrative director '{name}' is not registered yet") from exc
+
+
+def cinematic_provider_snapshot(settings: Settings | None) -> dict:
+    """Per-project provider snapshot block (Fable) -- same pinning
+    discipline as llm/tts/asset_provider_snapshot: provider ids, model,
+    safe base-URL host, and the prompt version that shaped the
+    adaptation. Never a credential."""
+    from reel_harness.providers.narrative_prompts import NARRATIVE_PROMPT_VERSION
+
+    cinematic = normalize_provider_name(settings.cinematic_provider) if settings else "fake"
+    narrative = normalize_provider_name(settings.narrative_provider) if settings else "fake"
+    reference = normalize_provider_name(settings.reference_image_provider) if settings else "fake"
+    snapshot = {
+        "cinematic_provider": cinematic,
+        "narrative_provider": narrative,
+        "narrative_prompt_version": NARRATIVE_PROMPT_VERSION,
+        "reference_image_provider": reference,
+    }
+    if narrative == "openai-compatible" and settings is not None:
+        snapshot["narrative_model"] = settings.llm_model
+        snapshot["narrative_base_url_host"] = urlsplit(settings.llm_base_url).netloc
+    return snapshot
+
+
+def resolve_narrative_director_for_snapshot(snapshot: dict | None, settings: Settings | None):
+    """Resolves the director a project's adaptation must run with,
+    honoring its creation-time snapshot -- identical fail-loud ladder as
+    the other families, no silent fallback to a different provider."""
+    if not snapshot or "narrative_provider" not in snapshot:
+        return resolve_narrative_director(
+            normalize_provider_name(settings.narrative_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("narrative_provider"))
+    if name == "fake":
+        return _build_fake_narrative_director(settings)
+    if name not in NARRATIVE_DIRECTORS:
+        return _UnconfiguredNarrativeDirector(
+            f"project is pinned to narrative provider {name!r}, which is not registered"
+        )
+    if settings is None or not settings.llm_base_url or not settings.llm_api_key.get_secret_value():
+        return _UnconfiguredNarrativeDirector(
+            "project is pinned to the openai-compatible narrative director but "
+            "REEL_HARNESS_LLM_BASE_URL / REEL_HARNESS_LLM_API_KEY are not configured"
+        )
+    pinned_host = snapshot.get("narrative_base_url_host")
+    current_host = urlsplit(settings.llm_base_url).netloc
+    if pinned_host and current_host != pinned_host:
+        return _UnconfiguredNarrativeDirector(
+            f"configured llm endpoint host {current_host!r} does not match the project's "
+            f"pinned host {pinned_host!r}"
+        )
+    return NARRATIVE_DIRECTORS[name](settings)
+
+
+def resolve_cinematic_video_for_snapshot(
+    snapshot: dict | None, settings: Settings | None,
+) -> CinematicVideoProvider:
+    """Resolves the cinematic provider a leased shot must generate with,
+    honoring the project's creation-time snapshot -- identical fail-loud
+    ladder as the other families, no silent fallback."""
+    if not snapshot or "cinematic_provider" not in snapshot:
+        return resolve_cinematic_video_provider(
+            normalize_provider_name(settings.cinematic_provider) if settings else "fake", settings,
+        )
+    name = normalize_provider_name(snapshot.get("cinematic_provider"))
+    if name not in CINEMATIC_VIDEO_PROVIDERS:
+        return _UnconfiguredCinematicVideoProvider(
+            f"project is pinned to cinematic provider {name!r}, which is not registered"
+        )
+    return CINEMATIC_VIDEO_PROVIDERS[name](settings)
 
 
 # A neutral, maximally-restrictive placeholder -- _UnconfiguredPublisher is

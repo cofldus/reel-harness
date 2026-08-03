@@ -29,6 +29,20 @@ class SchemaValidationError(PipelineError):
     retryable = True
 
 
+class ContentPolicyRefusedError(PipelineError):
+    """A generative provider's safety filter refused the request.
+
+    Deliberately NOT retryable and deliberately not a hard failure: per
+    .claude/rules/architecture.md an uncertain content-policy outcome
+    goes to REVIEW_REQUIRED for a human decision, never an automatic
+    block and never a blind retry of the same prompt (which would just
+    burn quota to reach the same refusal).
+    """
+
+    code = "CONTENT_POLICY_REVIEW"
+    retryable = False
+
+
 class TransientProviderError(PipelineError):
     """Timeout / 429 / 5xx / connection error from an external provider."""
 
@@ -69,6 +83,42 @@ class UnsupportedResumeStageError(PipelineError):
     PUBLISH, or an unknown value persisted by older code). Never auto-retried."""
 
     code = "UNSUPPORTED_RESUME_STAGE"
+    retryable = False
+
+
+# --- Fable cost/budget errors (Phase F3) --------------------------------
+# Both are deliberately NOT retryable and deliberately NOT hard failures:
+# a spending ceiling is an operator decision, not a defect, so the shot
+# goes to REVIEW_REQUIRED (raise the limit and re-queue, or stop) -- the
+# same reasoning ContentPolicyRefusedError applies to a safety refusal.
+# Retrying either of these unchanged could only reach the same answer.
+
+class BudgetExceededError(PipelineError):
+    """The project's remaining budget cannot cover this generation (see
+    core.cost_service). Never auto-retried: only a human raising the
+    limit can change the outcome."""
+
+    code = "BUDGET_EXCEEDED"
+    retryable = False
+
+
+class PaidGenerationNotAllowedError(PipelineError):
+    """A cost-incurring provider was resolved while the double gate is
+    not satisfied -- `Settings.allow_paid_generation` is false, or the
+    project has no explicit budget limit. Mirrors the allow_public_upload
+    gate: a global switch AND a per-object explicit decision, both
+    required, neither implied by the other."""
+
+    code = "PAID_GENERATION_NOT_ALLOWED"
+    retryable = False
+
+
+class BudgetCurrencyMismatchError(PipelineError):
+    """The provider quoted or billed in a currency the project's budget
+    is not denominated in. Never converted with an invented exchange rate
+    -- an unconvertible number is refused, not guessed at."""
+
+    code = "BUDGET_CURRENCY_MISMATCH"
     retryable = False
 
 

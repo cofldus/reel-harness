@@ -403,6 +403,409 @@ def cmd_job_list(args: argparse.Namespace, ctx: AppContext) -> int:
     return 0
 
 
+# --- Fable cinematic projects (Phase F1) -----------------------------------
+
+
+def cmd_fable_create(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.service import InvalidActionError
+
+    if args.story_file:
+        source_text = Path(args.story_file).read_text(encoding="utf-8")
+    else:
+        source_text = args.story or ""
+    idempotency_key = args.idempotency_key or str(uuid.uuid4())
+    try:
+        project, replay = ctx.fable.create_project(
+            title=args.title, source_text=source_text, idempotency_key=idempotency_key,
+            language=args.language, genre=args.genre, tone=args.tone,
+            target_duration_sec=args.duration, aspect_ratio=args.aspect_ratio,
+            takes_per_shot=args.takes_per_shot,
+        )
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": project.id, "status": project.status, "idempotent_replay": replay,
+    }, indent=2))
+    return 0
+
+
+def cmd_fable_adapt(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.adapt_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
+def cmd_fable_approve(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    actions = {
+        "story": ctx.fable.approve_story,
+        "characters": ctx.fable.approve_characters,
+        "shots": ctx.fable.approve_shots,
+        "final": ctx.fable.approve_final,
+    }
+    try:
+        project = actions[args.step](args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
+def cmd_fable_status(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.get_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    shots = ctx.fable.project_shots(args.project_id)
+    budget = ctx.fable.budget_status(args.project_id)
+    payload = {
+        "project_id": project.id,
+        "title": project.title,
+        "status": project.status,
+        "aspect_ratio": project.aspect_ratio,
+        "failure_code": project.failure_code,
+        "failure_summary": project.failure_summary,
+        "budget": {
+            "limit_amount": budget.limit_amount,
+            "currency": budget.currency,
+            "spent_amount": budget.spent_amount,
+            "remaining_amount": budget.remaining_amount,
+            # Completed takes the provider published no price for. A
+            # non-zero count means `spent_amount` is a lower bound.
+            "unpriced_take_count": budget.unpriced_take_count,
+        },
+        "characters": [_character_payload(c) for c in ctx.fable.project_characters(args.project_id)],
+        "shots": [
+            {
+                "shot_id": shot.id, "status": shot.status, "order": shot.shot_order,
+                "action": shot.action, "duration_sec": shot.duration_sec,
+                # Carries BUDGET_EXCEEDED / PAID_GENERATION_NOT_ALLOWED for a
+                # shot the worker stopped before spending anything.
+                "failure_code": shot.failure_code,
+                "takes": [
+                    {
+                        "take_id": take.id, "status": take.status, "selected": take.selected,
+                        "attempt_number": take.attempt_number,
+                        "cost_amount": take.cost_amount, "cost_currency": take.cost_currency,
+                    }
+                    for take in ctx.fable.shot_takes(shot.id)
+                ],
+            }
+            for shot in shots
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_fable_generate_references(args: argparse.Namespace, ctx: AppContext) -> int:
+    """CASTING -> CHARACTER_REVIEW, generating each character's four-view
+    reference sheet (face first, the rest chained off it)."""
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        project = ctx.fable.generate_references(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except PipelineError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps({
+        "project_id": project.id,
+        "status": project.status,
+        "characters": [_character_payload(c) for c in ctx.fable.project_characters(project.id)],
+    }, indent=2))
+    return 0
+
+
+def _character_payload(character) -> dict:
+    return {
+        "character_id": character.id,
+        "name": character.name,
+        "adult_confirmed": character.adult_confirmed,
+        "reference_approved": character.reference_approved,
+        "reference_images": character.reference_images or {},
+        # Present when a safety filter refused a view -- the sheet stays
+        # incomplete and unapprovable until the bible is edited.
+        "reference_failure_code": character.reference_failure_code,
+        "reference_failure_summary": character.reference_failure_summary,
+    }
+
+
+def cmd_fable_reference(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Approve or reject one character's reference sheet."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    action = ctx.fable.reject_reference if args.reject else ctx.fable.approve_reference
+    try:
+        character = action(args.character_id)
+    except FableProjectNotFoundError:
+        print(f"fable character not found: {args.character_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(_character_payload(character), indent=2))
+    return 0
+
+
+def cmd_fable_reference_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
+    """One REAL reference-image chain against the configured provider.
+
+    Exists to answer, with actual bytes rather than documentation, two
+    questions the test suite structurally cannot: does the real adapter
+    work end to end, and does the model accept its own generated image
+    back as a character reference (the chaining the whole reference sheet
+    depends on)?
+
+    It spends real money on a real provider, so it is opt-in twice over
+    and it says up front what it will cost. Against a free tier it is
+    simply a cheap wiring check."""
+    import tempfile
+
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.pipeline.reference_prompt import (
+        DEFAULT_REFERENCE_RESOLUTION,
+        REFERENCE_ASPECT_RATIO,
+    )
+    from reel_harness.providers.base import ReferenceImageRequest
+    from reel_harness.providers.registry import (
+        provider_charges_money,
+        resolve_reference_image_provider,
+    )
+
+    provider = resolve_reference_image_provider(
+        ctx.settings.reference_image_provider, ctx.settings,
+    )
+    paid = provider_charges_money(provider.provider_id)
+    estimate = provider.estimate_cost(ReferenceImageRequest(
+        prompt="", aspect_ratio=REFERENCE_ASPECT_RATIO, resolution=DEFAULT_REFERENCE_RESOLUTION,
+    ))
+    # Two images: the face, then one view chained off it. That is the
+    # smallest run that actually tests the chaining rather than just the
+    # transport.
+    projected = estimate.amount * 2 if estimate.known and estimate.amount is not None else None
+
+    if paid and not args.confirm_paid_generation:
+        print(json.dumps({
+            "status": "NOT RUN",
+            "reason": "would spend real money -- re-run with --confirm-paid-generation",
+            "provider": provider.provider_id,
+            "model": getattr(provider, "model_id", None),
+            "images": 2,
+            "projected_cost": projected,
+            "projected_cost_currency": estimate.currency,
+            "projected_cost_known": estimate.known,
+        }, indent=2))
+        return 4
+
+    prompt = (
+        "a single fictional adult actor, 30s adult, plain neutral background, "
+        "head-and-shoulders portrait, facing camera directly, neutral expression, "
+        "even soft lighting, photorealistic reference photograph, "
+        "not a real or recognizable person"
+    )
+    with tempfile.TemporaryDirectory(prefix="reel-harness-reference-smoke-") as scratch:
+        dest = Path(scratch)
+        try:
+            face = provider.generate_reference(ReferenceImageRequest(
+                prompt=prompt, aspect_ratio=REFERENCE_ASPECT_RATIO,
+                resolution=DEFAULT_REFERENCE_RESOLUTION,
+                correlation_id="reference-smoke:face",
+            ), dest)
+            chained = provider.generate_reference(ReferenceImageRequest(
+                prompt=prompt.replace(
+                    "head-and-shoulders portrait, facing camera directly",
+                    "three-quarter view from the waist up, head turned 45 degrees from camera",
+                ),
+                aspect_ratio=REFERENCE_ASPECT_RATIO,
+                resolution=DEFAULT_REFERENCE_RESOLUTION,
+                character_reference_paths=[face.image_path],
+                correlation_id="reference-smoke:three_quarter",
+            ), dest)
+        except PipelineError as exc:
+            print(json.dumps({
+                "status": "FAIL", "provider": provider.provider_id,
+                "failure_code": exc.code, "failure_summary": str(exc)[:500],
+            }, indent=2))
+            return 3
+
+        payload = {
+            "status": "PASS",
+            "provider": provider.provider_id,
+            "model": face.model_id,
+            "face_bytes": face.image_path.stat().st_size,
+            "chained_bytes": chained.image_path.stat().st_size,
+            "face_checksum_sha256": face.checksum_sha256,
+            "chained_checksum_sha256": chained.checksum_sha256,
+            # The point of the second call: the model accepted its own
+            # generated image back as a character reference.
+            "chained_reference_accepted": True,
+            "watermark": chained.watermark,
+            "license": chained.license,
+            "cost_amount": (
+                (face.cost_amount or 0.0) + (chained.cost_amount or 0.0)
+                if face.cost_amount is not None else None
+            ),
+            "cost_currency": face.cost_currency,
+            # Stated in the output itself so a copied-and-pasted result can
+            # never be read as more than it is.
+            "proves": [
+                "the adapter reaches the provider and returns real image bytes",
+                "the provider accepts a previously generated image as a character reference",
+            ],
+            "does_not_prove": [
+                "that the two images depict a recognizably identical person "
+                "(no automated check judges that; look at them)",
+                "that Veo accepts a watermarked image as character-reference input "
+                "(open question -- F5's video adapter is what will answer it)",
+            ],
+        }
+        if args.keep_output:
+            kept = Path(args.keep_output)
+            kept.mkdir(parents=True, exist_ok=True)
+            for result, name in ((face, "face"), (chained, "three_quarter")):
+                target = kept / f"{name}{result.image_path.suffix}"
+                target.write_bytes(result.image_path.read_bytes())
+            payload["output_dir"] = str(kept)
+        print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_fable_budget(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Sets or reports a project's spending ceiling. With no --limit/--clear
+    it is purely a report, so checking a budget can never change one."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        if args.clear:
+            ctx.fable.set_budget(args.project_id, None)
+        elif args.limit is not None:
+            ctx.fable.set_budget(args.project_id, args.limit, args.currency)
+        status = ctx.fable.budget_status(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": args.project_id,
+        "limit_amount": status.limit_amount,
+        "currency": status.currency,
+        "spent_amount": status.spent_amount,
+        "remaining_amount": status.remaining_amount,
+        "unpriced_take_count": status.unpriced_take_count,
+        "paid_generation_enabled": ctx.settings.allow_paid_generation,
+    }, indent=2))
+    return 0
+
+
+def cmd_fable_estimate(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Prices the project's shots with its own pinned provider. Read-only:
+    approves nothing and spends nothing."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        estimate = ctx.fable.estimate_cost(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "project_id": args.project_id,
+        # False means the number below is NOT a total -- see `detail`.
+        "known": estimate.known,
+        "amount": estimate.amount,
+        "currency": estimate.currency,
+        "shot_count": estimate.shot_count,
+        "unpriced_shot_count": estimate.unpriced_shot_count,
+        "detail": estimate.detail,
+    }, indent=2))
+    return 0
+
+
+def cmd_fable_list(args: argparse.Namespace, ctx: AppContext) -> int:
+    rows = [
+        {"project_id": p.id, "title": p.title, "status": p.status}
+        for p in ctx.fable.list_projects()
+    ]
+    print(json.dumps(rows, indent=2))
+    return 0
+
+
+def cmd_fable_select_take(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        shot = ctx.fable.select_take(args.take_id)
+    except FableProjectNotFoundError:
+        print(f"fable take not found: {args.take_id}", file=sys.stderr)
+        return 1
+    except InvalidActionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"shot_id": shot.id, "status": shot.status}, indent=2))
+    return 0
+
+
+def cmd_fable_render(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.errors import PipelineError
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+    from reel_harness.core.service import InvalidActionError
+
+    try:
+        final_path = ctx.fable.render_final(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    except (InvalidActionError, PipelineError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps({"project_id": args.project_id, "final_path": str(final_path)}, indent=2))
+    return 0
+
+
+def cmd_fable_cancel(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        project = ctx.fable.cancel_project(args.project_id)
+    except FableProjectNotFoundError:
+        print(f"fable project not found: {args.project_id}", file=sys.stderr)
+        return 1
+    print(json.dumps({"project_id": project.id, "status": project.status}, indent=2))
+    return 0
+
+
 def cmd_job_approve(args: argparse.Namespace, ctx: AppContext) -> int:
     try:
         job = ctx.jobs.approve(args.job_id)
@@ -2726,6 +3129,51 @@ def _run_instagram_test_upload(ctx: AppContext, access_token: str, account_info)
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def cmd_fable_adapt_eval(args: argparse.Namespace, ctx: AppContext) -> int:
+    """Measure adaptation quality across repeated runs.
+
+    Opt-in and never part of a test suite: each run is a real, paid LLM
+    call. The command states the call count up front and refuses to spend
+    anything without --yes, because "I did not realise it would charge"
+    is not a failure mode worth designing in.
+
+    Pointing it at the fake provider costs nothing and is the right way
+    to check the report itself before spending on the real one.
+    """
+    from reel_harness.ops.adapt_eval import SAMPLE_STORIES, evaluate, format_report
+
+    if args.story:
+        path = Path(args.story)
+        if not path.is_file():
+            print(f"story file not found: {path}", file=sys.stderr)
+            return 2
+        stories = {path.stem: path.read_text(encoding="utf-8")}
+    else:
+        stories = SAMPLE_STORIES
+
+    director = ctx.narrative_director_for_project(None)
+    provider = getattr(director, "provider_id", "?")
+    model = getattr(director, "model_id", "?")
+    calls = len(stories) * args.runs
+
+    print(f"provider={provider} model={model}")
+    print(f"{calls} adaptation call(s): {len(stories)} story/stories x {args.runs} run(s)")
+    if provider != "fake":
+        print("each call is billed by the provider, and a repair adds another")
+        if not args.yes:
+            print("refusing to spend without --yes", file=sys.stderr)
+            return 2
+    print()
+
+    results = evaluate(
+        director, stories, runs=args.runs, target_duration_sec=args.duration,
+    )
+    print(format_report(results, show_plans=args.show_plans))
+    # A sweep where nothing adapted at all is a failure; individual bad
+    # plans are findings to read, not a non-zero exit.
+    return 0 if any(r.metrics is not None for r in results) else 1
+
+
 def cmd_provider_smoke(args: argparse.Namespace, ctx: AppContext) -> int:
     """Opt-in operator check of a configured real provider: one request with
     retries disabled, real validation, secrets redacted, scratch files cleaned.
@@ -2798,6 +3246,40 @@ def cmd_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
     return daemon.run()
 
 
+def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
+    from reel_harness.worker.daemon import default_worker_id
+    from reel_harness.worker.fable_daemon import FableDaemon, FableDaemonConfig
+
+    settings = ctx.settings
+    config = FableDaemonConfig(
+        worker_id=args.worker_id or default_worker_id(),
+        poll_interval_seconds=(
+            args.poll_interval if args.poll_interval is not None else settings.worker_poll_interval_seconds
+        ),
+        lease_timeout_seconds=args.lease_timeout or settings.lease_timeout_seconds,
+        heartbeat_interval_seconds=settings.lease_heartbeat_seconds,
+        max_shots=args.max_shots,
+        idle_exit_after_seconds=args.idle_exit_after,
+        stop_on_error=args.stop_on_error,
+        allow_paid_generation=settings.allow_paid_generation,
+        takes_per_shot=settings.fable_takes_per_shot,
+    )
+    daemon = FableDaemon(
+        ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,
+    )
+
+    def _signal_handler(signum, frame) -> None:  # pragma: no cover - exercised via CLI, not pytest
+        daemon.request_stop(f"signal_{signum}")
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    return daemon.run()
+
+
 def cmd_publisher_run(args: argparse.Namespace, ctx: AppContext) -> int:
     from reel_harness.worker.publish_daemon import (
         PublisherDaemon,
@@ -2849,6 +3331,7 @@ def cmd_serve(args: argparse.Namespace, ctx: AppContext) -> int:
         run_api=args.api, run_render_worker=args.render_worker, run_publisher_worker=args.publisher_worker,
         host=host, port=args.port,
         render_workers=args.render_workers, publisher_workers=args.publisher_workers,
+        fable_workers=args.fable_workers,
         shutdown_timeout_seconds=args.shutdown_timeout,
         render_daemon_config=DaemonConfig(
             worker_id=default_worker_id(), poll_interval_seconds=settings.worker_poll_interval_seconds,
@@ -3076,6 +3559,115 @@ def build_parser() -> argparse.ArgumentParser:
     job_retry.add_argument("--stage", required=True, help="Stage enum value to resume from")
     job_retry.set_defaults(func=cmd_job_retry)
 
+    fable_create = sub.add_parser("fable-create", help="Create a Fable cinematic project from a story")
+    fable_create.add_argument("--title", required=True)
+    story_source = fable_create.add_mutually_exclusive_group(required=True)
+    story_source.add_argument("--story", help="Story text inline")
+    story_source.add_argument("--story-file", help="Path to a UTF-8 text file containing the story")
+    fable_create.add_argument("--language", default="ko")
+    fable_create.add_argument("--genre", default=None)
+    fable_create.add_argument("--tone", default=None)
+    fable_create.add_argument("--duration", type=int, default=60, help="Target duration in seconds")
+    fable_create.add_argument("--aspect-ratio", default="9:16", choices=("9:16", "16:9"))
+    fable_create.add_argument(
+        "--takes-per-shot", type=int, default=None, choices=(1, 2, 4),
+        help="Candidate takes generated per shot (default: the operator-wide setting). "
+             "Each take is a separate paid generation.",
+    )
+    fable_create.add_argument("--idempotency-key", default=None)
+    fable_create.set_defaults(func=cmd_fable_create)
+
+    fable_adapt = sub.add_parser("fable-adapt", help="Run story adaptation (DRAFT -> STORY_REVIEW)")
+    fable_adapt.add_argument("project_id")
+    fable_adapt.set_defaults(func=cmd_fable_adapt)
+
+    fable_approve = sub.add_parser("fable-approve", help="Approve the current review gate")
+    fable_approve.add_argument("project_id")
+    fable_approve.add_argument("--step", required=True, choices=("story", "characters", "shots", "final"))
+    fable_approve.set_defaults(func=cmd_fable_approve)
+
+    fable_status = sub.add_parser("fable-status", help="Project status with per-shot/take detail (JSON)")
+    fable_status.add_argument("project_id")
+    fable_status.set_defaults(func=cmd_fable_status)
+
+    fable_generate_references = sub.add_parser(
+        "fable-generate-references",
+        help="Generate every character's reference sheet (CASTING -> CHARACTER_REVIEW)",
+    )
+    fable_generate_references.add_argument("project_id")
+    fable_generate_references.set_defaults(func=cmd_fable_generate_references)
+
+    fable_reference = sub.add_parser(
+        "fable-reference", help="Approve (default) or --reject one character's reference sheet",
+    )
+    fable_reference.add_argument("character_id")
+    fable_reference.add_argument(
+        "--reject", action="store_true",
+        help="Un-approve and clear the fingerprint so the next generation run regenerates it",
+    )
+    fable_reference.set_defaults(func=cmd_fable_reference)
+
+    fable_reference_smoke = sub.add_parser(
+        "fable-reference-smoke",
+        help="Generate one REAL reference image chain against the configured provider",
+    )
+    fable_reference_smoke.add_argument(
+        "--confirm-paid-generation", action="store_true",
+        help="Required when the configured provider charges money (2 images).",
+    )
+    fable_reference_smoke.add_argument(
+        "--keep-output", default=None,
+        help="Directory to copy the two images into, for looking at them yourself.",
+    )
+    fable_reference_smoke.set_defaults(func=cmd_fable_reference_smoke)
+
+    fable_budget = sub.add_parser(
+        "fable-budget", help="Set or show a project's spending limit (no flags = show only)",
+    )
+    fable_budget.add_argument("project_id")
+    budget_action = fable_budget.add_mutually_exclusive_group()
+    budget_action.add_argument("--limit", type=float, default=None, help="Spending ceiling")
+    budget_action.add_argument(
+        "--clear", action="store_true",
+        help="Remove the limit (re-closes the paid-generation gate; spends nothing back)",
+    )
+    fable_budget.add_argument(
+        "--currency", default=None, help="Currency for --limit (required with --limit)",
+    )
+    fable_budget.set_defaults(func=cmd_fable_budget)
+
+    fable_estimate = sub.add_parser(
+        "fable-estimate", help="Estimated cost of generating this project's shots (read-only)",
+    )
+    fable_estimate.add_argument("project_id")
+    fable_estimate.set_defaults(func=cmd_fable_estimate)
+
+    fable_list = sub.add_parser("fable-list")
+    fable_list.set_defaults(func=cmd_fable_list)
+
+    fable_select_take = sub.add_parser("fable-select-take", help="Select one take for its shot")
+    fable_select_take.add_argument("take_id")
+    fable_select_take.set_defaults(func=cmd_fable_select_take)
+
+    fable_render = sub.add_parser("fable-render", help="Concatenate selected takes into the final film")
+    fable_render.add_argument("project_id")
+    fable_render.set_defaults(func=cmd_fable_render)
+
+    fable_cancel = sub.add_parser("fable-cancel")
+    fable_cancel.add_argument("project_id")
+    fable_cancel.set_defaults(func=cmd_fable_cancel)
+
+    fable_worker_run = sub.add_parser(
+        "fable-worker-run", help="Continuous polling worker for Fable shot generation",
+    )
+    fable_worker_run.add_argument("--worker-id", default=None)
+    fable_worker_run.add_argument("--poll-interval", type=float, default=None)
+    fable_worker_run.add_argument("--lease-timeout", type=int, default=None)
+    fable_worker_run.add_argument("--max-shots", type=int, default=None)
+    fable_worker_run.add_argument("--idle-exit-after", type=float, default=None)
+    fable_worker_run.add_argument("--stop-on-error", action="store_true")
+    fable_worker_run.set_defaults(func=cmd_fable_worker_run)
+
     worker_run_once = sub.add_parser("worker-run-once")
     worker_run_once.add_argument("--worker-id", default="cli-worker")
     worker_run_once.add_argument(
@@ -3208,6 +3800,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Thread count for the publisher worker (SQLite: keep this low)",
     )
     serve.add_argument(
+        "--fable-workers", type=int, default=0,
+        help="Thread count for the Fable cinematic shot-generation worker (default 0 = off)",
+    )
+    serve.add_argument(
         "--shutdown-timeout", type=float, default=30.0, help="Seconds to wait for graceful shutdown",
     )
     serve.set_defaults(func=cmd_serve)
@@ -3259,6 +3855,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume point; default picks the least-wasteful safe point automatically",
     )
     publication_retry.set_defaults(func=cmd_publication_retry)
+
+    fable_adapt_eval = sub.add_parser(
+        "fable-adapt-eval",
+        help="Measure adaptation quality across repeated runs (real LLM calls)",
+    )
+    fable_adapt_eval.add_argument("--runs", type=int, default=3, help="runs per story (default 3)")
+    fable_adapt_eval.add_argument(
+        "--duration", type=int, default=32, help="target runtime in seconds (default 32)",
+    )
+    fable_adapt_eval.add_argument("--story", help="path to a .txt source instead of the samples")
+    fable_adapt_eval.add_argument(
+        "--show-plans", action="store_true", dest="show_plans",
+        help="print each shot plan, not just its metrics",
+    )
+    fable_adapt_eval.add_argument(
+        "--yes", action="store_true", help="confirm the paid calls (required for a real provider)",
+    )
+    fable_adapt_eval.set_defaults(func=cmd_fable_adapt_eval)
 
     provider_smoke = sub.add_parser(
         "provider-smoke", help="One real request against the configured provider (opt-in)",

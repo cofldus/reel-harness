@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% block title %}새 작품 · Fable Studio{% endblock %}
+{% set nav_active = 'new' %}
+{% block content %}
+
+<header class="page-head">
+  <h1 class="display">새 작품</h1>
+  <p class="lede">
+    이야기를 넣으면 AI가 장면과 샷으로 각색합니다. 각 단계마다 결과를 확인하고 승인하게 되며,
+    지금 만들기만 해서는 아무 비용도 들지 않습니다.
+  </p>
+</header>
+
+<form method="post" action="/fable" class="compose">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+
+  <div class="form-field compose-title-field {{ 'has-error' if errors.get('title') }}">
+    <label for="title">제목</label>
+    <input type="text" id="title" name="title" class="compose-title"
+           value="{{ values.get('title', '') }}" maxlength="200"
+           placeholder="제목을 붙여주세요" aria-label="제목" autofocus>
+    {% if errors.get('title') %}<p class="field-error" role="alert">{{ errors['title'] }}</p>{% endif %}
+  </div>
+
+  <div class="form-field {{ 'has-error' if errors.get('source_text') }}">
+    <div class="field-foot">
+      <label for="source_text">원작 이야기</label>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost btn-sm" data-sample-story>예시 이야기 넣기</button>
+        {# A separate formaction so this submits the SAME form -- every
+           field the user has already filled in comes back untouched, and
+           it works with JavaScript off. #}
+        <button type="submit" class="btn btn-sm btn-assist" formaction="/fable/refine"
+                name="decision" value="refine">
+          AI로 보정하기
+        </button>
+      </div>
+    </div>
+    <p class="hint">각색은 이 글만 근거로 삼습니다. 여기 없는 건 만들어지지 않습니다.</p>
+
+    {% if refine_accepted %}
+    <p class="alert alert-info" role="status">보정본을 반영했습니다. 그대로 두어도 되고, 직접 더 고쳐도 됩니다.</p>
+    {% endif %}
+    {% if refine_error %}
+    <p class="alert alert-error" role="alert">{{ refine_error }}</p>
+    {% endif %}
+
+    {# The single biggest lever on output quality is this textarea, and the
+       things that matter are not guessable: that a character's clothes
+       become the reference image, that summarised speech produces no
+       dialogue line, that an unfilmable inner state produces no shot. So
+       the form teaches them -- beside the box, while you write, with the
+       reason each one matters to THIS pipeline. #}
+    <div class="write">
+      <div class="write-main">
+        <textarea id="source_text" name="source_text" rows="9" data-story class="compose-story"
+                  placeholder="그날 밤, 지우는 호텔 창밖의 비를 오래 바라보았다. 전화벨이 울렸지만 받지 않았다.">{{ values.get('source_text', '') }}</textarea>
+        {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
+        <p class="write-count"><span data-char-count>0</span>자 <span class="meta" data-length-note></span></p>
+      </div>
+
+      {# The proposal sits BESIDE the original, never replacing it. What
+         the user wrote is theirs; the model gets to suggest, and only an
+         explicit press adopts it. #}
+      {% if refinement %}
+      <aside class="write-guide proposal">
+        <p class="eyebrow proposal-eyebrow">AI 보정 제안</p>
+        <div class="proposal-text">{{ refinement.refined_text }}</div>
+        {% if refinement.notes %}
+        <ul class="proposal-notes">
+          {% for note in refinement.notes %}<li>{{ note }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <input type="hidden" name="proposal" value="{{ refinement.refined_text }}">
+        <div class="actions">
+          <button type="submit" class="btn btn-primary btn-sm" formaction="/fable/refine"
+                  name="decision" value="accept">이 보정본 쓰기</button>
+          <button type="submit" class="btn btn-ghost btn-sm" formaction="/fable/refine"
+                  name="decision" value="discard">원문 유지</button>
+        </div>
+        <p class="hint">원문은 왼쪽에 그대로 있습니다. 쓰기를 누르기 전에는 아무것도 바뀌지 않습니다.</p>
+      </aside>
+      {% else %}
+      <aside class="write-guide">
+        <p class="eyebrow">잘 나오는 원작의 조건</p>
+        <ul class="checklist" data-checklist>
+          {% for item in writing_guide %}
+          <li class="check" data-check="{{ item.key }}">
+            <span class="check-box" aria-hidden="true"></span>
+            <div>
+              <button type="button" class="check-label" aria-expanded="false">{{ item.label }}</button>
+              <div class="check-detail" hidden>
+                <p class="check-why">{{ item.why }}</p>
+                <p class="example example-bad"><span class="example-tag">이렇게 말고</span>{{ item.bad }}</p>
+                <p class="example example-good"><span class="example-tag">이렇게</span>{{ item.good }}</p>
+              </div>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+        <p class="hint">
+          체크는 글자만 보고 짐작한 힌트입니다. 다 채우지 않아도 만들 수 있고,
+          비어 있어도 잘 쓴 글일 수 있습니다.
+        </p>
+      </aside>
+      {% endif %}
+    </div>
+  </div>
+
+  {# The three settings that visibly change the result stay up front; the
+     rest have working defaults and fold away. Asking for seven decisions
+     before the first one is made is how a form stops getting filled in. #}
+  <h2 class="compose-section"><span class="eyebrow">이 영화의 결</span></h2>
+
+  {# Radio chips, not <select>. A native select's popup list is drawn by
+     the operating system and cannot be styled at all -- you can dress the
+     closed control and nothing else -- so on a screen trying to look like
+     a production tool it is the one element that always looks like a
+     system dialog. These are real radios: same field names, same POST,
+     arrow-key navigable as a group, and no JavaScript. #}
+  <fieldset class="chipset {{ 'has-error' if errors.get('genre') }}">
+    <legend>장르</legend>
+    <div class="chips">
+      {% for value, label in genre_choices %}
+      <label class="chip-opt">
+        <input type="radio" name="genre" value="{{ value }}"
+               {{ 'checked' if values.get('genre', '') == value }}>
+        <span>{{ label }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
+  </fieldset>
+
+  <fieldset class="chipset {{ 'has-error' if errors.get('tone') }}">
+    <legend>분위기</legend>
+    <div class="chips">
+      {% for value, label in tone_choices %}
+      <label class="chip-opt">
+        <input type="radio" name="tone" value="{{ value }}"
+               {{ 'checked' if values.get('tone', '') == value }}>
+        <span>{{ label }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
+  </fieldset>
+
+  {# Length is really a shot count, and a shot is the billing unit, so
+     each card states both rather than hiding the number that matters. #}
+  <fieldset class="chipset {{ 'has-error' if errors.get('target_duration_sec') }}">
+    <legend>목표 길이</legend>
+    <div class="chips chips-cards">
+      {% for value, label in duration_choices %}
+      <label class="chip-opt chip-card">
+        <input type="radio" name="target_duration_sec" value="{{ value }}" data-duration
+               {{ 'checked' if values.get('target_duration_sec', default_duration)|int == value }}>
+        <span>
+          <strong>{{ value }}초</strong>
+          <em>{{ (value / 8) | int }}샷</em>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
+  </fieldset>
+
+  {# Length is an abstraction; shots are what actually get generated and
+     what actually get billed. Saying so before the form is submitted is
+     the difference between an informed choice and a surprise. #}
+  <p class="estimate" data-estimate aria-live="polite"></p>
+
+  <details class="advanced" {% if errors %}open{% endif %}>
+    <summary>세부 설정 <span class="meta">언어 · 화면비 · 후보 수</span></summary>
+    <div class="advanced-body">
+      <fieldset class="chipset">
+        <legend>언어</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="language" value="ko"
+                   {{ 'checked' if values.get('language', 'ko') == 'ko' }}>
+            <span>한국어</span>
+          </label>
+          <label class="chip-opt">
+            <input type="radio" name="language" value="en"
+                   {{ 'checked' if values.get('language') == 'en' }}>
+            <span>English</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset class="chipset">
+        <legend>화면비</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="aspect_ratio" value="9:16"
+                   {{ 'checked' if values.get('aspect_ratio', '9:16') == '9:16' }}>
+            <span>9:16 세로</span>
+          </label>
+          <label class="chip-opt">
+            <input type="radio" name="aspect_ratio" value="16:9"
+                   {{ 'checked' if values.get('aspect_ratio') == '16:9' }}>
+            <span>16:9 가로</span>
+          </label>
+        </div>
+        {% if errors.get('aspect_ratio') %}<p class="field-error" role="alert">{{ errors['aspect_ratio'] }}</p>{% endif %}
+      </fieldset>
+
+      <fieldset class="chipset">
+        <legend>샷당 후보 수</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="takes_per_shot" value="0" data-takes
+                   {{ 'checked' if not values.get('takes_per_shot') }}>
+            <span>기본값 {{ default_takes }}개</span>
+          </label>
+          {% for choice in takes_choices %}
+          <label class="chip-opt">
+            <input type="radio" name="takes_per_shot" value="{{ choice }}" data-takes
+                   {{ 'checked' if values.get('takes_per_shot') == choice }}>
+            <span>{{ choice }}개</span>
+          </label>
+          {% endfor %}
+        </div>
+        <p class="hint">후보 하나가 곧 유료 생성 한 번입니다. 4를 고르면 비용도 네 배입니다.</p>
+        {% if errors.get('takes_per_shot') %}<p class="field-error" role="alert">{{ errors['takes_per_shot'] }}</p>{% endif %}
+      </fieldset>
+    </div>
+  </details>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary btn-lg">작품 만들기</button>
+    <a class="btn btn-lg" href="/fable">취소</a>
+  </div>
+  <p class="hint">각색과 영상 생성은 다음 화면에서 따로 승인합니다.</p>
+</form>
+{% endblock %}
