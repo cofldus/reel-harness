@@ -8,3 +8,8 @@ jobs/
 *.db
 .env
 .tools/
+fable_projects/
+# Local scratch: screenshots and smoke output are inspected by hand and
+# regenerated on demand, never reviewed as source.
+shots/
+smoke_output/

@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git status --porcelain | grep -E '^\?\? (jobs/|.*\.db$)'; then
+          if git status --porcelain | grep -E '^\?\? (jobs/|fable_projects/|.*\.db$)'; then
             echo "::error::a job artifact or database file would be tracked -- check .gitignore"
             exit 1
           fi
