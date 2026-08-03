@@ -1,45 +1,113 @@
 {% extends "base.html" %}
 {% block title %}새 시네마틱 프로젝트 - Reel Harness{% endblock %}
 {% block content %}
-<h1>새 시네마틱 프로젝트</h1>
+<div class="fable">
+
+<div class="fable-brand">
+  <span class="fable-wordmark">Fable</span>
+  <span class="fable-tagline">이야기를 영화로</span>
+</div>
+
+<h1>새 프로젝트</h1>
+<p class="meta">이야기를 넣으면 AI가 장면과 샷으로 각색합니다. 각 단계마다 확인하고 승인하게 됩니다 — 자동으로 넘어가는 곳은 없습니다.</p>
 
 <form method="post" action="/fable">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
 
-  <label for="title">제목</label>
-  <input type="text" id="title" name="title" value="{{ values.get('title', '') }}" maxlength="200">
-  {% if errors.get('title') %}<p class="field-error" role="alert">{{ errors['title'] }}</p>{% endif %}
+  <div class="form-field">
+    <label for="title">제목</label>
+    <input type="text" id="title" name="title" value="{{ values.get('title', '') }}" maxlength="200"
+           placeholder="비 오는 밤" autofocus>
+    {% if errors.get('title') %}<p class="field-error" role="alert">{{ errors['title'] }}</p>{% endif %}
+  </div>
 
-  <label for="source_text">원작 텍스트</label>
-  <textarea id="source_text" name="source_text" rows="12">{{ values.get('source_text', '') }}</textarea>
-  <p class="hint">각색은 이 텍스트만 근거로 삼습니다. 각 장면은 실제 원문을 인용해야 통과합니다.</p>
-  {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
+  <div class="form-field">
+    <label for="source_text">원작 텍스트</label>
+    <textarea id="source_text" name="source_text" rows="12"
+              placeholder="그날 밤, 지우는 호텔 창밖의 비를 오래 바라보았다. 전화벨이 울렸지만 받지 않았다.">{{ values.get('source_text', '') }}</textarea>
+    <div class="field-foot">
+      <p class="hint">각색은 이 텍스트만 근거로 삼습니다. 각 장면은 실제 원문을 인용해야 통과합니다.</p>
+      <button type="button" class="btn btn-ghost" data-sample-story>예시 이야기 넣기</button>
+    </div>
+    {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
+  </div>
 
-  <label for="language">언어</label>
-  <select id="language" name="language">
-    <option value="ko" {{ 'selected' if values.get('language', 'ko') == 'ko' }}>한국어</option>
-    <option value="en" {{ 'selected' if values.get('language') == 'en' }}>English</option>
-  </select>
-  {% if errors.get('language') %}<p class="field-error" role="alert">{{ errors['language'] }}</p>{% endif %}
+  {# Everything below has a working default, so it is folded away: the
+     required decision is the story, and asking for seven more up front
+     is how a form stops getting filled in. #}
+  <details class="advanced" {% if errors %}open{% endif %}>
+    <summary>세부 설정 <span class="meta">(기본값으로 두어도 됩니다)</span></summary>
 
-  <label for="aspect_ratio">화면비</label>
-  <select id="aspect_ratio" name="aspect_ratio">
-    <option value="9:16" {{ 'selected' if values.get('aspect_ratio', '9:16') == '9:16' }}>9:16 (세로)</option>
-    <option value="16:9" {{ 'selected' if values.get('aspect_ratio') == '16:9' }}>16:9 (가로)</option>
-  </select>
-  {% if errors.get('aspect_ratio') %}<p class="field-error" role="alert">{{ errors['aspect_ratio'] }}</p>{% endif %}
+    <div class="field-grid">
+      <div class="form-field">
+        <label for="language">언어</label>
+        <select id="language" name="language">
+          <option value="ko" {{ 'selected' if values.get('language', 'ko') == 'ko' }}>한국어</option>
+          <option value="en" {{ 'selected' if values.get('language') == 'en' }}>English</option>
+        </select>
+        {% if errors.get('language') %}<p class="field-error" role="alert">{{ errors['language'] }}</p>{% endif %}
+      </div>
 
-  <label for="takes_per_shot">샷당 테이크 수</label>
-  <select id="takes_per_shot" name="takes_per_shot">
-    <option value="0">기본값 사용 ({{ default_takes }})</option>
-    {% for choice in takes_choices %}
-    <option value="{{ choice }}" {{ 'selected' if values.get('takes_per_shot') == choice }}>{{ choice }}</option>
-    {% endfor %}
-  </select>
-  <p class="hint">테이크 하나하나가 별도의 유료 생성입니다. 4를 고르면 비용도 네 배입니다.</p>
-  {% if errors.get('takes_per_shot') %}<p class="field-error" role="alert">{{ errors['takes_per_shot'] }}</p>{% endif %}
+      <div class="form-field">
+        <label for="genre">장르</label>
+        <select id="genre" name="genre">
+          {% for value, label in genre_choices %}
+          <option value="{{ value }}" {{ 'selected' if values.get('genre', '') == value }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
+      </div>
 
-  <button type="submit">만들기</button>
+      <div class="form-field">
+        <label for="tone">분위기</label>
+        <select id="tone" name="tone">
+          {% for value, label in tone_choices %}
+          <option value="{{ value }}" {{ 'selected' if values.get('tone', '') == value }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
+      </div>
+
+      <div class="form-field">
+        <label for="aspect_ratio">화면비</label>
+        <select id="aspect_ratio" name="aspect_ratio">
+          <option value="9:16" {{ 'selected' if values.get('aspect_ratio', '9:16') == '9:16' }}>9:16 세로 (숏폼)</option>
+          <option value="16:9" {{ 'selected' if values.get('aspect_ratio') == '16:9' }}>16:9 가로</option>
+        </select>
+        {% if errors.get('aspect_ratio') %}<p class="field-error" role="alert">{{ errors['aspect_ratio'] }}</p>{% endif %}
+      </div>
+
+      <div class="form-field">
+        <label for="target_duration_sec">목표 길이</label>
+        <select id="target_duration_sec" name="target_duration_sec">
+          {% for value, label in duration_choices %}
+          <option value="{{ value }}" {{ 'selected' if values.get('target_duration_sec', default_duration)|int == value }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">참조 이미지를 쓰는 샷은 8초 고정이라, 길이는 곧 샷 수이고 샷 수가 곧 비용입니다.</p>
+        {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
+      </div>
+
+      <div class="form-field">
+        <label for="takes_per_shot">샷당 후보 수</label>
+        <select id="takes_per_shot" name="takes_per_shot">
+          <option value="0">기본값 사용 ({{ default_takes }})</option>
+          {% for choice in takes_choices %}
+          <option value="{{ choice }}" {{ 'selected' if values.get('takes_per_shot') == choice }}>{{ choice }}개</option>
+          {% endfor %}
+        </select>
+        <p class="hint">후보 하나하나가 별도의 유료 생성입니다. 4를 고르면 비용도 네 배입니다.</p>
+        {% if errors.get('takes_per_shot') %}<p class="field-error" role="alert">{{ errors['takes_per_shot'] }}</p>{% endif %}
+      </div>
+    </div>
+  </details>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">프로젝트 만들기</button>
+    <a class="btn" href="/fable">취소</a>
+  </div>
+  <p class="hint">만들기만 해서는 아무 비용도 들지 않습니다. 각색과 영상 생성은 다음 화면에서 따로 승인합니다.</p>
 </form>
+</div>{# /fable #}
 {% endblock %}

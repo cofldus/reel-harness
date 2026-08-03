@@ -1,126 +1,722 @@
+/* Reel Harness / Fable — application stylesheet.
+
+   Design intent: this is a tool for making films, used by one person on
+   their own machine, in long sessions of reviewing images and video. So
+   it is dark-first (bright chrome around dark footage is fatiguing and
+   misreads colour), keeps chrome quiet so the media is the loudest thing
+   on screen, and spends its contrast budget on the only two things that
+   really compete for attention -- what is waiting on you, and what costs
+   money.
+
+   Every value comes from a small scale rather than being chosen
+   per-element: one spacing ramp, one radius set, one type ramp. That is
+   what makes a page look composed rather than assembled.
+*/
+
 :root {
   color-scheme: light dark;
-  --border: #ccc;
-  --danger: #b3261e;
-  --primary: #1a56db;
-  --bg-muted: #f4f4f5;
+
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --s7: 3rem;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --surface-2: #f1f2f4;
+  --border: #dfe1e6;
+  --border-strong: #c7cad1;
+  --text: #16181d;
+  --muted: #656b78;
+  --primary: #3d5afe;
+  --primary-ink: #ffffff;
+  --danger: #c62828;
+  --ok: #1c7c40;
+  --warn: #8a5a00;
+  --warn-bg: #fff8e6;
+  --shadow: 0 1px 2px rgb(16 18 29 / 6%), 0 4px 14px rgb(16 18 29 / 5%);
+
+  --bg-muted: var(--surface-2);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0f13;
+    --surface: #16181d;
+    --surface-2: #1d2027;
+    --border: #2a2e37;
+    --border-strong: #3a3f4b;
+    --text: #e8eaf0;
+    --muted: #949aa8;
+    --primary: #7c8cff;
+    --primary-ink: #0e0f13;
+    --danger: #ff6b6b;
+    --ok: #4ade80;
+    --warn: #ffc53d;
+    --warn-bg: #241d0c;
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 30%);
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   margin: 0;
-  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--primary); }
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 3px solid var(--primary);
+h1, h2, h3 { line-height: 1.25; letter-spacing: -0.01em; }
+h1 { font-size: 1.7rem; margin: 0 0 var(--s2); }
+h2 { font-size: 1.15rem; margin: var(--s6) 0 var(--s3); }
+h3 { font-size: 1rem; margin: 0 0 var(--s2); }
+
+a { color: var(--primary); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
+
+/* Motion is decoration here; anyone who has asked for less gets none. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* --- shell ------------------------------------------------------------ */
 
 .site-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1rem 1.5rem;
+  gap: var(--s5);
+  flex-wrap: wrap;
+  padding: var(--s3) var(--s5);
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
-.site-header .brand { font-weight: 700; text-decoration: none; }
-.site-header nav a { margin-left: 1rem; }
+.site-header .brand {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  color: var(--text);
+}
+.site-header nav { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.site-header nav a {
+  margin: 0;
+  padding: var(--s1) var(--s3);
+  border-radius: var(--r-pill);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+.site-header nav a:hover { background: var(--surface-2); color: var(--text); }
 
-#main-content { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
+#main-content { max-width: 900px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s7); }
+
+/* --- buttons ---------------------------------------------------------- */
 
 .btn {
-  display: inline-block;
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-muted);
-  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
   text-decoration: none;
   cursor: pointer;
-  font-size: 1rem;
+  font: inherit;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
 }
-.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
-.btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn:hover { background: var(--surface-2); border-color: var(--muted); }
+.btn:active { transform: translateY(1px); }
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-ink);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+.btn-primary:hover { filter: brightness(1.08); background: var(--primary); border-color: var(--primary); }
+.btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+.btn-danger:hover { background: var(--danger); color: var(--primary-ink); }
+.btn:disabled, .btn[disabled] { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+.actions { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.inline-form { display: inline-flex; gap: var(--s2); align-items: center; margin: 0; }
+
+/* --- text helpers ----------------------------------------------------- */
+
+.meta { color: var(--muted); font-size: 0.9rem; }
+.hint { font-size: 0.85rem; color: var(--muted); margin: var(--s1) 0 0; }
+.empty-state {
+  color: var(--muted);
+  padding: var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  text-align: center;
+}
+.disabled { opacity: 0.5; }
+
+/* --- badges ----------------------------------------------------------- */
 
 .badge {
   display: inline-block;
-  padding: 0.15rem 0.6rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-size: 0.85rem;
+  padding: 0.1rem 0.6rem;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-size: 0.8rem;
+  font-weight: 500;
+  white-space: nowrap;
 }
-.badge-pass { border-color: #1a7f37; }
-.badge-warn { border-color: #9a6700; }
-.badge-fail { border-color: var(--danger); }
-.badge-not_configured { border-color: #666; }
+.badge-pass, .badge-ok { border-color: var(--ok); color: var(--ok); background: transparent; }
+.badge-warn, .badge-pending { border-color: var(--warn); color: var(--warn); background: transparent; }
+.badge-fail, .badge-error { border-color: var(--danger); color: var(--danger); background: transparent; }
+.badge-not_configured { border-color: var(--border-strong); color: var(--muted); }
+/* Neutral by design: it carries the status TEXT, so colouring it would
+   double-encode the same fact. "확인 필요" IS a call to action and reads
+   as one. */
+.badge-status { border-color: var(--border-strong); color: var(--muted); }
+.badge-action { border-color: var(--primary); color: var(--primary); background: transparent; font-weight: 600; }
 
-.status-banner { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border); }
-.status-pass { border-color: #1a7f37; }
-.status-warn { border-color: #9a6700; }
-.status-fail { border-color: var(--danger); }
+/* --- surfaces --------------------------------------------------------- */
 
-.hero { margin: 1.5rem 0; }
-.stat-tiles { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.stat-tile { flex: 1; padding: 1rem; border: 1px solid var(--border); border-radius: 8px; text-align: center; }
-.stat-value { display: block; font-size: 2rem; font-weight: 700; }
+.status-banner, .alert, .settings-card, .stat-tile, .character, .cast-choice, .spend-gate {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.status-banner { padding: var(--s3) var(--s4); margin-bottom: var(--s5); }
+.status-pass { border-left: 3px solid var(--ok); }
+.status-warn { border-left: 3px solid var(--warn); }
+.status-fail { border-left: 3px solid var(--danger); }
 
-.job-summary-list { list-style: none; padding: 0; }
-.job-row a { display: flex; justify-content: space-between; padding: 0.5rem 0; text-decoration: none; color: inherit; border-bottom: 1px solid var(--border); }
+.alert { padding: var(--s3) var(--s4); margin: var(--s4) 0; }
+.alert-error { border-left: 3px solid var(--danger); }
+.alert-info { border-left: 3px solid var(--primary); }
 
-.filter-chips { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-.chip { padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px solid var(--border); text-decoration: none; color: inherit; }
-.chip-active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.hero { margin: var(--s5) 0; }
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s4); margin: var(--s5) 0; }
+.stat-tile { padding: var(--s4); text-align: center; box-shadow: var(--shadow); }
+.stat-value { display: block; font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+
+.settings-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--s4); }
+.settings-card { padding: var(--s4); }
+
+/* --- lists and tables ------------------------------------------------- */
+
+.job-summary-list { list-style: none; padding: 0; margin: 0; }
+.job-row a {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  margin-bottom: var(--s2);
+  transition: border-color 120ms ease;
+}
+.job-row a:hover { border-color: var(--primary); }
+
+.filter-chips { display: flex; gap: var(--s2); margin-bottom: var(--s4); flex-wrap: wrap; }
+.chip {
+  padding: 0.25rem 0.8rem;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.chip:hover { color: var(--text); }
+.chip-active { background: var(--primary); color: var(--primary-ink); border-color: var(--primary); }
 
 .job-table, .asset-table, .preflight-table, .account-table, .publication-table {
-  width: 100%; border-collapse: collapse; margin-bottom: 1rem;
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.job-table th, .asset-table th, .preflight-table th, .account-table th, .publication-table th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface-2);
 }
 .job-table th, .job-table td,
 .asset-table th, .asset-table td,
 .preflight-table th, .preflight-table td,
 .account-table th, .account-table td,
-.publication-table th, .publication-table td { border-bottom: 1px solid var(--border); padding: 0.5rem; text-align: left; }
-
-.pagination { display: flex; gap: 1rem; align-items: center; }
-
-.form-field { margin-bottom: 1rem; }
-.form-field label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
-.form-field input, .form-field select, .form-field textarea {
-  width: 100%; max-width: 480px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px;
-}
-.field-error { color: var(--danger); font-size: 0.9rem; margin: 0.25rem 0 0; }
-.hint { font-size: 0.85rem; color: #666; }
-.disabled { opacity: 0.6; }
-
-.job-detail-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 2rem; }
-@media (max-width: 800px) {
-  .job-detail-grid { grid-template-columns: 1fr; }
+.publication-table th, .publication-table td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--s2) var(--s3);
+  text-align: left;
 }
 
-.job-video {
+.pagination { display: flex; gap: var(--s4); align-items: center; }
+
+.stage-timeline { list-style: none; padding: 0; }
+.stage-timeline li {
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+}
+
+/* --- forms ------------------------------------------------------------ */
+
+.form-field { margin-bottom: var(--s4); }
+.form-field label { display: block; font-weight: 600; font-size: 0.9rem; margin-bottom: var(--s1); }
+input, select, textarea {
   width: 100%;
-  max-width: 360px;
+  max-width: 480px;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+textarea { line-height: 1.6; resize: vertical; }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+.field-error { color: var(--danger); font-size: 0.875rem; margin: var(--s1) 0 0; }
+
+/* --- job detail ------------------------------------------------------- */
+
+.job-detail-grid { display: grid; grid-template-columns: 3fr 2fr; gap: var(--s6); }
+@media (max-width: 800px) { .job-detail-grid { grid-template-columns: 1fr; } }
+
+.job-video, .fable-video {
+  width: 100%;
+  max-width: 320px;
   aspect-ratio: 9 / 16;
   background: #000;
   display: block;
-  margin: 1rem 0;
+  margin: var(--s4) 0;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+}
+.job-actions { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s4); }
+.job-actions form { display: flex; gap: var(--s2); align-items: center; }
+
+/* --- Fable: pipeline progress ----------------------------------------
+   The product is a seven-gate approval walk and the page gave no
+   indication of where you stood in it. */
+
+.pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--s5);
+}
+.pipeline-step {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  font-size: 0.82rem;
+  color: var(--muted);
+  background: var(--surface);
+}
+.pipeline-step[data-state="done"] { color: var(--ok); border-color: var(--ok); }
+.pipeline-step[data-state="current"] {
+  color: var(--primary-ink);
+  background: var(--primary);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+.pipeline-step[data-state="blocked"] { color: var(--danger); border-color: var(--danger); }
+.pipeline-mark { font-weight: 700; }
+
+/* --- Fable: the money line -------------------------------------------
+   A button that spends real money must not look like one that does not,
+   and the amount belongs WITH the action rather than in a section the
+   user scrolls past. */
+
+.spend-gate {
+  border-color: var(--warn);
+  border-left-width: 3px;
+  background: var(--warn-bg);
+  padding: var(--s4);
+  margin: var(--s5) 0;
+}
+.spend-gate h3 { margin: 0 0 var(--s2); font-size: 0.95rem; }
+.spend-amount { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+.spend-unknown { color: var(--warn); font-weight: 600; margin: 0; }
+.spend-detail { color: var(--muted); font-size: 0.875rem; margin: var(--s1) 0 var(--s3); }
+
+/* --- Fable: casting ---------------------------------------------------
+   Reference stills are SHOWN, not listed as 있음/없음. A face you cannot
+   see is a face you cannot approve. */
+
+.character { padding: var(--s4); margin-bottom: var(--s4); box-shadow: var(--shadow); }
+.character-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-bottom: var(--s3);
+}
+.character-head h3 { margin: 0; }
+
+.reusable-cast {
+  padding: var(--s4);
+  margin-bottom: var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.reusable-cast h3 { margin-top: 0; }
+
+.reference-views, .cast-choices {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--s3);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: var(--s3);
+}
+.reference-view, .cast-choice { display: flex; flex-direction: column; gap: var(--s1); font-size: 0.85rem; }
+.cast-choice { padding: var(--s2); background: var(--surface); }
+.reference-thumb {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  display: block;
+  background: var(--surface-2);
+  transition: border-color 120ms ease;
+}
+.reference-thumb:hover { border-color: var(--primary); }
+.reference-missing {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+}
+.reference-label { color: var(--muted); text-align: center; }
+.cast-name { font-weight: 600; text-align: center; }
+
+/* --- forms: progressive disclosure -----------------------------------
+   The only decision a new project genuinely requires is the story.
+   Asking for six more up front is how a form stops getting filled in, so
+   the rest folds away -- and springs open when a validation error lands
+   inside it, because a hidden error is a dead end. */
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 0 var(--s4);
+  margin-bottom: var(--s5);
+}
+.advanced > summary {
+  cursor: pointer;
+  padding: var(--s3) 0;
+  font-weight: 600;
+  list-style-position: inside;
+}
+.advanced[open] > summary { border-bottom: 1px solid var(--border); margin-bottom: var(--s4); }
+.advanced .form-field:last-child { margin-bottom: var(--s4); }
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0 var(--s4);
+}
+.field-grid input, .field-grid select { max-width: none; }
+
+/* --- Fable: workspace layout -----------------------------------------
+   The detail page was one long scrolling column with half the viewport
+   empty. Reference material and the money controls belong beside the
+   work, not two screens below it. */
+
+.project-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+.project-head h1 { margin-bottom: 0; }
+
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: var(--s5); align-items: start; }
+.workspace-main { min-width: 0; }
+.workspace-side { position: sticky; top: 76px; display: flex; flex-direction: column; gap: var(--s4); }
+@media (max-width: 900px) {
+  .workspace { grid-template-columns: 1fr; }
+  .workspace-side { position: static; }
 }
 
-.job-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
-.job-actions form { display: flex; gap: 0.5rem; align-items: center; }
+.gate {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s4) var(--s5);
+  margin-bottom: var(--s4);
+}
+.gate > h2:first-child { margin-top: 0; }
+.gate .actions { margin-top: var(--s3); }
 
-.alert { padding: 0.75rem 1rem; border-radius: 8px; margin: 1rem 0; border: 1px solid var(--border); }
-.alert-error { border-color: var(--danger); }
-.alert-info { border-color: var(--primary); }
+.side-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s4);
+}
+.side-card h3 { margin-top: 0; }
+.side-card input { max-width: none; }
+.side-card .form-field { margin-bottom: var(--s3); }
 
-.stage-timeline { list-style: none; padding: 0; }
-.stage-timeline li { padding: 0.4rem 0; border-bottom: 1px solid var(--border); display: flex; gap: 0.5rem; align-items: center; }
+/* A definition list with no styling renders as a stepped, ragged mess --
+   which is exactly how the budget block looked. */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: var(--s1) var(--s3); margin: 0 0 var(--s3); }
+.kv dt { color: var(--muted); font-size: 0.875rem; }
+.kv dd { margin: 0; }
 
-.settings-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
-.settings-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+.logline { font-size: 1.05rem; font-weight: 600; margin: 0 0 var(--s2); }
 
-.empty-state { color: #666; padding: 1rem 0; }
+/* --- Fable: storyboard ------------------------------------------------
+   The shot plan is the film's blueprint. It was a four-column table with
+   the grammar the adaptation chose -- shot size, angle, movement,
+   dialogue -- collapsed into one "동작" cell or dropped entirely. */
+
+.shot-grid { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s3); }
+.shot-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-md);
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+}
+.shot-card[data-status="SELECTED"] { border-left-color: var(--ok); }
+.shot-card[data-status="REVIEW_REQUIRED"] { border-left-color: var(--primary); }
+.shot-card[data-status="FAILED"] { border-left-color: var(--danger); }
+.shot-card-head { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+.shot-number {
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.shot-action { margin: 0 0 var(--s1); font-weight: 500; }
+.shot-dialogue { margin: 0 0 var(--s2); color: var(--muted); font-style: italic; }
+.shot-grammar {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+.shot-grammar li {
+  font-size: 0.75rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0 var(--s2);
+  background: var(--surface);
+}
+
+/* --- Fable: take review ----------------------------------------------
+   Choosing between candidate clips is the most visual decision in the
+   product, and it was a list of "#1 / #2" with no video on the page. */
+
+.take-grid {
+  list-style: none;
+  padding: 0;
+  margin: var(--s3) 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--s3);
+}
+.take { display: flex; flex-direction: column; gap: var(--s1); }
+.take-video, .take-placeholder {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  display: block;
+}
+.take-placeholder { display: grid; place-items: center; color: var(--muted); background: var(--surface); font-size: 0.8rem; }
+.take-selected .take-video { border-color: var(--ok); border-width: 2px; }
+.take-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+
+.btn-ghost { border-style: dashed; color: var(--muted); font-weight: 500; }
+.btn-ghost:hover { color: var(--text); }
+.field-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; }
+
+/* =====================================================================
+   FABLE — brand scope
+
+   Fable is a filmmaking tool living inside an operations console, and it
+   was wearing the console's chrome: the same administrative blue as the
+   job queue and the publish log. It needs its own identity, and the
+   identity should come from the subject rather than from decoration.
+
+   So: amber, the colour of projector light and film leader, replaces the
+   blue INSIDE Fable only. Technical metadata (shot size, lens, camera
+   move, duration) is set in monospace, which is how a real slate and a
+   real shot list read. Shot cards are built like slates -- a numbered
+   block, then the grammar, then the frame.
+
+   Scoped with .fable rather than applied globally: the rest of the
+   console keeps its blue, and a page that belongs to Fable declares it.
+   ===================================================================== */
+
+.fable {
+  --primary: #d99a2b;
+  --primary-ink: #17130a;
+}
+@media (prefers-color-scheme: dark) {
+  .fable {
+    --primary: #eab357;
+    --primary-ink: #17130a;
+  }
+}
+
+/* The detail page is a workspace, not an article: it holds a storyboard,
+   a video grid and a sidebar, and squeezing that into the console's
+   900px reading measure left a third of a 1280px screen empty while
+   stacking candidate clips one per row. */
+:has(> .fable-wide) { max-width: none; }
+#main-content:has(.fable-wide) { max-width: 1240px; }
+
+.fable-brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  margin-bottom: var(--s5);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+.fable-wordmark {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+.fable-tagline { color: var(--muted); font-size: 0.85rem; }
+
+/* Slate-styled shot cards ------------------------------------------- */
+
+.shot-grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.shot-card {
+  border-left-width: 1px;
+  border-top: 3px solid var(--border-strong);
+  background: var(--surface);
+}
+.shot-card[data-status="SELECTED"] { border-top-color: var(--ok); }
+.shot-card[data-status="REVIEW_REQUIRED"] { border-top-color: var(--primary); }
+.shot-card[data-status="FAILED"] { border-top-color: var(--danger); }
+.shot-number {
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  background: var(--text);
+  color: var(--surface);
+  border-color: transparent;
+}
+.shot-grammar li {
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* Candidate clips sit side by side, because comparing them IS the task. */
+.take-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+
+/* The spend gate speaks in the brand's own accent rather than a generic
+   warning yellow -- inside Fable, amber IS the product colour, so the
+   money block earns its emphasis from weight and border, not hue. */
+.fable .spend-gate { background: var(--surface); border-color: var(--primary); }
+.fable .spend-amount { color: var(--primary); }
+
+.logline {
+  font-size: 1.15rem;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  border-left: 2px solid var(--primary);
+  padding-left: var(--s3);
+}
+
+/* Multiple actors ------------------------------------------------------
+   A film here has at most two characters, but each carries a four-view
+   sheet -- so two actors stacked vertically is eight large stills and a
+   lot of scrolling to compare two faces that are supposed to be told
+   apart. Side by side, each sheet stays compact and the comparison is
+   the layout. */
+.cast-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--s3); }
+.cast-list .character { margin-bottom: 0; }
+.cast-list .reference-views { grid-template-columns: repeat(4, 1fr); gap: var(--s1); }
+.cast-list .reference-label { font-size: 0.7rem; }
+
+/* Candidate clips are for COMPARING, not for final viewing -- at full
+   column width a four-shot storyboard ran past 3000px and you could
+   never see two shots at once. Capped to a thumbnail; the browser's own
+   fullscreen control is one click away when a clip deserves a real look. */
+.take-video, .take-placeholder {
+  max-height: 190px;
+  width: auto;
+  max-width: 100%;
+  margin-inline: auto;
+}
+.take-grid { grid-template-columns: repeat(auto-fit, minmax(108px, max-content)); justify-content: start; }
+.take { align-items: center; }
+.take .btn { font-size: 0.8rem; padding: 0.25rem 0.6rem; }
+
+/* With the clips reined in, three shot cards fit across a wide screen. */
+.shot-grid { grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+
+/* Reference stills in the cast list are for recognising a face, not for
+   studying it -- at full column width four views filled a screen on
+   their own. Click any one to open it full size. */
+.cast-list .reference-thumb, .cast-list .reference-missing {
+  max-height: 150px;
+  width: auto;
+  max-width: 100%;
+  margin-inline: auto;
+}
+.cast-list .reference-views { grid-template-columns: repeat(4, max-content); justify-content: start; }

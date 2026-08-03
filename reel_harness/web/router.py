@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from reel_harness.api.app import get_context
 from reel_harness.bootstrap import AppContext
 from reel_harness.config import ProviderConfigurationError, validate_provider_settings
-from reel_harness.core.cinematic_state import SUPPORTED_TAKES_PER_SHOT
+from reel_harness.core.cinematic_state import SUPPORTED_TAKES_PER_SHOT, FableProjectStatus
 from reel_harness.core.publish_service import (
     PublicationInvalidActionError,
     PublicationNotEligibleError,
@@ -25,6 +26,7 @@ from reel_harness.web.dependencies import (
 )
 from reel_harness.web.fable_forms import validate_budget_form, validate_new_fable_form
 from reel_harness.web.fable_view_models import (
+    build_character_view,
     build_fable_detail_view,
     build_fable_summary_view,
 )
@@ -958,7 +960,38 @@ def _fable_detail_context(ctx: AppContext, project_id: str) -> dict:
         ctx.fable.budget_status(project_id),
     )
     has_video = ctx.fable_storage.path_for(project_id, FABLE_FINAL_REL_PATH).is_file()
-    return {"project": view, "has_video": has_video}
+    # Offered only at the casting gate, where reuse_character is the only
+    # place the service accepts it -- listing actors the operator cannot
+    # actually cast right now would be a button that always refuses.
+    reusable = (
+        [
+            build_character_view(character, character.project_id)
+            for character in ctx.fable.reusable_characters(exclude_project_id=project_id)
+        ]
+        if view.status == FableProjectStatus.CASTING.value else []
+    )
+    # Only at the two gates that spend money -- an estimate priced at any
+    # other moment is noise, and pricing walks every shot through the
+    # provider, which is not free work to do on every page view.
+    #
+    # A provider that cannot price the request raises rather than
+    # returning a number, and that is a legitimate outcome (see
+    # cost_service): the gate then says "unknown" instead of a figure. It
+    # is deliberately NOT a bare `except Exception` -- swallowing every
+    # error here would hide a real bug as a silently missing price, which
+    # is exactly how the first version of this shipped broken.
+    estimate = None
+    if view.can_generate_references or view.can_approve_shots:
+        from reel_harness.core.errors import PipelineError
+
+        try:
+            estimate = ctx.fable.estimate_cost(project_id)
+        except (PipelineError, NotImplementedError):
+            estimate = None
+    return {
+        "project": view, "has_video": has_video,
+        "reusable_characters": reusable, "estimate": estimate,
+    }
 
 
 def _fable_redirect(project_id: str, error: str | None = None) -> RedirectResponse:
@@ -992,14 +1025,33 @@ def fable_list(request: Request, ctx: AppContext = Depends(get_context)) -> HTML
     })
 
 
-@router.get("/fable/new", response_class=HTMLResponse)
-def new_fable_form(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
-    return _render(request, "fable_new.html", {
+def _new_fable_context(ctx: AppContext, **overrides) -> dict:
+    """One place builds the new-project form's context so the GET and the
+    validation-failure re-render can never offer different choices."""
+    from reel_harness.web.fable_forms import (
+        DEFAULT_DURATION_SEC,
+        DURATION_CHOICES,
+        GENRE_CHOICES,
+        TONE_CHOICES,
+    )
+
+    context = {
         "idempotency_key": str(uuid.uuid4()),
         "takes_choices": sorted(SUPPORTED_TAKES_PER_SHOT),
         "default_takes": ctx.settings.fable_takes_per_shot,
+        "genre_choices": GENRE_CHOICES,
+        "tone_choices": TONE_CHOICES,
+        "duration_choices": DURATION_CHOICES,
+        "default_duration": DEFAULT_DURATION_SEC,
         "errors": {}, "values": {},
-    })
+    }
+    context.update(overrides)
+    return context
+
+
+@router.get("/fable/new", response_class=HTMLResponse)
+def new_fable_form(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
+    return _render(request, "fable_new.html", _new_fable_context(ctx))
 
 
 # response_model=None because the return type is a Union of two Starlette
@@ -1012,6 +1064,7 @@ def create_fable_project(
     request: Request,
     title: str = Form(""), source_text: str = Form(""), language: str = Form("ko"),
     aspect_ratio: str = Form("9:16"), takes_per_shot: int = Form(0),
+    genre: str = Form(""), tone: str = Form(""), target_duration_sec: int = Form(32),
     idempotency_key: str = Form(""),
     ctx: AppContext = Depends(get_context),
 ) -> HTMLResponse | RedirectResponse:
@@ -1023,18 +1076,19 @@ def create_fable_project(
     result = validate_new_fable_form(
         title=title, source_text=source_text, language=language,
         aspect_ratio=aspect_ratio, takes_per_shot=takes_per_shot,
+        genre=genre, tone=tone, target_duration_sec=target_duration_sec,
     )
     if not result.ok or result.value is None:
-        return _render(request, "fable_new.html", {
-            "idempotency_key": idempotency_key,
-            "takes_choices": sorted(SUPPORTED_TAKES_PER_SHOT),
-            "default_takes": ctx.settings.fable_takes_per_shot,
-            "errors": result.errors,
-            "values": {
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx,
+            idempotency_key=idempotency_key,
+            errors=result.errors,
+            values={
                 "title": title, "source_text": source_text, "language": language,
                 "aspect_ratio": aspect_ratio, "takes_per_shot": takes_per_shot,
+                "genre": genre, "tone": tone, "target_duration_sec": target_duration_sec,
             },
-        }, status_code=422)
+        ), status_code=422)
 
     value = result.value
     try:
@@ -1042,6 +1096,8 @@ def create_fable_project(
             title=value.title, source_text=value.source_text,
             idempotency_key=idempotency_key, language=value.language,
             aspect_ratio=value.aspect_ratio, takes_per_shot=value.takes_per_shot,
+            genre=value.genre, tone=value.tone,
+            target_duration_sec=value.target_duration_sec,
         )
     except InvalidActionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1160,6 +1216,94 @@ def fable_render(project_id: str, ctx: AppContext = Depends(get_context)) -> Red
 def fable_cancel(project_id: str, ctx: AppContext = Depends(get_context)) -> RedirectResponse:
     _fable_or_404(ctx, project_id)
     return _run_fable_action(project_id, ctx.fable.cancel_project)
+
+
+@router.post("/fable/{project_id}/cast", dependencies=[Depends(require_csrf)])
+def fable_cast_existing(
+    project_id: str, source_character_id: str = Form(""),
+    ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Casts a previously approved actor into this project instead of
+    paying to generate a new face."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    _fable_or_404(ctx, project_id)
+    if not source_character_id:
+        raise HTTPException(status_code=422, detail="source_character_id is required")
+    try:
+        ctx.fable.reuse_character(project_id, source_character_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/fable/{project_id}", status_code=303)
+
+
+@router.get("/fable/{project_id}/characters/{character_id}/reference/{view}")
+def fable_reference_image(
+    project_id: str, character_id: str, view: str, ctx: AppContext = Depends(get_context),
+) -> FileResponse:
+    """Serves one reference still so the casting gate can actually SHOW
+    the actor being approved. Approving a face you cannot see is not a
+    review, and until this existed the page listed only 있음/없음.
+
+    The path comes from the character's own stored sheet, so it is data
+    and is never trusted to stay inside the root just because it was
+    written there -- it is re-resolved and confirmed to sit inside the
+    Fable storage root before anything is served.
+
+    That containment check is against the STORAGE ROOT rather than this
+    one project's directory, because a reused actor's stills legitimately
+    live in the project that first cast them (see
+    FableService.reuse_character). Narrowing it to the project directory
+    would 404 exactly the images reuse exists to share, while a traversal
+    attempt still cannot leave the root.
+    """
+    _fable_or_404(ctx, project_id)
+    character = next(
+        (c for c in ctx.fable.project_characters(project_id) if c.id == character_id), None,
+    )
+    if character is None:
+        raise HTTPException(status_code=404, detail="character not found")
+    stored = (character.reference_images or {}).get(view)
+    if not stored:
+        raise HTTPException(status_code=404, detail="reference view not generated")
+
+    path = Path(stored).resolve()
+    root = Path(ctx.settings.fable_projects_dir).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="reference image not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/fable/{project_id}/takes/{take_id}/video")
+def fable_take_video(
+    project_id: str, take_id: str, ctx: AppContext = Depends(get_context),
+) -> FileResponse:
+    """Streams one candidate take so the take gate can be a real choice.
+
+    Picking between candidates is the most visual decision in the whole
+    product, and it was previously made from a table of "#1 / #2" with no
+    video on the page at all. Same containment rule as the reference
+    stills: the stored path is data, so it is re-resolved and confirmed
+    inside the Fable storage root before anything is served."""
+    _fable_or_404(ctx, project_id)
+    take = next(
+        (
+            candidate
+            for shot in ctx.fable.project_shots(project_id)
+            for candidate in ctx.fable.shot_takes(shot.id)
+            if candidate.id == take_id
+        ),
+        None,
+    )
+    if take is None or not take.media_path:
+        raise HTTPException(status_code=404, detail="take video not found")
+    path = Path(take.media_path).resolve()
+    root = Path(ctx.settings.fable_projects_dir).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="take video not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 @router.get("/fable/{project_id}/video")

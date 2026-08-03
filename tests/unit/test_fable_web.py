@@ -90,6 +90,65 @@ def test_unspecified_takes_stays_unspecified_not_one() -> None:
     assert result.value.takes_per_shot is None
 
 
+def test_genre_and_tone_are_optional_and_unset_means_none_not_empty_string() -> None:
+    """"" is the select's "지정 안 함" option. It must reach the service as
+    None -- an empty string would be interpolated into the prompt as a
+    deleted word rather than an absent one."""
+    result = validate_new_fable_form(
+        title="t", source_text=STORY, language="ko", aspect_ratio="9:16", takes_per_shot=0,
+        genre="", tone="",
+    )
+    assert result.ok
+    assert result.value.genre is None
+    assert result.value.tone is None
+
+
+def test_genre_and_tone_accept_offered_choices_and_refuse_others() -> None:
+    from reel_harness.web.fable_forms import GENRE_CHOICES, TONE_CHOICES
+
+    for value, _label in GENRE_CHOICES:
+        assert validate_new_fable_form(
+            title="t", source_text=STORY, language="ko", aspect_ratio="9:16",
+            takes_per_shot=0, genre=value,
+        ).ok, value
+    for value, _label in TONE_CHOICES:
+        assert validate_new_fable_form(
+            title="t", source_text=STORY, language="ko", aspect_ratio="9:16",
+            takes_per_shot=0, tone=value,
+        ).ok, value
+
+    bad = validate_new_fable_form(
+        title="t", source_text=STORY, language="ko", aspect_ratio="9:16",
+        takes_per_shot=0, genre="comdey",
+    )
+    assert not bad.ok
+    assert "genre" in bad.errors
+
+
+def test_duration_choices_are_reachable_shot_counts_not_arbitrary_numbers() -> None:
+    """Reference-driven shots are fixed at 8s and a plan caps at 15 shots,
+    so every offered duration must be a multiple of 8 within that cap --
+    otherwise the UI promises a length no plan can actually hit."""
+    from reel_harness.web.fable_forms import DURATION_CHOICES
+
+    for seconds, _label in DURATION_CHOICES:
+        assert seconds % 8 == 0, seconds
+        assert seconds // 8 <= 15, seconds
+        assert validate_new_fable_form(
+            title="t", source_text=STORY, language="ko", aspect_ratio="9:16",
+            takes_per_shot=0, target_duration_sec=seconds,
+        ).ok
+
+
+def test_an_unoffered_duration_is_refused() -> None:
+    result = validate_new_fable_form(
+        title="t", source_text=STORY, language="ko", aspect_ratio="9:16",
+        takes_per_shot=0, target_duration_sec=45,
+    )
+    assert not result.ok
+    assert "target_duration_sec" in result.errors
+
+
 def test_budget_form_refuses_a_malformed_limit() -> None:
     """A typo that silently became a bigger number is the worst possible
     failure mode for a spending ceiling."""
@@ -240,10 +299,34 @@ def test_creating_a_project_through_the_form(client) -> None:
     response = http.post("/fable", data={
         "csrf_token": token, "title": "새 이야기", "source_text": STORY,
         "language": "ko", "aspect_ratio": "9:16", "takes_per_shot": 2,
+        "genre": "drama", "tone": "quiet tension", "target_duration_sec": 48,
     }, follow_redirects=False)
     assert response.status_code == 303
     project_id = response.headers["location"].rsplit("/", 1)[-1]
-    assert ctx.fable.get_project(project_id).takes_per_shot == 2
+    project = ctx.fable.get_project(project_id)
+    assert project.takes_per_shot == 2
+    # The selected hints reach the project, not just the form.
+    assert project.genre == "drama"
+    assert project.tone == "quiet tension"
+    assert project.target_duration_sec == 48
+
+
+def test_the_new_project_form_offers_every_choice_it_validates(client) -> None:
+    """The rendered page and the validator must agree -- a select that
+    offers a value the validator rejects is a dead end the user cannot
+    escape without knowing why."""
+    from reel_harness.web.fable_forms import DURATION_CHOICES, GENRE_CHOICES, TONE_CHOICES
+
+    http, _ = client
+    page = http.get("/fable/new").text
+    for value, _label in GENRE_CHOICES:
+        if value:
+            assert f'value="{value}"' in page, value
+    for value, _label in TONE_CHOICES:
+        if value:
+            assert f'value="{value}"' in page, value
+    for seconds, _label in DURATION_CHOICES:
+        assert f'value="{seconds}"' in page, seconds
 
 
 def test_an_invalid_submission_re_renders_the_form_not_a_json_422(client) -> None:
@@ -378,3 +461,224 @@ def test_the_video_route_404s_before_a_film_exists(client) -> None:
 def test_the_nav_links_to_the_fable_section(client) -> None:
     http, _ = client
     assert 'href="/fable"' in http.get("/fable").text
+
+
+# -- reference stills and casting an existing actor ------------------------
+
+
+def _casting_project(ctx, key: str):
+    """A project sitting at the casting gate with a generated sheet."""
+    project = _create(ctx, key=key)
+    ctx.fable.adapt_project(project.id)
+    ctx.fable.approve_story(project.id)
+    ctx.fable.generate_references(project.id)
+    return project
+
+
+def test_the_casting_page_shows_the_face_not_just_a_yes_no(client) -> None:
+    """Approving a face you cannot see is not a review. Until the image
+    route existed, this page listed only 있음/없음."""
+    http, ctx = client
+    project = _casting_project(ctx, "images")
+    character = ctx.fable.project_characters(project.id)[0]
+
+    page = http.get(f"/fable/{project.id}").text
+    assert f"/fable/{project.id}/characters/{character.id}/reference/face" in page
+    assert "<img" in page
+
+    image = http.get(f"/fable/{project.id}/characters/{character.id}/reference/face")
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+    assert image.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_an_ungenerated_view_is_404_not_a_broken_image(client) -> None:
+    http, ctx = client
+    project = _create(ctx, key="no-sheet")
+    ctx.fable.adapt_project(project.id)
+    character = ctx.fable.project_characters(project.id)[0]
+    response = http.get(f"/fable/{project.id}/characters/{character.id}/reference/face")
+    assert response.status_code == 404
+
+
+def test_a_reference_path_cannot_escape_the_storage_root(client, tmp_path) -> None:
+    """The stored path is data. If it ever pointed outside the Fable root,
+    serving it would hand out an arbitrary file."""
+    http, ctx = client
+    project = _casting_project(ctx, "escape")
+    character = ctx.fable.project_characters(project.id)[0]
+
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\nnot yours")
+    from reel_harness.db.cinematic_models import FableCharacter
+
+    with ctx.session_factory() as session:
+        row = session.get(FableCharacter, character.id)
+        row.reference_images = {**row.reference_images, "face": str(outside)}
+        session.commit()
+
+    response = http.get(f"/fable/{project.id}/characters/{character.id}/reference/face")
+    assert response.status_code == 404
+
+
+def test_reusable_actors_are_offered_only_at_the_casting_gate(client) -> None:
+    http, ctx = client
+    source = _casting_project(ctx, "reuse-source")
+    for character in ctx.fable.project_characters(source.id):
+        ctx.fable.approve_reference(character.id)
+
+    target = _create(ctx, key="reuse-target")
+    ctx.fable.adapt_project(target.id)
+    # STORY_REVIEW: not casting yet, so nothing is offered.
+    assert "기존 배우 다시 쓰기" not in http.get(f"/fable/{target.id}").text
+
+    ctx.fable.approve_story(target.id)  # -> CASTING
+    page = http.get(f"/fable/{target.id}").text
+    assert "기존 배우 다시 쓰기" in page
+    assert "이 배우로 캐스팅" in page
+
+
+def test_casting_an_existing_actor_through_the_form(client) -> None:
+    http, ctx = client
+    source = _casting_project(ctx, "cast-source")
+    for character in ctx.fable.project_characters(source.id):
+        ctx.fable.approve_reference(character.id)
+    source_character = ctx.fable.project_characters(source.id)[0]
+
+    target = _create(ctx, key="cast-target")
+    ctx.fable.adapt_project(target.id)
+    ctx.fable.approve_story(target.id)
+
+    token = _csrf(http)
+    response = http.post(f"/fable/{target.id}/cast", data={
+        "csrf_token": token, "source_character_id": source_character.id,
+    }, follow_redirects=False)
+    assert response.status_code == 303
+
+    cast = ctx.fable.project_characters(target.id)[0]
+    assert cast.reference_images == source_character.reference_images
+    assert cast.reference_approved is False  # this film approves for itself
+
+
+def test_casting_outside_the_gate_is_a_409_not_a_500(client) -> None:
+    http, ctx = client
+    source = _casting_project(ctx, "cast-409-source")
+    for character in ctx.fable.project_characters(source.id):
+        ctx.fable.approve_reference(character.id)
+    source_character = ctx.fable.project_characters(source.id)[0]
+
+    target = _create(ctx, key="cast-409-target")
+    ctx.fable.adapt_project(target.id)  # STORY_REVIEW, not CASTING
+
+    token = _csrf(http)
+    response = http.post(f"/fable/{target.id}/cast", data={
+        "csrf_token": token, "source_character_id": source_character.id,
+    })
+    assert response.status_code == 409
+
+
+def test_a_reused_actors_stills_are_still_served_from_the_new_project(client) -> None:
+    """Reuse shares the stills by path, so they live in the project that
+    first cast them. The new project's page must still be able to show
+    them or the reuse UI would display broken images."""
+    http, ctx = client
+    source = _casting_project(ctx, "serve-source")
+    for character in ctx.fable.project_characters(source.id):
+        ctx.fable.approve_reference(character.id)
+    source_character = ctx.fable.project_characters(source.id)[0]
+
+    target = _create(ctx, key="serve-target")
+    ctx.fable.adapt_project(target.id)
+    ctx.fable.approve_story(target.id)
+    cast = ctx.fable.reuse_character(target.id, source_character.id)
+
+    response = http.get(f"/fable/{target.id}/characters/{cast.id}/reference/face")
+    assert response.status_code == 200
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+# -- the page has to be usable, not just correct --------------------------
+
+
+def test_every_class_the_fable_templates_use_is_actually_defined() -> None:
+    """Dead class names are invisible bugs: the page renders, nothing is
+    styled, and no test notices. The cancel button spent a whole phase
+    written as `.button-danger` against a stylesheet defining
+    `.btn-danger`, so the destructive action looked identical to the safe
+    ones."""
+    import re
+    from pathlib import Path
+
+    web = Path(__file__).resolve().parents[2] / "reel_harness" / "web"
+    css = (web / "static" / "app.css").read_text(encoding="utf-8")
+    defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", css))
+
+    used: set[str] = set()
+    for template in (web / "templates").glob("fable*.html"):
+        for attr in re.findall(r'class="([^"{}]*)"', template.read_text(encoding="utf-8")):
+            used.update(attr.split())
+
+    missing = sorted(used - defined)
+    assert not missing, f"templates use undefined CSS classes: {missing}"
+
+
+def test_the_money_button_states_the_cost(client) -> None:
+    """A button that spends real money must not look like one that does
+    not, and the amount belongs WITH the action rather than in a section
+    the user scrolls past."""
+    http, ctx = client
+    project = _create(ctx, key="spend")
+    ctx.fable.adapt_project(project.id)
+    ctx.fable.approve_story(project.id)  # -> CASTING, references cost money
+
+    page = http.get(f"/fable/{project.id}").text
+    assert "유료 생성" in page
+    assert "배우 이미지 생성" in page
+    # Either a real amount or an explicit "unknown" -- never silence.
+    assert ("약 " in page) or ("예상 비용 알 수 없음" in page)
+
+
+def test_a_project_with_no_budget_says_generation_is_locked(client) -> None:
+    http, ctx = client
+    project = _create(ctx, key="locked")
+    ctx.fable.adapt_project(project.id)
+    ctx.fable.approve_story(project.id)
+    page = http.get(f"/fable/{project.id}").text
+    assert "예산 한도가 없으면" in page
+
+
+def test_the_pipeline_shows_where_the_project_is(client) -> None:
+    from reel_harness.web.fable_view_models import build_pipeline_steps
+
+    http, ctx = client
+    project = _create(ctx, key="pipeline")
+    ctx.fable.adapt_project(project.id)  # -> STORY_REVIEW
+
+    steps = build_pipeline_steps("STORY_REVIEW")
+    assert [s.state for s in steps][:3] == ["done", "current", "todo"]
+    assert 'data-state="current"' in http.get(f"/fable/{project.id}").text
+
+
+def test_a_completed_project_has_no_current_step() -> None:
+    from reel_harness.web.fable_view_models import build_pipeline_steps
+
+    states = [s.state for s in build_pipeline_steps("COMPLETED")]
+    assert set(states) == {"done"}
+
+
+def test_a_cancelled_project_is_marked_blocked_not_progressing() -> None:
+    from reel_harness.web.fable_view_models import build_pipeline_steps
+
+    states = [s.state for s in build_pipeline_steps("CANCELLED")]
+    assert "blocked" in states
+    assert "current" not in states
+
+
+def test_an_empty_casting_section_explains_itself(client) -> None:
+    """A section that vanishes when empty leaves no way to tell whether
+    the step has not happened yet or has failed."""
+    http, ctx = client
+    project = _create(ctx, key="empty-cast")
+    page = http.get(f"/fable/{project.id}").text
+    assert "캐스팅" in page
+    assert "각색을 먼저 실행하면" in page

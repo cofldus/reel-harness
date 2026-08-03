@@ -24,6 +24,53 @@ SOURCE_TEXT_MIN_LENGTH = 20
 SOURCE_TEXT_MAX_LENGTH = 40_000
 ALLOWED_LANGUAGES = ("ko", "en")
 ALLOWED_ASPECT_RATIOS = ("9:16", "16:9")
+
+# Genre and tone are prompt HINTS, not domain constraints -- the
+# adaptation schema never validates them. They are offered as a curated
+# list rather than a free-text box because a typo'd or contradictory hint
+# ("comdey", "loud quiet") silently degrades every shot prompt with no
+# error anywhere, and because a short list of terms a film model actually
+# recognizes beats whatever a user invents on the spot. "" means "let the
+# adaptation decide", which is a real choice, not a missing value.
+GENRE_CHOICES = (
+    ("", "지정 안 함"),
+    ("drama", "드라마"),
+    ("thriller", "스릴러"),
+    ("romance", "로맨스"),
+    ("mystery", "미스터리"),
+    ("horror", "호러"),
+    ("comedy", "코미디"),
+    ("fantasy", "판타지"),
+    ("science fiction", "SF"),
+    ("documentary", "다큐멘터리"),
+)
+TONE_CHOICES = (
+    ("", "지정 안 함"),
+    ("quiet tension", "고요한 긴장"),
+    ("melancholy", "쓸쓸함"),
+    ("warm", "따뜻함"),
+    ("tense", "긴박함"),
+    ("dreamlike", "몽환적"),
+    ("bleak", "황량함"),
+    ("hopeful", "희망적"),
+    ("playful", "경쾌함"),
+)
+ALLOWED_GENRES = frozenset(value for value, _label in GENRE_CHOICES)
+ALLOWED_TONES = frozenset(value for value, _label in TONE_CHOICES)
+
+# Reference-driven Veo runs are fixed at 8 seconds per shot, and the
+# adaptation schema caps a plan at 15 shots -- so these are the durations
+# a plan can actually hit, not arbitrary round numbers. The label states
+# the shot count because that, not the seconds, is what drives cost.
+DURATION_CHOICES = (
+    (32, "약 32초 (4샷)"),
+    (48, "약 48초 (6샷)"),
+    (64, "약 64초 (8샷)"),
+    (96, "약 96초 (12샷)"),
+    (120, "약 120초 (15샷, 최대)"),
+)
+ALLOWED_DURATIONS = frozenset(value for value, _label in DURATION_CHOICES)
+DEFAULT_DURATION_SEC = 32
 # ISO-4217-shaped: three letters. Not validated against a real currency
 # table -- the fake tier bills in "FAKE", and inventing a whitelist would
 # reject a legitimate provider's currency for no benefit.
@@ -37,6 +84,12 @@ class NewFableFormInput:
     language: str
     aspect_ratio: str
     takes_per_shot: int | None
+    # None rather than "" when unspecified: the service treats a genre of
+    # None as "no hint" and would otherwise put an empty string into the
+    # prompt, which reads as a deleted word rather than an absent one.
+    genre: str | None
+    tone: str | None
+    target_duration_sec: int
 
 
 @dataclass
@@ -67,6 +120,7 @@ class BudgetFormResult:
 
 def validate_new_fable_form(
     title: str, source_text: str, language: str, aspect_ratio: str, takes_per_shot: int,
+    genre: str = "", tone: str = "", target_duration_sec: int = DEFAULT_DURATION_SEC,
 ) -> NewFableFormResult:
     errors: dict[str, str] = {}
 
@@ -100,11 +154,21 @@ def validate_new_fable_form(
         else:
             takes = takes_per_shot
 
+    if genre not in ALLOWED_GENRES:
+        errors["genre"] = "지원하지 않는 장르입니다."
+    if tone not in ALLOWED_TONES:
+        errors["tone"] = "지원하지 않는 분위기입니다."
+    if target_duration_sec not in ALLOWED_DURATIONS:
+        allowed = ", ".join(str(n) for n in sorted(ALLOWED_DURATIONS))
+        errors["target_duration_sec"] = f"목표 길이는 {allowed}초 중 하나여야 합니다."
+
     if errors:
         return NewFableFormResult(value=None, errors=errors)
     return NewFableFormResult(value=NewFableFormInput(
         title=cleaned_title, source_text=cleaned_source, language=language,
         aspect_ratio=aspect_ratio, takes_per_shot=takes,
+        genre=genre or None, tone=tone or None,
+        target_duration_sec=target_duration_sec,
     ))
 
 

@@ -93,11 +93,64 @@ class FableProjectSummaryView:
     detail_url: str
 
 
+# The seven gates a project walks, in order, with the working states that
+# lead into each. Drives the progress stepper -- a user in the middle of a
+# seven-step approval flow could not previously tell where they were.
+PIPELINE_STEPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("각색", (FableProjectStatus.DRAFT.value, FableProjectStatus.ADAPTING.value)),
+    ("스토리 검수", (FableProjectStatus.STORY_REVIEW.value,)),
+    ("캐스팅", (FableProjectStatus.CASTING.value,)),
+    ("배우 검수", (FableProjectStatus.CHARACTER_REVIEW.value,)),
+    ("스토리보드", (FableProjectStatus.STORYBOARDING.value, FableProjectStatus.SHOT_REVIEW.value)),
+    ("영상 생성", (FableProjectStatus.GENERATING.value, FableProjectStatus.TAKE_REVIEW.value)),
+    ("편집·완성", (
+        FableProjectStatus.EDITING.value, FableProjectStatus.FINAL_REVIEW.value,
+        FableProjectStatus.COMPLETED.value,
+    )),
+)
+
+
+@dataclass
+class PipelineStepView:
+    label: str
+    # "done" | "current" | "todo" | "blocked"
+    state: str
+
+
+def build_pipeline_steps(status: str) -> list[PipelineStepView]:
+    """A step is done once the project has moved past its states, current
+    while inside them, todo otherwise. A failed or cancelled project marks
+    the step it stopped in as blocked rather than pretending progress."""
+    stopped = status in (FableProjectStatus.FAILED.value, FableProjectStatus.CANCELLED.value)
+    current_index = next(
+        (index for index, (_label, states) in enumerate(PIPELINE_STEPS) if status in states),
+        None,
+    )
+    steps: list[PipelineStepView] = []
+    for index, (label, _states) in enumerate(PIPELINE_STEPS):
+        if stopped:
+            state = "blocked" if index == 0 else "todo"
+        elif current_index is None:
+            state = "todo"
+        elif index < current_index:
+            state = "done"
+        elif index == current_index:
+            state = "done" if status == FableProjectStatus.COMPLETED.value else "current"
+        else:
+            state = "todo"
+        steps.append(PipelineStepView(label=label, state=state))
+    return steps
+
+
 @dataclass
 class ReferenceViewImage:
     view: str
     label: str
     present: bool
+    # Set only when the view exists -- a src pointing at a 404 renders as
+    # a broken-image icon, which reads as "something is wrong" rather
+    # than "this view has not been generated yet".
+    url: str | None = None
 
 
 @dataclass
@@ -125,6 +178,11 @@ class FableTakeView:
     take_id: str
     attempt_number: int
     status: str
+    status_label: str
+    # Playable only once the clip is actually on disk. Choosing between
+    # candidate takes is the most visual decision in the product, and it
+    # was previously made from a table of "#1 / #2" with no video at all.
+    video_url: str | None
     selected: bool
     cost_amount: float | None
     cost_currency: str | None
@@ -142,6 +200,13 @@ class FableShotView:
     action: str | None
     duration_sec: float | None
     failure_code: str | None
+    # The film grammar the adaptation actually chose. A storyboard that
+    # hides it is a list of sentences, not a shot plan.
+    shot_size: str | None = None
+    camera_angle: str | None = None
+    camera_movement: str | None = None
+    subject: str | None = None
+    dialogue_line: str | None = None
     takes: list[FableTakeView] = field(default_factory=list)
 
 
@@ -158,6 +223,25 @@ class FableBudgetView:
 
 
 @dataclass
+class StoryBibleView:
+    """What the adaptation actually produced, shown at the story gate.
+
+    Approving a story you cannot read is not a review -- and until this
+    existed the page asked exactly that: a "스토리 승인" button with the
+    adaptation nowhere on the page.
+    """
+
+    logline: str | None
+    synopsis: str | None
+    premise: str | None
+    theme: str | None
+    setting: str | None
+    visual_style: str | None
+    ending_summary: str | None
+    prohibited_elements: list[str]
+
+
+@dataclass
 class FableProjectDetailView:
     project_id: str
     title: str
@@ -171,6 +255,8 @@ class FableProjectDetailView:
     is_terminal: bool
     characters: list[FableCharacterView]
     shots: list[FableShotView]
+    pipeline: list[PipelineStepView]
+    story: StoryBibleView | None
     budget: FableBudgetView
     # Every action, each mirroring the service's own precondition.
     can_adapt: bool
@@ -200,13 +286,17 @@ def build_fable_summary_view(project) -> FableProjectSummaryView:
     )
 
 
-def build_character_view(character) -> FableCharacterView:
+def build_character_view(character, project_id: str | None = None) -> FableCharacterView:
     images = character.reference_images or {}
     view_images = [
         ReferenceViewImage(
             view=view.value,
             label=view.value.replace("_", " "),
             present=view.value in images,
+            url=(
+                f"/fable/{project_id}/characters/{character.id}/reference/{view.value}"
+                if project_id and view.value in images else None
+            ),
         )
         for view in REFERENCE_VIEWS
     ]
@@ -229,7 +319,37 @@ def build_character_view(character) -> FableCharacterView:
     )
 
 
-def build_shot_view(shot, takes) -> FableShotView:
+TAKE_STATUS_LABELS: dict[str, str] = {
+    "SUBMITTED": "제출됨",
+    "GENERATING": "생성 중",
+    "DOWNLOADED": "확인 가능",
+    "MODERATED": "정책 검토",
+    "FAILED": "실패",
+}
+
+
+def take_status_label(status: str) -> str:
+    return TAKE_STATUS_LABELS.get(status, status)
+
+
+def build_story_view(story_bible) -> StoryBibleView | None:
+    """None before adaptation has run -- the template then says so
+    instead of rendering an empty shell."""
+    if not story_bible:
+        return None
+    return StoryBibleView(
+        logline=story_bible.get("logline"),
+        synopsis=story_bible.get("synopsis"),
+        premise=story_bible.get("premise"),
+        theme=story_bible.get("theme"),
+        setting=story_bible.get("setting"),
+        visual_style=story_bible.get("visual_style"),
+        ending_summary=story_bible.get("ending_summary"),
+        prohibited_elements=list(story_bible.get("prohibited_elements") or []),
+    )
+
+
+def build_shot_view(shot, takes, project_id: str | None = None) -> FableShotView:
     return FableShotView(
         shot_id=shot.id,
         shot_order=shot.shot_order,
@@ -238,11 +358,21 @@ def build_shot_view(shot, takes) -> FableShotView:
         action=shot.action,
         duration_sec=shot.duration_sec,
         failure_code=shot.failure_code,
+        shot_size=shot.shot_size,
+        camera_angle=shot.camera_angle,
+        camera_movement=shot.camera_movement,
+        subject=shot.subject,
+        dialogue_line=shot.dialogue_line,
         takes=[
             FableTakeView(
                 take_id=take.id,
                 attempt_number=take.attempt_number,
                 status=take.status,
+                status_label=take_status_label(take.status),
+                video_url=(
+                    f"/fable/{project_id}/takes/{take.id}/video"
+                    if project_id and take.media_path else None
+                ),
                 selected=take.selected,
                 cost_amount=take.cost_amount,
                 cost_currency=take.cost_currency,
@@ -268,7 +398,9 @@ def build_fable_detail_view(project, characters, shots_with_takes, budget) -> Fa
     """`shots_with_takes` is a list of (shot, takes) pairs, loaded by the
     caller so this stays a pure function over detached objects."""
     status = project.status
-    character_views = [build_character_view(c) for c in characters]
+    character_views = [build_character_view(c, project.id) for c in characters]
+    pipeline = build_pipeline_steps(status)
+    story = build_story_view(project.story_bible)
 
     unapproved = [c for c in character_views if not c.reference_approved]
     if status != FableProjectStatus.CHARACTER_REVIEW.value:
@@ -297,7 +429,9 @@ def build_fable_detail_view(project, characters, shots_with_takes, budget) -> Fa
         needs_action=status in PROJECT_NEEDS_ACTION_STATUSES,
         is_terminal=status in _TERMINAL_VALUES,
         characters=character_views,
-        shots=[build_shot_view(shot, takes) for shot, takes in shots_with_takes],
+        pipeline=pipeline,
+        story=story,
+        shots=[build_shot_view(shot, takes, project.id) for shot, takes in shots_with_takes],
         budget=build_budget_view(budget),
         # ADAPTING is included deliberately: adapt_project resumes a run
         # that crashed mid-flight, so offering the button there is what

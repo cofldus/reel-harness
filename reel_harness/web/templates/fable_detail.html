@@ -1,154 +1,358 @@
 {% extends "base.html" %}
 {% block title %}{{ project.title }} - Reel Harness{% endblock %}
 {% block content %}
-<h1>{{ project.title }}</h1>
-<p class="meta">{{ project.aspect_ratio }} · 샷당 테이크 {{ project.takes_per_shot or '기본값' }}</p>
+<div class="fable fable-wide">
+
+<div class="fable-brand">
+  <span class="fable-wordmark">Fable</span>
+  <span class="fable-tagline">이야기를 영화로</span>
+</div>
+
+<header class="project-head">
+  <div>
+    <h1>{{ project.title }}</h1>
+    <p class="meta">{{ project.aspect_ratio }} · 샷당 후보 {{ project.takes_per_shot or '기본값' }}</p>
+  </div>
+  {% if project.can_cancel %}
+  <form method="post" action="/fable/{{ project.project_id }}/cancel" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn-danger">프로젝트 취소</button>
+  </form>
+  {% endif %}
+</header>
+
+{# Where you stand in a seven-gate walk. #}
+<ol class="pipeline">
+  {% for step in project.pipeline %}
+  <li class="pipeline-step" data-state="{{ step.state }}">
+    <span class="pipeline-mark" aria-hidden="true">
+      {%- if step.state == 'done' %}✓{% elif step.state == 'current' %}▶{% elif step.state == 'blocked' %}✕{% else %}·{% endif -%}
+    </span>
+    <span>{{ step.label }}</span>
+  </li>
+  {% endfor %}
+</ol>
 
 {% if error %}
 <div class="alert alert-error" role="alert"><p>{{ error }}</p></div>
 {% endif %}
 
+<div class="workspace">
+<div class="workspace-main">
+
 {% include "fragments/fable_status.html" %}
 
-<h2>다음 단계</h2>
-{# Every button below is gated on the SERVICE's own precondition (see
-   web.fable_view_models), so a button that is shown is one the service
-   will accept and a button that is hidden is one it would refuse. #}
-<div class="actions">
-  {% if project.can_adapt %}
+{# ---- The gate you are actually at -------------------------------------
+   Each gate shows WHAT it is asking you to approve, then the button. A
+   review that does not show you the thing is not a review, and three of
+   the four gates used to be exactly that. #}
+
+{% if project.can_adapt %}
+<section class="gate">
+  <h2>1. 각색</h2>
+  <p>원작을 읽고 등장인물·장소·장면·샷으로 나눕니다. LLM 호출 한 번이며, 영상 생성보다 훨씬 저렴합니다.</p>
   <form method="post" action="/fable/{{ project.project_id }}/adapt" class="inline-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit">각색 실행</button>
+    <button type="submit" class="btn btn-primary">각색 실행</button>
   </form>
-  {% endif %}
+</section>
+{% endif %}
 
+{% if project.story %}
+<section class="gate">
+  <h2>각색 결과</h2>
+  {% if project.story.logline %}<p class="logline">{{ project.story.logline }}</p>{% endif %}
+  {% if project.story.synopsis %}<p>{{ project.story.synopsis }}</p>{% endif %}
+  <dl class="kv">
+    {% if project.story.setting %}<dt>배경</dt><dd>{{ project.story.setting }}</dd>{% endif %}
+    {% if project.story.theme %}<dt>주제</dt><dd>{{ project.story.theme }}</dd>{% endif %}
+    {% if project.story.visual_style %}<dt>영상 톤</dt><dd>{{ project.story.visual_style }}</dd>{% endif %}
+    {% if project.story.ending_summary %}<dt>결말</dt><dd>{{ project.story.ending_summary }}</dd>{% endif %}
+  </dl>
   {% if project.can_approve_story %}
-  <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="step" value="story">
-    <button type="submit">스토리 승인</button>
-  </form>
+  <div class="actions">
+    <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="step" value="story">
+      <button type="submit" class="btn btn-primary">이 각색으로 진행</button>
+    </form>
+  </div>
+  <p class="hint">아래 샷 목록까지 확인한 뒤 승인하세요. 승인하면 배우 캐스팅으로 넘어갑니다.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ---- Storyboard: the shot plan, as cards ---------------------------- #}
+{% if project.shots %}
+<section class="gate">
+  <h2>스토리보드 <span class="meta">({{ project.shots | length }}개 샷)</span></h2>
+  <ul class="shot-grid">
+    {% for shot in project.shots %}
+    <li class="shot-card" data-status="{{ shot.status }}">
+      <div class="shot-card-head">
+        <span class="shot-number">{{ shot.shot_order }}</span>
+        <span class="badge badge-status">{{ shot.status_label }}</span>
+        {% if shot.failure_code %}<span class="badge badge-error">{{ shot.failure_code }}</span>{% endif %}
+      </div>
+      <p class="shot-action">{{ shot.action or '—' }}</p>
+      {% if shot.dialogue_line %}<p class="shot-dialogue">“{{ shot.dialogue_line }}”</p>{% endif %}
+      <ul class="shot-grammar">
+        {% if shot.subject %}<li>{{ shot.subject }}</li>{% endif %}
+        {% if shot.shot_size %}<li>{{ shot.shot_size.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.camera_angle %}<li>{{ shot.camera_angle.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.camera_movement %}<li>{{ shot.camera_movement.replace('_', ' ') }}</li>{% endif %}
+        {% if shot.duration_sec %}<li>{{ shot.duration_sec }}초</li>{% endif %}
+      </ul>
+
+      {% if shot.takes %}
+      {# Candidate takes, playable. Choosing between them was previously a
+         table of "#1 / #2" with no video anywhere on the page. #}
+      <ul class="take-grid">
+        {% for take in shot.takes %}
+        <li class="take {{ 'take-selected' if take.selected }}">
+          {% if take.video_url %}
+          <video class="take-video" controls preload="metadata" src="{{ take.video_url }}"></video>
+          {% else %}
+          <div class="take-placeholder">{{ take.status_label }}</div>
+          {% endif %}
+          <div class="take-foot">
+            <span class="meta">후보 {{ take.attempt_number }}</span>
+            {% if take.selected %}<span class="badge badge-ok">선택됨</span>{% endif %}
+          </div>
+          {% if take.can_select %}
+          <form method="post" action="/fable/takes/{{ take.take_id }}/select" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="project_id" value="{{ project.project_id }}">
+            <button type="submit" class="btn">이 후보 선택</button>
+          </form>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{# ---- Casting -------------------------------------------------------- #}
+<section class="gate">
+  <h2>캐스팅</h2>
+
+  {% if reusable_characters %}
+  <div class="reusable-cast">
+    <h3>기존 배우 다시 쓰기</h3>
+    <p class="hint">이미 승인된 배우를 그대로 캐스팅하면 레퍼런스 생성 비용이 들지 않습니다.</p>
+    <ul class="cast-choices">
+      {% for actor in reusable_characters %}
+      <li class="cast-choice">
+        {% set portrait = actor.images | selectattr('url') | first %}
+        {% if portrait %}
+        <img src="{{ portrait.url }}" alt="{{ actor.name }}" class="reference-thumb" loading="lazy">
+        {% else %}
+        <span class="reference-missing" aria-hidden="true">—</span>
+        {% endif %}
+        <span class="cast-name">{{ actor.name }}{% if actor.age_range %} · {{ actor.age_range }}{% endif %}</span>
+        <form method="post" action="/fable/{{ project.project_id }}/cast" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="source_character_id" value="{{ actor.character_id }}">
+          <button type="submit" class="btn">이 배우로 캐스팅</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
   {% endif %}
 
-  {% if project.can_generate_references %}
-  <form method="post" action="/fable/{{ project.project_id }}/references" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit">레퍼런스 시트 생성</button>
-  </form>
+  {% if project.characters %}
+  <div class="cast-list">
+  {% for character in project.characters %}
+  <article class="character">
+    <div class="character-head">
+      <h3>{{ character.name }}</h3>
+      {% if character.age_range %}<span class="meta">{{ character.age_range }}</span>{% endif %}
+      <span class="badge {{ 'badge-ok' if character.reference_approved else 'badge-pending' }}">
+        {{ '승인됨' if character.reference_approved else '미승인' }}
+      </span>
+      {% if not character.sheet_complete %}<span class="badge badge-error">시트 미완성</span>{% endif %}
+    </div>
+    {% if character.failure_summary %}
+    <div class="alert alert-error" role="alert">
+      <p>{{ character.failure_summary }}</p>
+      <details><summary>기술 세부정보</summary><p>{{ character.failure_code }}</p></details>
+    </div>
+    {% endif %}
+    <ul class="reference-views">
+      {% for image in character.images %}
+      <li class="reference-view">
+        {% if image.url %}
+        <a href="{{ image.url }}" target="_blank" rel="noopener">
+          <img src="{{ image.url }}" alt="{{ character.name }} - {{ image.label }}"
+               class="reference-thumb" loading="lazy">
+        </a>
+        {% else %}
+        <span class="reference-missing" aria-hidden="true">—</span>
+        {% endif %}
+        <span class="reference-label">{{ image.label }}{% if not image.present %} (없음){% endif %}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% if character.cost_amount %}
+    <p class="meta">이 시트 비용: {{ character.cost_amount }} {{ character.cost_currency }}</p>
+    {% endif %}
+    <div class="actions">
+      {% if character.can_approve %}
+      <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="project_id" value="{{ project.project_id }}">
+        <input type="hidden" name="decision" value="approve">
+        <button type="submit" class="btn btn-primary">이 배우로 확정</button>
+      </form>
+      {% endif %}
+      {% if character.can_reject %}
+      <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="project_id" value="{{ project.project_id }}">
+        <input type="hidden" name="decision" value="reject">
+        <button type="submit" class="btn">반려 (다시 생성)</button>
+      </form>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty-state">
+    {% if project.can_adapt %}각색을 먼저 실행하면 등장인물이 정해집니다.
+    {% else %}아직 등장인물이 없습니다. 각색이 끝나면 여기에 표시됩니다.{% endif %}
+  </p>
+  {% endif %}
+
+  {% if project.characters_blocked_reason %}
+  <div class="alert alert-info" role="status"><p>{{ project.characters_blocked_reason }}</p></div>
   {% endif %}
 
   {% if project.can_approve_characters %}
-  <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="step" value="characters">
-    <button type="submit">캐릭터 승인</button>
-  </form>
-  {% endif %}
-
-  {% if project.can_approve_shots %}
-  <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="step" value="shots">
-    <button type="submit">샷 승인 (생성 시작)</button>
-  </form>
-  {% endif %}
-
-  {% if project.can_render %}
-  <form method="post" action="/fable/{{ project.project_id }}/render" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit">최종 렌더</button>
-  </form>
-  {% endif %}
-
-  {% if project.can_approve_final %}
-  <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <input type="hidden" name="step" value="final">
-    <button type="submit">최종 승인</button>
-  </form>
-  {% endif %}
-
-  {% if project.can_cancel %}
-  <form method="post" action="/fable/{{ project.project_id }}/cancel" class="inline-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="button-danger">취소</button>
-  </form>
-  {% endif %}
-</div>
-
-{% if project.characters_blocked_reason %}
-<div class="alert alert-info" role="status"><p>{{ project.characters_blocked_reason }}</p></div>
-{% endif %}
-
-{% if has_video %}
-<h2>완성된 영상</h2>
-<video controls preload="metadata" src="/fable/{{ project.project_id }}/video" width="360"></video>
-{% endif %}
-
-<h2>예산 설정</h2>
-{# Always rendered, disabled rather than hidden when unavailable: a page
-   that hides a whole form also hides its CSRF field, which is the bug
-   Phase 5A's own CSRF-fragment mistake established the precedent for. #}
-<form method="post" action="/fable/{{ project.project_id }}/budget">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label for="limit_amount">한도</label>
-  <input type="text" id="limit_amount" name="limit_amount"
-         value="{{ project.budget.limit_amount if project.budget.limit_amount is not none else '' }}"
-         {{ 'disabled' if project.is_terminal }}>
-  <label for="currency">통화</label>
-  <input type="text" id="currency" name="currency" value="{{ project.budget.currency or '' }}"
-         {{ 'disabled' if project.is_terminal }}>
-  <button type="submit" {{ 'disabled' if project.is_terminal }}>저장</button>
-</form>
-<form method="post" action="/fable/{{ project.project_id }}/budget" class="inline-form">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <input type="hidden" name="clear" value="true">
-  <button type="submit" {{ 'disabled' if project.is_terminal }}>한도 해제</button>
-</form>
-<p class="hint">한도를 해제해도 이미 쓴 금액은 되돌아오지 않으며, 유료 생성 게이트가 다시 닫힙니다.</p>
-
-{% if project.characters %}
-<h2>캐스팅</h2>
-{% for character in project.characters %}
-<section class="character">
-  <h3>{{ character.name }}{% if character.age_range %} ({{ character.age_range }}){% endif %}</h3>
-  <p>
-    <span class="badge badge-status">{{ '승인됨' if character.reference_approved else '미승인' }}</span>
-    {% if not character.sheet_complete %}<span class="badge badge-error">시트 미완성</span>{% endif %}
-  </p>
-  {% if character.failure_summary %}
-  <div class="alert alert-error" role="alert">
-    <p>{{ character.failure_summary }}</p>
-    <details><summary>기술 세부정보</summary><p>{{ character.failure_code }}</p></details>
+  <div class="actions">
+    <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="step" value="characters">
+      <button type="submit" class="btn btn-primary">이 배우들로 확정하고 스토리보드로</button>
+    </form>
   </div>
   {% endif %}
-  <ul class="reference-views">
-    {% for image in character.images %}
-    <li>{{ image.label }}: {{ '있음' if image.present else '없음' }}</li>
-    {% endfor %}
-  </ul>
-  {% if character.cost_amount %}
-  <p class="meta">이 시트 비용: {{ character.cost_amount }} {{ character.cost_currency }}</p>
-  {% endif %}
+</section>
+
+{% if has_video %}
+<section class="gate">
+  <h2>완성된 영상</h2>
+  <video class="fable-video" controls preload="metadata" src="/fable/{{ project.project_id }}/video"></video>
   <div class="actions">
-    {% if character.can_approve %}
-    <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
+    <a class="btn" href="/fable/{{ project.project_id }}/video" download>내려받기</a>
+    {% if project.can_approve_final %}
+    <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="project_id" value="{{ project.project_id }}">
-      <input type="hidden" name="decision" value="approve">
-      <button type="submit">이 배우로 확정</button>
-    </form>
-    {% endif %}
-    {% if character.can_reject %}
-    <form method="post" action="/fable/characters/{{ character.character_id }}/reference" class="inline-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="project_id" value="{{ project.project_id }}">
-      <input type="hidden" name="decision" value="reject">
-      <button type="submit">반려 (다시 생성)</button>
+      <input type="hidden" name="step" value="final">
+      <button type="submit" class="btn btn-primary">최종 승인</button>
     </form>
     {% endif %}
   </div>
 </section>
-{% endfor %}
+{% elif project.can_render %}
+<section class="gate">
+  <h2>최종 편집</h2>
+  <p>선택된 후보들을 이어 붙여 한 편으로 만듭니다. 영상 생성이 아니므로 추가 비용은 없습니다.</p>
+  <form method="post" action="/fable/{{ project.project_id }}/render" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn-primary">최종 렌더</button>
+  </form>
+</section>
 {% endif %}
+
+</div>{# /workspace-main #}
+
+<aside class="workspace-side">
+  {# The two actions that spend real money, with the amount ON them. #}
+  {% if project.can_generate_references or project.can_approve_shots %}
+  <div class="spend-gate">
+    <h3>유료 생성</h3>
+    {% if estimate %}
+      {% if estimate.known %}
+      <p class="spend-amount">약 {{ estimate.amount }} {{ estimate.currency }}</p>
+      {% elif estimate.amount is not none %}
+      <p class="spend-amount">{{ estimate.amount }} {{ estimate.currency }} 이상</p>
+      <p class="spend-unknown">{{ estimate.unpriced_shot_count }}개 샷 가격 미상</p>
+      {% else %}
+      <p class="spend-unknown">예상 비용 알 수 없음</p>
+      {% endif %}
+      <p class="spend-detail">{{ estimate.detail }}</p>
+    {% else %}
+      <p class="spend-unknown">예상 비용 알 수 없음</p>
+      <p class="spend-detail">이 제공자는 공식 가격을 제공하지 않습니다.</p>
+    {% endif %}
+    <div class="actions">
+      {% if project.can_generate_references %}
+      <form method="post" action="/fable/{{ project.project_id }}/references" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-primary">배우 이미지 생성</button>
+      </form>
+      {% endif %}
+      {% if project.can_approve_shots %}
+      <form method="post" action="/fable/{{ project.project_id }}/approve" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="step" value="shots">
+        <button type="submit" class="btn btn-primary">영상 생성 시작</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if project.budget.limit_amount is none %}
+    <p class="spend-detail">예산 한도가 없으면 유료 제공자는 아예 실행되지 않습니다.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="side-card">
+    <h3>예산</h3>
+    <dl class="kv">
+      <dt>한도</dt>
+      <dd>{% if project.budget.limit_amount is none %}설정 안 됨{% else %}{{ project.budget.limit_amount }} {{ project.budget.currency }}{% endif %}</dd>
+      <dt>사용</dt>
+      <dd>{{ project.budget.spent_amount }}{% if project.budget.spend_is_incomplete %} 이상{% endif %} {{ project.budget.currency or '' }}</dd>
+      <dt>남음</dt>
+      <dd>{% if project.budget.remaining_amount is none %}—{% else %}{{ project.budget.remaining_amount }}{% endif %}</dd>
+    </dl>
+    {% if project.budget.spend_is_incomplete %}
+    <p class="hint">가격을 보고하지 않은 생성이 {{ project.budget.unpriced_take_count }}건 있어, 실제 사용액은 표시된 값보다 큽니다.</p>
+    {% endif %}
+
+    {# Always rendered, disabled rather than hidden: a page that hides a
+       whole form also hides its CSRF field. #}
+    <form method="post" action="/fable/{{ project.project_id }}/budget">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="form-field">
+        <label for="limit_amount">한도</label>
+        <input type="text" id="limit_amount" name="limit_amount" inputmode="decimal"
+               value="{{ project.budget.limit_amount if project.budget.limit_amount is not none else '' }}"
+               {{ 'disabled' if project.is_terminal }}>
+      </div>
+      <div class="form-field">
+        <label for="currency">통화</label>
+        <input type="text" id="currency" name="currency" value="{{ project.budget.currency or '' }}"
+               placeholder="USD" {{ 'disabled' if project.is_terminal }}>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn btn-primary" {{ 'disabled' if project.is_terminal }}>저장</button>
+      </div>
+    </form>
+    <form method="post" action="/fable/{{ project.project_id }}/budget" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="clear" value="true">
+      <button type="submit" class="btn" {{ 'disabled' if project.is_terminal }}>한도 해제</button>
+    </form>
+    <p class="hint">해제해도 이미 쓴 금액은 되돌아오지 않으며, 유료 생성 게이트가 다시 닫힙니다.</p>
+  </div>
+</aside>
+</div>{# /workspace #}
+</div>{# /fable #}
 {% endblock %}

@@ -299,3 +299,115 @@ def test_casting_refuses_a_paid_provider_without_the_switch(casting) -> None:
     fable.set_budget(project_id, 100.0, "FAKE")
     with pytest.raises(InvalidActionError, match="ALLOW_PAID_GENERATION"):
         fable.generate_references(project_id)
+
+
+# -- reusing an already-approved actor ------------------------------------
+
+
+def _approved_project(casting, key_suffix: str):
+    """A project whose single character has an approved reference sheet --
+    the state that makes an actor reusable."""
+    fable, project_id = casting()
+    fable.generate_references(project_id)
+    for character in fable.project_characters(project_id):
+        fable.approve_reference(character.id)
+    return fable, project_id
+
+
+def test_only_approved_complete_sheets_are_offered_for_reuse(casting) -> None:
+    """An unapproved sheet is a candidate nobody accepted yet; offering it
+    would spread a face no one signed off on across projects."""
+    fable, project_id = casting()
+    fable.generate_references(project_id)
+    assert fable.reusable_characters() == []  # generated, not yet approved
+
+    for character in fable.project_characters(project_id):
+        fable.approve_reference(character.id)
+    reusable = fable.reusable_characters()
+    assert reusable
+    assert all(c.reference_approved and c.reference_images for c in reusable)
+
+
+def test_reuse_excludes_the_asking_project(casting) -> None:
+    fable, project_id = _approved_project(casting, "self")
+    assert fable.reusable_characters(exclude_project_id=project_id) == []
+
+
+def test_reusing_an_actor_copies_identity_but_not_approval(casting, session_factory) -> None:
+    """The new project inherits the face and the bible, but must approve
+    the actor for ITSELF -- and the reuse costs nothing, so inheriting the
+    original's price would double-count it."""
+    fable, source_project = _approved_project(casting, "source")
+    source = fable.project_characters(source_project)[0]
+
+    target, _ = fable.create_project(
+        title="다른 이야기", source_text="다른 밤, 그는 문을 열었다.", idempotency_key="reuse-target",
+    )
+    fable.adapt_project(target.id)
+    fable.approve_story(target.id)  # -> CASTING
+
+    cast = fable.reuse_character(target.id, source.id)
+    assert cast.project_id == target.id
+    assert cast.reference_images == source.reference_images  # same stills
+    assert cast.bible == source.bible
+    assert cast.adult_confirmed is True
+    assert cast.reference_approved is False  # this film approves for itself
+    assert cast.reference_cost_amount is None  # nothing was generated here
+
+    # The source project is untouched.
+    assert fable.project_characters(source_project)[0].reference_approved is True
+
+
+def test_reuse_is_refused_outside_the_casting_gate(casting) -> None:
+    """Swapping the cast after the character gate was approved would
+    change the actors the storyboard was written against."""
+    fable, source_project = _approved_project(casting, "gate")
+    source = fable.project_characters(source_project)[0]
+
+    target, _ = fable.create_project(
+        title="t", source_text="다른 밤, 그는 문을 열었다.", idempotency_key="reuse-gate",
+    )
+    fable.adapt_project(target.id)  # still STORY_REVIEW, not CASTING
+    with pytest.raises(InvalidActionError, match="CASTING"):
+        fable.reuse_character(target.id, source.id)
+
+
+def test_reuse_refuses_an_unapproved_source(casting) -> None:
+    fable, project_id = casting()
+    fable.generate_references(project_id)
+    source = fable.project_characters(project_id)[0]
+
+    target, _ = fable.create_project(
+        title="t", source_text="다른 밤, 그는 문을 열었다.", idempotency_key="reuse-unapproved",
+    )
+    fable.adapt_project(target.id)
+    fable.approve_story(target.id)
+    with pytest.raises(InvalidActionError, match="approved"):
+        fable.reuse_character(target.id, source.id)
+
+
+def test_reuse_replaces_a_same_named_character_rather_than_duplicating(casting) -> None:
+    """The adaptation already invented a character; casting a real actor
+    into that role must fill the existing row, not add a second one."""
+    fable, source_project = _approved_project(casting, "dup")
+    source = fable.project_characters(source_project)[0]
+
+    target, _ = fable.create_project(
+        title="t", source_text="다른 밤, 그는 문을 열었다.", idempotency_key="reuse-dup",
+    )
+    fable.adapt_project(target.id)
+    fable.approve_story(target.id)
+    before = len(fable.project_characters(target.id))
+
+    # Rename the target's character to match, so the names collide.
+    from reel_harness.db.cinematic_models import FableCharacter
+
+    with fable._session_factory() as session:
+        existing = session.query(FableCharacter).filter(
+            FableCharacter.project_id == target.id,
+        ).first()
+        existing.name = source.name
+        session.commit()
+
+    fable.reuse_character(target.id, source.id)
+    assert len(fable.project_characters(target.id)) == before

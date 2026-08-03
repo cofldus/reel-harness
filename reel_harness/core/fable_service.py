@@ -631,6 +631,89 @@ class FableService:
             session.expunge(character)
             return character
 
+    def reusable_characters(self, exclude_project_id: str | None = None) -> list[FableCharacter]:
+        """Actors from earlier projects whose reference sheet is approved
+        and complete -- the cast a new project can draw from instead of
+        paying to generate a new face.
+
+        Only APPROVED sheets qualify. An unapproved one is a candidate
+        somebody has not yet accepted, and offering it for reuse would
+        spread a face nobody signed off on across projects."""
+        with self._session_factory() as session:
+            query = select(FableCharacter).where(
+                FableCharacter.reference_approved.is_(True),
+                FableCharacter.adult_confirmed.is_(True),
+            ).order_by(FableCharacter.created_at.desc())
+            if exclude_project_id:
+                query = query.where(FableCharacter.project_id != exclude_project_id)
+            characters = [
+                character for character in session.execute(query).scalars()
+                if character.reference_images
+            ]
+            for character in characters:
+                session.expunge(character)
+            return characters
+
+    def reuse_character(self, project_id: str, source_character_id: str) -> FableCharacter:
+        """Casts an existing approved actor into this project.
+
+        The reference IMAGES are shared by path rather than copied: they
+        are immutable once approved, and duplicating them would mean two
+        files that could drift while claiming to be the same actor. The
+        row itself is new, so this project owns its own casting state and
+        rejecting the actor here cannot un-approve it in the project it
+        came from.
+
+        Refused outside CASTING: reusing an actor after the character
+        gate has already been approved would change the cast the
+        storyboard was written against."""
+        with self._session_factory() as session:
+            project = session.get(StoryProject, project_id)
+            if project is None:
+                raise FableProjectNotFoundError(project_id)
+            if project.status != FableProjectStatus.CASTING.value:
+                raise InvalidActionError(
+                    f"casting an existing actor requires status CASTING (got {project.status})"
+                )
+            source = session.get(FableCharacter, source_character_id)
+            if source is None:
+                raise FableProjectNotFoundError(source_character_id)
+            if not (source.reference_approved and source.reference_images):
+                raise InvalidActionError(
+                    "only a character with an approved, complete reference sheet can be reused"
+                )
+            if source.project_id == project_id:
+                raise InvalidActionError("that actor is already cast in this project")
+
+            existing = session.execute(
+                select(FableCharacter).where(
+                    FableCharacter.project_id == project_id,
+                    FableCharacter.name == source.name,
+                )
+            ).scalars().first()
+            target = existing or FableCharacter(project_id=project_id, name=source.name)
+            target.role = target.role or source.role
+            target.age_range = source.age_range
+            target.adult_confirmed = source.adult_confirmed
+            target.bible = source.bible
+            target.reference_images = dict(source.reference_images)
+            target.reference_fingerprint = source.reference_fingerprint
+            # Cast, not yet accepted for THIS film: the operator still
+            # looks at the sheet in this project's own casting gate.
+            target.reference_approved = False
+            target.reference_failure_code = None
+            target.reference_failure_summary = None
+            # Reuse costs nothing -- no generation happened here, and
+            # inheriting the original's price would double-count it.
+            target.reference_cost_amount = None
+            target.reference_cost_currency = None
+            if existing is None:
+                session.add(target)
+            session.commit()
+            session.refresh(target)
+            session.expunge(target)
+            return target
+
     def project_characters(self, project_id: str) -> list[FableCharacter]:
         with self._session_factory() as session:
             characters = self._characters_for_project(session, project_id)
