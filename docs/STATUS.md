@@ -191,10 +191,37 @@ refusals over HTTP rather than assuming they carry over).
   this machine and those tests skip here, so adding a scenario that never
   runs would be a claim without a check behind it.
 
+## Live verification (real credentials, real spend)
+
+Recorded here because "the contract tests pass" is not the same claim as
+"this works against the vendor", and the difference has been load-bearing
+every time it was checked.
+
+| What | Result | Spend |
+|---|---|---|
+| Narrative Director (GPT-4o) | Verified. Found a real defect: wardrobe was duplicated into every prompt because the identity fragment already carried it. | — |
+| Reference images (Gemini) | Verified. Found that the configured default model was not callable on a real project (404); `gemini-2.5-flash-image` works. | ~$0.13 |
+| Veo 3.1 (Vertex, us-central1) | Verified. One 8s 720p clip from a reference-driven run. | $1.20 |
+| **SynthID + Veo references** | **Answered the open product risk: Veo ACCEPTS SynthID-watermarked stills as character references** (`reference_accepted: true`). The watermark is invisible and pixel-embedded; the PNG also carries a C2PA `caBX` chunk. | (above) |
+| Veo audio | Veo output HAS audio (aac 48kHz stereo), resolving a contradiction in Google's own docs. `generate_audio` exists in the SDK; silent output is roughly 20% cheaper on Fast. | (above) |
+| Adaptation quality | 30 GPT-4o adaptations measured via `fable-adapt-eval`. Drove the craft rules and the worked example -- see the F6 section. | ~$0.85 |
+
+**Unresolved: the Veo price.** `google_cinematic_video._DEFAULT_PRICE_PER_SECOND_USD`
+is 0.15/second; Google's published figure for the Fast tier is 0.10. The
+estimate shown at the spend gate depends on which is right, so this must
+be settled against a real GCP invoice line rather than by re-reading the
+pricing page. Until then the code over-estimates, which is the safe
+direction for a spending ceiling but is still wrong.
+
+---
+
 ## Provider decisions already researched (do not re-litigate)
 
-- **Reference images: `gemini-3.1-flash-image` (Nano Banana 2)**, with
-  `gemini-3-pro-image` as a configurable escalation. Chosen because it is
+- **Reference images: `gemini-2.5-flash-image`**, with `gemini-3-pro-image`
+  as a configurable escalation. The default was `gemini-3.1-flash-image`
+  until a live probe of four candidates on a real project returned 404
+  for it -- it appears in the model list but was not callable. A default
+  that fails on a fresh account is worse than an older model that works. Chosen because it is
   the ONLY option sharing one SDK (`google-genai`) and one credential with
   Veo, has typed character references (4), is GA, and costs ~$0.067/image
   at 1K. **1K is sufficient** — Veo caps reference-driven runs at 720p, so

@@ -82,7 +82,10 @@ _REFUSAL_FINISH_REASONS = frozenset({
 # provenance, never as something this code applied or could remove.
 SYNTHID_WATERMARK = "synthid"
 
-_DEFAULT_MODEL = "gemini-3.1-flash-image"
+# Matches Settings.reference_image_model. 3.1 is listed but returned 404
+# on a real project probe; 2.5 is what actually generated the verified
+# reference sheets.
+_DEFAULT_MODEL = "gemini-2.5-flash-image"
 # Published list price at 1K for the chosen model (docs/STATUS.md's
 # research). A hardcoded tariff is a liability, so it is exposed as a
 # constructor argument and, when set to None, estimate_cost reports

@@ -203,8 +203,14 @@ class Settings(BaseSettings):
     reference_image_provider: str = Field(
         "fake", validation_alias=_llm_alias(
             "REEL_HARNESS_REFERENCE_IMAGE_PROVIDER", "REFERENCE_IMAGE_PROVIDER"))
+    # gemini-2.5-flash-image rather than the newer 3.1: 3.1 appears in
+    # the model list but a live probe of four candidates on a real
+    # project returned 404 for it, so the previous default was a name
+    # that could not actually be called. A default that fails on a fresh
+    # account is worse than an older model that works; override the env
+    # var once 3.1 is generally reachable.
     reference_image_model: str = Field(
-        "gemini-3.1-flash-image", validation_alias=_llm_alias(
+        "gemini-2.5-flash-image", validation_alias=_llm_alias(
             "REEL_HARNESS_REFERENCE_IMAGE_MODEL", "REFERENCE_IMAGE_MODEL"))
     # Published list price per generated image. Configurable rather than
     # hardcoded because a vendor's price list is not this project's to

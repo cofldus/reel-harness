@@ -12,6 +12,21 @@ generated as a video clip, you pick takes, and the selected takes are cut
 into a film. It has its own domain, storage root, worker lane, CLI, API
 and web screens, and shares only the substrate.
 
+### Verified against real providers
+
+Every adapter below was exercised with real credentials, not only against
+its contract tests. Each live run found something the mocks could not:
+the adaptation call surfaced a duplicated wardrobe fragment, the image
+call surfaced a default model that was not callable on a real project,
+and the video call answered the one open product risk — **Veo accepts
+SynthID-watermarked stills as character references**, which the whole
+casting design depends on. Full table in `docs/STATUS.md`.
+
+The Veo price is the one number still unsettled: the code assumes
+$0.15/second and Google publishes $0.10 for the Fast tier. The estimate
+shown before you spend depends on it, so it is being checked against a
+real invoice rather than a pricing page.
+
 ### Added
 
 - **Story → film pipeline** (`fable-*` CLI, `/v1/fable/*`, `/fable`):

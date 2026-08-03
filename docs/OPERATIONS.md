@@ -1086,7 +1086,7 @@ Points worth knowing:
   Deliberately **synthetic rather than bundled photos**: shipping sample
   "people" with a local-first tool would mean shipping either a real
   person's likeness or AI output this tier explicitly does not produce.
-- **`google`** — the real thing: `gemini-3.1-flash-image` via the
+- **`google`** — the real thing: `gemini-2.5-flash-image` via the
   `google-genai` SDK. Needs the optional extra
   (`uv sync --extra google`) and a credential. Never a hard dependency —
   the whole Fable pipeline runs offline on the other two tiers.
