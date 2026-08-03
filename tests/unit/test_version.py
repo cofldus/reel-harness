@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -10,9 +11,17 @@ from reel_harness._version import __version__ as version_module_value
 
 
 def test_version_is_pep440_release_candidate() -> None:
-    # "0.4.0rc1", not "0.4.0-rc.1" or "0.4.0.rc1" -- exactly one format used
-    # consistently everywhere a version string appears (see docs/STATUS.md).
-    assert version_module_value == "0.4.0rc1"
+    """The FORMAT is what this pins: "0.5.0rc1", never "0.5.0-rc.1" or
+    "0.5.0.rc1" -- one spelling everywhere a version string appears (see
+    docs/STATUS.md).
+
+    Deliberately not a literal equality check. The three locations a
+    version lives in are already pinned to each other by the tests below,
+    so hardcoding the number here adds no coverage while adding a step
+    every release must remember -- and the v0.5.0rc1 release did forget
+    it, which is how this comment came to be written.
+    """
+    assert re.fullmatch(r"\d+\.\d+\.\d+(?:a|b|rc)\d+", version_module_value), version_module_value
 
 
 def test_package_version_matches_version_module() -> None:
