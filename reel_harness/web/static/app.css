@@ -1566,19 +1566,21 @@ details.advanced[open] > summary { border-bottom: 1px solid var(--border); }
    feels like writing rather than filling in a field. */
 
 .compose-story {
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
-  border-radius: 0 var(--r-md) var(--r-md) 0;
-  background: var(--surface);
-  padding: var(--s5);
+  /* A hairline the same value as the surface it sits on: the field reads
+     as a slightly recessed area rather than a boxed-in control. The
+     earlier heavy left rule fought the page instead of settling into it. */
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  padding: var(--s4) var(--s5);
   font-size: 1rem;
-  line-height: 2.05;
-  min-height: 360px;
+  line-height: 1.9;
+  min-height: 200px;
 }
-.compose-story:hover { border-left-color: var(--muted); }
+.compose-story:hover { border-color: var(--border); }
 .compose-story:focus {
-  border-color: var(--border-strong);
-  border-left-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--surface);
 }
 .write-count { padding-left: var(--s2); }
 

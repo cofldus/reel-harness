@@ -54,7 +54,7 @@
        reason each one matters to THIS pipeline. #}
     <div class="write">
       <div class="write-main">
-        <textarea id="source_text" name="source_text" rows="16" data-story class="compose-story"
+        <textarea id="source_text" name="source_text" rows="9" data-story class="compose-story"
                   placeholder="그날 밤, 지우는 호텔 창밖의 비를 오래 바라보았다. 전화벨이 울렸지만 받지 않았다.">{{ values.get('source_text', '') }}</textarea>
         {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
         <p class="write-count"><span data-char-count>0</span>자 <span class="meta" data-length-note></span></p>
