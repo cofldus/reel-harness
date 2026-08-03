@@ -89,10 +89,23 @@ REFERENCE_RESOLUTION = "720p"
 SUPPORTED_LOCATION = "us-central1"
 
 _DEFAULT_MODEL = "veo-3.1-fast-generate-001"
-# Published list price per second for the chosen model. Configurable for
-# the same reason the image price is: a vendor's tariff is not this
-# project's to promise, and `None` reports `known=False` rather than
-# quoting a number that may have changed.
+# Published list price per second for the chosen model (veo-3.1-fast).
+# Configurable for the same reason the image price is: a vendor's tariff
+# is not this project's to promise, and `None` reports `known=False`
+# rather than quoting a number that may have changed.
+#
+# UNSETTLED, and deliberately held at the higher figure. Google publishes
+# 0.10/second for the Fast tier; this code has assumed 0.15. One real
+# invoice is suggestive but not conclusive: an 8-second reference-driven
+# clip plus two reference stills billed KRW 1,330, which is about USD
+# 0.93 at any plausible rate -- matching 0.10/second (0.80 + 0.134) and
+# not 0.15 (1.33). But GCP billing lags, so that total may be partial.
+#
+# It stays at 0.15 until a Vertex AI SKU line shows quantity x unit
+# price, because the two directions are not symmetric: quoting too low
+# lets a project overrun the ceiling its owner set, while quoting too
+# high only makes the gate refuse work that was affordable. For a
+# spending limit, over-estimating is the safe way to be wrong.
 _DEFAULT_PRICE_PER_SECOND_USD = 0.15
 
 # Operation error codes that mean "the model declined", as opposed to

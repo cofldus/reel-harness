@@ -207,11 +207,20 @@ every time it was checked.
 | Adaptation quality | 30 GPT-4o adaptations measured via `fable-adapt-eval`. Drove the craft rules and the worked example -- see the F6 section. | ~$0.85 |
 
 **Unresolved: the Veo price.** `google_cinematic_video._DEFAULT_PRICE_PER_SECOND_USD`
-is 0.15/second; Google's published figure for the Fast tier is 0.10. The
-estimate shown at the spend gate depends on which is right, so this must
-be settled against a real GCP invoice line rather than by re-reading the
-pricing page. Until then the code over-estimates, which is the safe
-direction for a spending ceiling but is still wrong.
+is 0.15/second; Google publishes 0.10 for the Fast tier.
+
+First real invoice: one 8-second reference-driven clip plus two reference
+stills billed **KRW 1,330**. That is roughly USD 0.93 at any plausible
+rate, which matches 0.10/second (0.80 video + 0.134 images) and not 0.15
+(1.33 total, roughly KRW 1,730-1,930). Images alone would have been about
+KRW 190, so the video did post.
+
+Suggestive, not conclusive -- GCP billing lags and the total may be
+partial. **Settle it from a Vertex AI SKU line showing quantity x unit
+price**, not from a running total. Held at 0.15 meanwhile, because the
+two directions are not symmetric: quoting too low lets a project overrun
+the ceiling its owner set, while quoting too high only makes the gate
+refuse work that was affordable.
 
 ---
 
