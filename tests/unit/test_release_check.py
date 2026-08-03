@@ -99,3 +99,39 @@ def test_release_check_full_pytest_failure_marks_overall_fail(git_repo, monkeypa
     checks = {i.name: i for i in report.items}
     assert checks["full_pytest"].status == "FAIL"
     assert report.ready_to_tag is False
+
+
+def test_subprocess_output_is_decoded_as_utf8_not_the_locale_codec(tmp_path) -> None:
+    """The gate died on a Korean Windows box before it checked anything.
+
+    `text=True` decodes with the locale codec (cp949 here), so a single
+    Korean byte anywhere in a subprocess's output raised inside
+    subprocess's own reader thread, left stdout as None, and turned the
+    concatenation into a TypeError. A release gate that crashes instead
+    of reporting is worse than no gate.
+    """
+    import sys
+
+    from reel_harness.ops.release_check import _run
+
+    # The child writes real UTF-8 bytes rather than print()ing, because
+    # a Python child on this box would itself encode stdout as cp949 and
+    # fail before the parent ever got to decode anything. What is under
+    # test is the PARENT's decoding.
+    code, output = _run(
+        [sys.executable, "-c",
+         "import sys; sys.stdout.buffer.write('테스트 통과'.encode('utf-8'))"],
+        tmp_path, 30,
+    )
+    assert code == 0
+    assert "테스트 통과" in output
+
+
+def test_a_subprocess_with_no_output_does_not_crash_the_gate(tmp_path) -> None:
+    import sys
+
+    from reel_harness.ops.release_check import _run
+
+    code, output = _run([sys.executable, "-c", "pass"], tmp_path, 30)
+    assert code == 0
+    assert output == ""

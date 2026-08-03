@@ -41,13 +41,24 @@ class ReleaseCheckReport:
 
 
 def _run(argv: list[str], cwd: Path, timeout: float) -> tuple[int, str]:
+    """Decoding is pinned to UTF-8 with replacement on purpose.
+
+    `text=True` alone decodes with the locale codec, which on a Korean
+    Windows install is cp949. Any Korean byte in a subprocess's output --
+    a test name, a docstring, a path -- then raises inside subprocess's
+    own reader thread, which leaves `stdout` as None and turns the next
+    line into a TypeError. The release gate died that way instead of
+    reporting anything, which is the worst possible failure for a tool
+    whose entire job is to tell you whether it is safe to tag.
+    """
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, shell=False, no user input interpolated
             argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
-    return result.returncode, (result.stdout + result.stderr)[-4000:]
+    return result.returncode, ((result.stdout or "") + (result.stderr or ""))[-4000:]
 
 
 def _check_git_clean(repo_root: Path) -> ReleaseCheckItem:
