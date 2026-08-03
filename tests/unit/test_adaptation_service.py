@@ -147,7 +147,11 @@ def test_adaptation_persists_every_entity_and_the_fingerprint(fable, session_fac
         assert scenes[0].continuity_notes["source_beat"]  # fidelity anchor persisted
 
     shots = fable.project_shots(project.id)
-    assert len(shots) == 4
+    # Shot count follows the requested runtime now (one shot per
+    # SHOT_SECONDS), rather than being a fixed number the fake
+    # happened to emit -- the parser's craft layer rejects a plan
+    # that does not fit the runtime it was asked for.
+    assert len(shots) == 8
     assert all(shot.duration_sec and shot.subject and shot.action for shot in shots)
 
 
@@ -185,7 +189,7 @@ def test_crash_during_adaptation_is_resumable(fable, session_factory) -> None:
 
     resumed = fable.adapt_project(project.id)
     assert resumed.status == "STORY_REVIEW"
-    assert len(fable.project_shots(project.id)) == 4
+    assert len(fable.project_shots(project.id)) == 8
 
 
 def test_missing_director_is_refused_explicitly(session_factory) -> None:
@@ -210,7 +214,7 @@ def test_re_adaptation_after_story_rejection_replaces_children(fable, session_fa
 
     fable.adapt_project(project.id)
     second_shot_ids = {s.id for s in fable.project_shots(project.id)}
-    assert len(second_shot_ids) == 4
+    assert len(second_shot_ids) == 8
     assert not (first_shot_ids & second_shot_ids)  # old children replaced, not appended
 
 

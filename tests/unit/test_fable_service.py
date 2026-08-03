@@ -67,7 +67,11 @@ def test_adapt_populates_bible_characters_scenes_shots(fable) -> None:
     assert adapted.story_bible["prohibited_elements"] == ["real people", "minors", "explicit content"]
 
     shots = fable.project_shots(project.id)
-    assert len(shots) == 4
+    # Shot count follows the requested runtime now (one shot per
+    # SHOT_SECONDS), rather than being a fixed number the fake
+    # happened to emit -- the parser's craft layer rejects a plan
+    # that does not fit the runtime it was asked for.
+    assert len(shots) == 8
     assert all(shot.status == "PLANNED" for shot in shots)
     # Every shot carries exactly one camera movement, validated against the
     # grammar enum by the schema -- never a compound "pan and dolly".

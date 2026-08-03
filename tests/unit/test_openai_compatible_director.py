@@ -30,9 +30,13 @@ SOURCE = (
     "마침내 그녀는 천천히 문 쪽으로 돌아섰다."
 )
 
+# 32 seconds, because _valid_document() below is a four-shot plan and the
+# parser's craft layer now checks that a plan actually fits the runtime it
+# was asked for. Asking for 60s and returning four shots is exactly the
+# defect that check exists to catch.
 REQUEST = AdaptationRequest(
     source_text=SOURCE, language="ko", genre="drama", tone="quiet",
-    target_duration_sec=60, aspect_ratio="9:16",
+    target_duration_sec=32, aspect_ratio="9:16",
 )
 
 

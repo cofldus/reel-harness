@@ -22,6 +22,7 @@ import re
 from typing import Literal
 
 from reel_harness.core.errors import TransientProviderError
+from reel_harness.pipeline.adaptation_parser import _SPOKEN_RE
 from reel_harness.providers.base import (
     AdaptationRequest,
     AdaptationResult,
@@ -127,22 +128,47 @@ class FakeNarrativeDirector:
         return "```json\n{\"logline\": \"missing everything else\"}\n```"
 
     def _document(self, request: AdaptationRequest) -> dict:
-        scene_count = 2
-        shots_per_scene = 2
+        # The shot plan is sized from the REQUESTED runtime and varies its
+        # grammar, because the parser's craft rules check exactly that: a
+        # plan of the wrong length, shot entirely from one angle, or never
+        # moving the camera is sent back for repair. A fake whose output
+        # cannot survive the real validators is not a stand-in, it is a
+        # way of never testing them.
+        from reel_harness.pipeline.adaptation_parser import SHOT_SECONDS
+
+        total_shots = max(2, round(request.target_duration_sec / SHOT_SECONDS))
+        scene_count = 2 if total_shots >= 4 else 1
         beats = _source_beats(request.source_text, scene_count)
         age_range = "teens" if self.mode == "minor_character" else "30s"
         character_name = "지우"
         location_name = "호텔 방"
 
+        # A spoken line in the source has to survive into the film.
+        spoken = _SPOKEN_RE.search(request.source_text or "")
+        dialogue_line = spoken.group(0).strip("“”\"‘’「」")[:80] if spoken else None
+
+        sizes = ["medium", "medium_close_up", "wide", "close_up"]
+        angles = ["eye_level", "low_angle", "high_angle"]
+        moves = ["locked", "dolly_in", "pan", "locked"]
+
         scenes = []
+        placed_dialogue = False
+        shot_number = 0
         for scene_index in range(scene_count):
+            # Any remainder lands in the last scene so the total is exact.
+            per_scene = total_shots // scene_count
+            if scene_index == scene_count - 1:
+                per_scene += total_shots - per_scene * scene_count
             shots = []
-            for shot_index in range(shots_per_scene):
+            for shot_index in range(per_scene):
+                line = None
+                if dialogue_line and not placed_dialogue and shot_index == 0:
+                    line, placed_dialogue = dialogue_line, True
                 shots.append({
                     "shot_order": shot_index + 1,
-                    "shot_size": "medium" if shot_index == 0 else "medium_close_up",
-                    "camera_angle": "eye_level",
-                    "camera_movement": "locked" if shot_index == 0 else "dolly_in",
+                    "shot_size": sizes[shot_number % len(sizes)],
+                    "camera_angle": angles[shot_number % len(angles)],
+                    "camera_movement": moves[shot_number % len(moves)],
                     "lens_style": "50mm",
                     "subject": character_name,
                     "action": (
@@ -152,8 +178,9 @@ class FakeNarrativeDirector:
                     "blocking": "창가에 선 채",
                     "lighting": "soft practical",
                     "duration_sec": 2.0,
-                    "dialogue_line": None,
+                    "dialogue_line": line,
                 })
+                shot_number += 1
             scenes.append({
                 "scene_order": scene_index + 1,
                 "location_name": location_name,

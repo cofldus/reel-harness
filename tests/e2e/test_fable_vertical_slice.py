@@ -60,12 +60,13 @@ def test_fable_vertical_slice_reaches_completed_final_film(session_factory, tmp_
         ),
     )
     assert daemon.run() == 0
-    assert daemon.shots_processed == 4
+    # One shot per 8 seconds of the project's requested runtime.
+    assert daemon.shots_processed == 8
     assert fable.get_project(project.id).status == "TAKE_REVIEW"
 
     # 3. Every shot has exactly one reviewable take; select each.
     shots = fable.project_shots(project.id)
-    assert [s.status for s in shots] == ["REVIEW_REQUIRED"] * 4
+    assert [s.status for s in shots] == ["REVIEW_REQUIRED"] * 8
     for shot in shots:
         takes = fable.shot_takes(shot.id)
         assert len(takes) == 1
@@ -98,7 +99,7 @@ def test_fable_vertical_slice_reaches_completed_final_film(session_factory, tmp_
     # artifact escaped the project's own storage tree.
     with session_factory() as session:
         takes = session.query(FableTake).filter(FableTake.selected.is_(True)).all()
-        assert len(takes) == 4
+        assert len(takes) == 8
         for take in takes:
             assert take.provider == "fake"
             assert take.checksum_sha256

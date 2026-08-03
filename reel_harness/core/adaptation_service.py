@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reel_harness.pipeline.adaptation_parser import AdaptationValidationError, parse_adaptation
+from reel_harness.pipeline.adaptation_parser import (
+    SHOT_SECONDS,
+    AdaptationValidationError,
+    parse_adaptation,
+)
 from reel_harness.pipeline.adaptation_schema import AdaptationModel
 from reel_harness.providers.base import AdaptationRequest, NarrativeDirector
 
@@ -53,6 +57,7 @@ def run_adaptation(
         try:
             adaptation = parse_adaptation(
                 result.raw_text, source_text=request.source_text, keep_ending=request.keep_ending,
+                target_shot_count=max(1, round(request.target_duration_sec / SHOT_SECONDS)),
             )
         except AdaptationValidationError as exc:
             if attempt >= max_repair_attempts:

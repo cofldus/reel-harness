@@ -169,12 +169,86 @@ def _fidelity_errors(adaptation: AdaptationModel, source_text: str, keep_ending:
     return errors
 
 
+# Reference-driven shots are a fixed length, so a target duration is a
+# target SHOT COUNT. Kept here rather than imported from the web layer:
+# this is a property of the generation pipeline, not of a form.
+SHOT_SECONDS = 8
+
+# Any of the quote marks Korean and English prose actually use.
+_SPOKEN_RE = re.compile(r'[“"‘「『][^”"’」』]{2,}')
+
+
+def _craft_errors(
+    adaptation: AdaptationModel, source_text: str, target_shot_count: int | None,
+) -> list[str]:
+    """Film-grammar rules, measured rather than assumed.
+
+    Nine real GPT-4o runs across three stories showed the adaptation is
+    faithful but cinematically flat: the one line of quoted speech in a
+    source was dropped entirely in some runs, shot counts ranged from
+    half to one-and-a-half times what was asked for, camera angle
+    collapsed to a single value in most runs, and 2 of 9 runs produced a
+    plan where the camera never moved at all.
+
+    None of that is caught by schema or fidelity checks -- the documents
+    were perfectly valid and perfectly faithful. These four rules turn
+    each measured failure into a repair-loop error, which is the one
+    mechanism that already exists for "the model can do better, ask
+    again".
+
+    Every rule is skipped for plans too short to have variety, so a
+    deliberate two-shot piece is never nagged about camera coverage.
+    """
+    errors: list[str] = []
+    shots = [shot for scene in adaptation.scenes for shot in scene.shots]
+    if not shots:
+        return errors
+
+    if target_shot_count:
+        # +/-1 rather than exact: the model needs room to end on a beat
+        # rather than mid-sentence, but half the requested runtime is a
+        # different film from the one that was ordered.
+        low, high = max(1, target_shot_count - 1), target_shot_count + 1
+        if not low <= len(shots) <= high:
+            errors.append(
+                f"the plan has {len(shots)} shots but the requested runtime needs "
+                f"{target_shot_count} (allowed {low}-{high}) -- add or merge shots to fit"
+            )
+
+    # Speech that exists in the source must survive into the film. The
+    # user is told to write dialogue in quotes; dropping it makes that
+    # instruction a lie.
+    if _SPOKEN_RE.search(source_text or ""):
+        spoken = sum(1 for shot in shots if (shot.dialogue_line or "").strip())
+        if spoken == 0:
+            errors.append(
+                "the source contains quoted speech but no shot carries a dialogue_line -- "
+                "assign each spoken line to the shot where it is said"
+            )
+
+    if len(shots) >= 3:
+        angles = {shot.camera_angle for shot in shots}
+        if len(angles) < 2:
+            errors.append(
+                f"every shot uses camera_angle {next(iter(angles))!r} -- vary the angle so the "
+                "sequence reads as coverage rather than one setup"
+            )
+        movements = {shot.camera_movement for shot in shots}
+        if movements == {"locked"}:
+            errors.append(
+                "every shot is locked off, so the camera never moves -- give at least one shot "
+                "a motivated move"
+            )
+    return errors
+
+
 def parse_adaptation(
     raw_text: str, *, source_text: str, keep_ending: bool = True,
+    target_shot_count: int | None = None,
 ) -> AdaptationModel:
-    """Extraction -> schema -> semantic -> fidelity, all errors collected
-    per layer (a layer only runs when the previous one passed, so the
-    repair feedback is always about the outermost real problem)."""
+    """Extraction -> schema -> semantic -> fidelity + craft, all errors
+    collected per layer (a layer only runs when the previous one passed,
+    so the repair feedback is always about the outermost real problem)."""
     data = _extract_json(raw_text)
     try:
         adaptation = AdaptationModel.model_validate(data)
@@ -187,6 +261,7 @@ def parse_adaptation(
 
     errors = _semantic_errors(adaptation)
     errors.extend(_fidelity_errors(adaptation, source_text, keep_ending))
+    errors.extend(_craft_errors(adaptation, source_text, target_shot_count))
     if errors:
         raise AdaptationValidationError(errors)
     return adaptation

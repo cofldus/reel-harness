@@ -85,6 +85,24 @@ SOURCE STORY:
 {source_text}
 """
 
+# Measured against nine real GPT-4o runs: faithful, but flat. Angle
+# collapsed to one value in most runs, 2 of 9 never moved the camera, the
+# one line of quoted speech in a source was dropped, and shot counts
+# ranged from half to one-and-a-half times what was asked. Asking up
+# front is cheaper than repairing after.
+CRAFT_RULES = """
+SHOOTING REQUIREMENTS -- these are checked, and a plan that misses them is sent back:
+- Produce approximately {shot_count} shots in total (one shot per {shot_seconds} seconds of
+  the requested runtime). Within one of that number is fine; half of it is not.
+- Every line of speech that appears in quotation marks in the source MUST survive as the
+  dialogue_line of the shot where it is spoken. Do not summarise it into an action.
+- Do not shoot the whole sequence from one camera_angle. Vary the angle so the scene reads
+  as coverage rather than a single setup.
+- Do not leave every shot locked off. At least one shot needs a motivated camera move, and
+  the move must come from the story beat rather than from decoration.
+"""
+
+
 REPAIR_USER_TEMPLATE = """Your previous response failed validation.
 
 Validation errors:
@@ -99,6 +117,9 @@ else identical. Respond with a single JSON object and nothing else.
 
 
 def build_user_prompt(request) -> str:
+    from reel_harness.pipeline.adaptation_parser import SHOT_SECONDS
+
+    shot_count = max(1, round(request.target_duration_sec / SHOT_SECONDS))
     return ADAPTATION_USER_TEMPLATE.format(
         language=request.language,
         genre=request.genre or "unspecified",
@@ -110,7 +131,7 @@ def build_user_prompt(request) -> str:
         dialogue_percent=int(request.dialogue_ratio * 100),
         keep_ending="yes" if request.keep_ending else "no",
         source_text=request.source_text,
-    )
+    ) + CRAFT_RULES.format(shot_count=shot_count, shot_seconds=SHOT_SECONDS)
 
 
 def build_repair_prompt(previous_raw: str, errors: list[str]) -> str:

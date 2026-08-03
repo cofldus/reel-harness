@@ -223,3 +223,127 @@ def test_error_class_is_stage_retryable_schema_invalid() -> None:
         assert exc.retryable is True
     else:  # pragma: no cover
         pytest.fail("expected SchemaValidationError")
+
+
+# -- craft rules ---------------------------------------------------------
+#
+# These four exist because nine real GPT-4o runs across three stories were
+# measured, not because they seemed like good ideas. Every one of them is
+# a defect that actually occurred: the single line of quoted speech in a
+# source dropped entirely, shot counts from half to one-and-a-half times
+# what was asked, camera angle collapsed to one value in most runs, and
+# 2 of 9 plans where the camera never moved at all. All produced
+# documents that were schema-valid and perfectly faithful, which is
+# exactly why a separate layer was needed.
+
+def _plan(shots: list[dict], source: str = "그는 창밖을 보았다.") -> tuple:
+    """A minimal valid document wrapping the given shots, plus its source."""
+    from reel_harness.pipeline.adaptation_schema import AdaptationModel
+
+    document = {
+        "logline": "한 인물이 밤의 방에서 결심에 이른다.",
+        "synopsis": "그는 창밖을 보았다.",
+        "story_bible": {
+            "premise": "밤의 방", "theme": "quiet tension", "setting": "실내",
+            "time_period": "현대", "visual_style": "soft practical",
+            "color_language": {"palette": "cool", "contrast": "low"},
+            "narrative_point_of_view": "third person",
+            "ending_summary": "그는 돌아선다.",
+            "prohibited_elements": ["real people", "explicit content", "minors"],
+        },
+        "characters": [{
+            "name": "지우", "role": "protagonist", "is_adult": True, "age_range": "30s",
+            "appearance": "oval face", "wardrobe": "grey coat", "hair": "short black",
+            "mannerisms": "slow", "voice_style": "low",
+            "fixed_identity": {"face": "oval face", "hair": "short black", "wardrobe": "grey coat"},
+        }],
+        "locations": [{
+            "name": "방", "description": "night room", "lighting": "practical",
+            "time_of_day": "night", "weather": "clear",
+        }],
+        "scenes": [{
+            "scene_order": 1, "location_name": "방", "story_purpose": "도입",
+            "emotional_beat": "불안", "source_beat": source, "dialogue": [],
+            "shots": shots,
+        }],
+    }
+    return AdaptationModel.model_validate(document), source
+
+
+def _shot(order: int, **overrides) -> dict:
+    base = {
+        "shot_order": order, "shot_size": "medium", "camera_angle": "eye_level",
+        "camera_movement": "locked", "lens_style": "50mm", "subject": "지우",
+        "action": f"동작 {order}", "expression": "불안", "blocking": "선 채",
+        "lighting": "practical", "duration_sec": 2.0, "dialogue_line": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_a_plan_that_ignores_the_requested_runtime_is_sent_back() -> None:
+    """The schema already bounds a plan to 4-15 shots, but that says
+    nothing about the runtime that was ASKED for: four shots is a valid
+    plan whether you ordered 32 seconds or 120. This ties the count to
+    the request."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    four = [_shot(1), _shot(2, camera_angle="low_angle", camera_movement="pan"),
+            _shot(3), _shot(4, camera_angle="high_angle")]
+    model, source = _plan(four)
+    errors = _craft_errors(model, source, target_shot_count=15)
+    assert any("4 shots" in e and "needs 15" in e for e in errors)
+
+    # Within one either way is room to end on a beat, not a defect.
+    assert not [e for e in _craft_errors(model, source, target_shot_count=5) if "shots" in e]
+
+
+def test_quoted_speech_in_the_source_must_survive_into_some_shot() -> None:
+    """The compose screen tells users to write dialogue in quotes; a
+    pipeline that discards it makes that instruction a lie."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    spoken_source = '그가 말했다. "이제 그만하자." 그리고 돌아섰다.'
+    shots = [_shot(1), _shot(2, camera_angle="low_angle", camera_movement="pan"),
+             _shot(3), _shot(4)]
+
+    model, _ = _plan(shots, source=spoken_source)
+    assert any("dialogue_line" in e for e in _craft_errors(model, spoken_source, None))
+
+    kept = [_shot(1, dialogue_line="이제 그만하자."),
+            _shot(2, camera_angle="low_angle", camera_movement="pan"), _shot(3), _shot(4)]
+    model, _ = _plan(kept, source=spoken_source)
+    assert not [e for e in _craft_errors(model, spoken_source, None) if "dialogue_line" in e]
+
+
+def test_a_sequence_shot_from_one_angle_is_sent_back() -> None:
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    model, source = _plan([_shot(1), _shot(2, camera_movement="pan"), _shot(3), _shot(4)])
+    assert any("camera_angle" in e for e in _craft_errors(model, source, None))
+
+
+def test_a_plan_where_the_camera_never_moves_is_sent_back() -> None:
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    model, source = _plan([
+        _shot(1), _shot(2, camera_angle="low_angle"),
+        _shot(3, camera_angle="high_angle"), _shot(4),
+    ])
+    assert any("locked" in e for e in _craft_errors(model, source, None))
+
+
+def test_a_plan_that_satisfies_every_craft_rule_passes_clean() -> None:
+    """The rules must be satisfiable together, not merely individually --
+    a set of checks no real plan can pass at once would just exhaust the
+    repair budget on every adaptation."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    spoken_source = '그가 말했다. "이제 그만하자." 그리고 돌아섰다.'
+    model, _ = _plan([
+        _shot(1, dialogue_line="이제 그만하자."),
+        _shot(2, camera_angle="low_angle", camera_movement="pan"),
+        _shot(3, camera_angle="high_angle", camera_movement="dolly_in"),
+        _shot(4),
+    ], source=spoken_source)
+    assert _craft_errors(model, spoken_source, target_shot_count=4) == []
