@@ -100,6 +100,58 @@ SHOOTING REQUIREMENTS -- these are checked, and a plan that misses them is sent 
   as coverage rather than a single setup.
 - Do not leave every shot locked off. At least one shot needs a motivated camera move, and
   the move must come from the story beat rather than from decoration.
+- A scene is a place and a continuous moment, not a single beat. If you write more than one
+  scene, each one must hold at least two shots. Do not split one location into a scene per
+  shot -- cutting between scenes tells the audience that time or place jumped.
+"""
+
+
+# A worked example, not just rules.
+#
+# Measured: the rules alone left the model repairing on 2 of 3 stories,
+# once using its full budget of two retries. A repair is another billed
+# call and another chance to fail outright, so the cheapest fix is to
+# show one finished answer rather than describe it three more times.
+#
+# Deliberately SHORT and deliberately not one of the sample stories, so
+# it teaches shape without supplying content to copy. It shows the four
+# things that were actually going wrong: one scene holding several shots
+# rather than a scene per beat, angle varying across the sequence, one
+# motivated camera move, and quoted speech landing on the shot where it
+# is spoken.
+WORKED_EXAMPLE = """
+EXAMPLE -- study the SHAPE, never reuse its content.
+
+Source: 늦은 오후, 민재는 편의점 앞 의자에 앉아 있었다. 그는 캔을 따다 말고 손을 멈췄다.
+길 건너에서 누군가 그의 이름을 불렀다. "민재야." 그는 캔을 내려놓고 천천히 일어섰다.
+
+A good plan for 4 shots:
+{
+  "scenes": [{
+    "scene_order": 1,
+    "location_name": "편의점 앞",
+    "story_purpose": "부름을 듣고 일어서기까지",
+    "source_beat": "그는 캔을 따다 말고 손을 멈췄다.",
+    "shots": [
+      {"shot_order": 1, "shot_size": "wide", "camera_angle": "eye_level",
+       "camera_movement": "locked", "subject": "민재",
+       "action": "편의점 앞 의자에 앉아 캔을 딴다", "dialogue_line": null},
+      {"shot_order": 2, "shot_size": "close_up", "camera_angle": "high_angle",
+       "camera_movement": "locked", "subject": "민재",
+       "action": "캔을 따던 손이 멈춘다", "dialogue_line": null},
+      {"shot_order": 3, "shot_size": "medium", "camera_angle": "three_quarter",
+       "camera_movement": "pan", "subject": "민재",
+       "action": "소리가 난 쪽으로 고개를 돌린다", "dialogue_line": "민재야."},
+      {"shot_order": 4, "shot_size": "medium_close_up", "camera_angle": "low_angle",
+       "camera_movement": "dolly_in", "subject": "민재",
+       "action": "캔을 내려놓고 천천히 일어선다", "dialogue_line": null}
+    ]
+  }]
+}
+
+Why this passes: four shots for the four requested, ONE scene holding all of them
+because the place and the moment never change, four different angles, one motivated
+move on the turn, and the spoken line placed on the shot where it is heard.
 """
 
 
@@ -131,7 +183,7 @@ def build_user_prompt(request) -> str:
         dialogue_percent=int(request.dialogue_ratio * 100),
         keep_ending="yes" if request.keep_ending else "no",
         source_text=request.source_text,
-    ) + CRAFT_RULES.format(shot_count=shot_count, shot_seconds=SHOT_SECONDS)
+    ) + CRAFT_RULES.format(shot_count=shot_count, shot_seconds=SHOT_SECONDS) + WORKED_EXAMPLE
 
 
 def build_repair_prompt(previous_raw: str, errors: list[str]) -> str:

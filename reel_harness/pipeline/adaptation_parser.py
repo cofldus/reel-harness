@@ -226,6 +226,20 @@ def _craft_errors(
                 "assign each spoken line to the shot where it is said"
             )
 
+    # A scene is a place and a continuous moment. Splitting one location
+    # into a scene per beat -- which a real run did, four times over
+    # inside the same bus -- tells the audience that time or place jumped
+    # when it did not. Only checked once there is more than one scene, so
+    # a single-scene piece is never asked to subdivide itself.
+    if len(adaptation.scenes) > 1:
+        thin = [scene.scene_order for scene in adaptation.scenes if len(scene.shots) < 2]
+        if thin:
+            errors.append(
+                f"scene(s) {thin} hold only one shot each -- a scene is a place and a "
+                "continuous moment, so either give each scene at least two shots or merge "
+                "them into one scene"
+            )
+
     if len(shots) >= 3:
         angles = {shot.camera_angle for shot in shots}
         if len(angles) < 2:

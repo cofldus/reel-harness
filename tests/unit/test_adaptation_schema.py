@@ -347,3 +347,33 @@ def test_a_plan_that_satisfies_every_craft_rule_passes_clean() -> None:
         _shot(4),
     ], source=spoken_source)
     assert _craft_errors(model, spoken_source, target_shot_count=4) == []
+
+
+def test_one_location_split_into_a_scene_per_beat_is_sent_back() -> None:
+    """A real run put four shots inside the same bus into four separate
+    scenes. Cutting between scenes tells the audience that time or place
+    jumped; here nothing had."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+    from reel_harness.pipeline.adaptation_schema import AdaptationModel
+
+    model, source = _plan([_shot(1), _shot(2, camera_angle="low_angle", camera_movement="pan"),
+                           _shot(3, camera_angle="high_angle"), _shot(4)])
+    # One scene holding all four shots is exactly right, and passes.
+    assert not [e for e in _craft_errors(model, source, None) if "one shot each" in e]
+
+    document = model.model_dump()
+    base = document["scenes"][0]
+    document["scenes"] = [
+        {**base, "scene_order": n + 1, "shots": [{**base["shots"][n], "shot_order": 1}]}
+        for n in range(4)
+    ]
+    split = AdaptationModel.model_validate(document)
+    assert any("one shot each" in e for e in _craft_errors(split, source, None))
+
+
+def test_a_single_scene_piece_is_never_asked_to_subdivide() -> None:
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    model, source = _plan([_shot(1), _shot(2, camera_angle="low_angle", camera_movement="pan"),
+                           _shot(3, camera_angle="high_angle"), _shot(4)])
+    assert not [e for e in _craft_errors(model, source, None) if "scene" in e]

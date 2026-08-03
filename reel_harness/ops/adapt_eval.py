@@ -226,7 +226,8 @@ def format_report(results: list[RunResult], *, show_plans: bool = False) -> str:
         ))
         repairs = result.outcome.attempts - 1 if result.outcome else 0
         lines.append(
-            f"  {result.story} run{result.run}: shots={m.shots:2d} sizes={m.size_kinds} "
+            f"  {result.story} run{result.run}: shots={m.shots:2d} scenes={m.scenes} "
+            f"sizes={m.size_kinds} "
             f"angles={m.angle_kinds} moves={m.move_kinds} top-move={m.move_top_share:.0%} "
             f"dup={m.duplicate_actions} dlg={m.dialogue_share:.0%} "
             f"quoted={m.beats_quoted:.0%} repairs={repairs}{flags}"
@@ -251,6 +252,7 @@ def format_report(results: list[RunResult], *, show_plans: bool = False) -> str:
             return statistics.fmean(pick(m) for m in metrics)
         lines.append(
             f"{title}: shots~{avg(lambda m: m.shots):.1f} "
+            f"scenes~{avg(lambda m: m.scenes):.1f} "
             f"sizes~{avg(lambda m: m.size_kinds):.1f} "
             f"angles~{avg(lambda m: m.angle_kinds):.1f} "
             f"moves~{avg(lambda m: m.move_kinds):.1f} "
