@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from reel_harness.pipeline.shot_prompt import (
+    _PROHIBITED_ARTIFACTS,
     COMPILER_VERSION,
     compile_shot_prompt,
     prompt_fingerprint,
@@ -122,7 +123,13 @@ def test_missing_optional_fields_do_not_produce_empty_slots() -> None:
     )
     assert ", ," not in prompt
     assert not prompt.startswith(",")
-    assert prompt.strip().endswith("no watermark")
+    assert not prompt.rstrip().endswith(",")
+    # The prohibitions are the last slot, so the prompt ending with them is
+    # what proves no empty slot trailed off the end. Asserted by membership
+    # rather than by pinning the exact sentence -- the prohibition list
+    # grows (no subtitles, no burned-in captions) and the property under
+    # test is "nothing empty at the end", not its current wording.
+    assert prompt.rstrip().endswith(_PROHIBITED_ARTIFACTS)
 
 
 def test_fingerprint_is_versioned() -> None:

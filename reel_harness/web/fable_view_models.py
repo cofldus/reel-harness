@@ -202,6 +202,12 @@ class FableCharacterView:
     # let a shot request a view that does not exist.
     can_approve: bool
     can_reject: bool
+    # Mirrors FableService.delete_character's real precondition: a
+    # character any shot still names cannot go, because the shots would
+    # then point at an actor that does not exist and generate with no
+    # fixed identity at all.
+    can_delete: bool = True
+    delete_blocked_reason: str | None = None
 
 
 @dataclass
@@ -220,6 +226,11 @@ class FableTakeView:
     # Mirrors FableService.select_take: only a DOWNLOADED take is
     # selectable, whatever the shot's own status happens to be.
     can_select: bool
+    # Selecting is a judgement, and judgements get revised. Only offered
+    # while the project is still at take review -- once the film is cut,
+    # un-choosing a shot already in it would make the render disagree
+    # with the project.
+    can_deselect: bool = False
 
 
 @dataclass
@@ -357,7 +368,9 @@ def _cover_fields(project, status: str, cover: tuple[str, str] | None) -> dict:
     }
 
 
-def build_character_view(character, project_id: str | None = None) -> FableCharacterView:
+def build_character_view(
+    character, project_id: str | None = None, used_by_shots: list[int] | None = None,
+) -> FableCharacterView:
     images = character.reference_images or {}
     view_images = [
         ReferenceViewImage(
@@ -384,6 +397,11 @@ def build_character_view(character, project_id: str | None = None) -> FableChara
         failure_summary=character.reference_failure_summary,
         cost_amount=character.reference_cost_amount,
         cost_currency=character.reference_cost_currency,
+        can_delete=not used_by_shots,
+        delete_blocked_reason=(
+            f"샷 {', '.join(str(n) for n in used_by_shots)}번이 사용 중입니다."
+            if used_by_shots else None
+        ),
         can_approve=complete and not character.reference_approved,
         # Rejecting is only meaningful once something exists to reject.
         can_reject=bool(images),
@@ -452,6 +470,7 @@ def build_shot_view(shot, takes, project_id: str | None = None) -> FableShotView
                 cost_amount=take.cost_amount,
                 cost_currency=take.cost_currency,
                 can_select=take.status == "DOWNLOADED" and not take.selected,
+                can_deselect=take.selected,
             )
             for take in takes
         ],
@@ -473,7 +492,16 @@ def build_fable_detail_view(project, characters, shots_with_takes, budget) -> Fa
     """`shots_with_takes` is a list of (shot, takes) pairs, loaded by the
     caller so this stays a pure function over detached objects."""
     status = project.status
-    character_views = [build_character_view(c, project.id) for c in characters]
+    # Which shots name each character, computed once here rather than per
+    # card, so the delete control states the real reason instead of just
+    # being absent.
+    subjects: dict[str, list[int]] = {}
+    for shot, _takes in shots_with_takes:
+        if shot.subject:
+            subjects.setdefault(shot.subject, []).append(shot.shot_order)
+    character_views = [
+        build_character_view(c, project.id, subjects.get(c.name)) for c in characters
+    ]
     pipeline = build_pipeline_steps(status)
     story = build_story_view(project.story_bible)
 

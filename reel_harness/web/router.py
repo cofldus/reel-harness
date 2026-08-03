@@ -24,7 +24,18 @@ from reel_harness.web.dependencies import (
     get_templates,
     require_csrf,
 )
-from reel_harness.web.fable_forms import validate_budget_form, validate_new_fable_form
+from reel_harness.web.fable_errors import (
+    KNOWN_FAILURE_CODES,
+    format_for_redirect,
+    present_error,
+)
+from reel_harness.web.fable_forms import (
+    BUDGET_CONFIRM_THRESHOLD,
+    BUDGET_PRESETS,
+    DEFAULT_BUDGET_PRESET,
+    validate_budget_form,
+    validate_new_fable_form,
+)
 from reel_harness.web.fable_view_models import (
     PROJECT_GROUPS,
     build_character_view,
@@ -1018,6 +1029,10 @@ def _fable_redirect(project_id: str, error: str | None = None) -> RedirectRespon
     return RedirectResponse(url=f"/fable/{project_id}{suffix}", status_code=303)
 
 
+def _refuse(project_id: str, code: str | None, message: str) -> RedirectResponse:
+    return _fable_redirect(project_id, error=format_for_redirect(code, message[:300]))
+
+
 def _run_fable_action(project_id: str, action, *args) -> RedirectResponse:
     """One error contract for every project action: a refusal comes back
     as a message on the page, not a traceback. Refusals here are normal
@@ -1028,10 +1043,25 @@ def _run_fable_action(project_id: str, action, *args) -> RedirectResponse:
     try:
         action(project_id, *args)
     except InvalidActionError as exc:
-        return _fable_redirect(project_id, error=str(exc)[:300])
+        # A service precondition. Its message is already written for a
+        # person, so it carries no code and becomes the body verbatim --
+        # except where the service re-raised a coded refusal, which
+        # present_error picks back up from the text.
+        return _refuse(project_id, _code_in(str(exc)), str(exc))
     except PipelineError as exc:
-        return _fable_redirect(project_id, error=f"{exc.code}: {str(exc)[:250]}")
+        return _refuse(project_id, exc.code, str(exc))
     return _fable_redirect(project_id)
+
+
+def _code_in(message: str) -> str | None:
+    """A coded refusal that the service wrapped in an InvalidActionError
+    keeps its code in the text (approve_shots does this so the CLI reads
+    the same). Recovering it here is what lets the page render the right
+    guidance instead of a generic box."""
+    for code in KNOWN_FAILURE_CODES:
+        if code in message:
+            return code
+    return None
 
 
 @router.get("/fable", response_class=HTMLResponse)
@@ -1196,7 +1226,11 @@ def fable_detail(
     ctx: AppContext = Depends(get_context),
 ) -> HTMLResponse:
     return _render(request, "fable_detail.html", {
-        **_fable_detail_context(ctx, project_id), "error": error,
+        **_fable_detail_context(ctx, project_id),
+        "error": present_error(error),
+        "budget_presets": BUDGET_PRESETS,
+        "default_budget_preset": DEFAULT_BUDGET_PRESET,
+        "budget_confirm_threshold": BUDGET_CONFIRM_THRESHOLD,
     })
 
 
@@ -1246,15 +1280,18 @@ def fable_approve(
 
 @router.post("/fable/{project_id}/budget", dependencies=[Depends(require_csrf)])
 def fable_set_budget(
-    project_id: str, limit_amount: str = Form(""), currency: str = Form(""),
-    clear: bool = Form(False), ctx: AppContext = Depends(get_context),
+    project_id: str, limit_amount: str = Form(""), currency: str = Form("USD"),
+    clear: bool = Form(False), confirm_large: bool = Form(False),
+    ctx: AppContext = Depends(get_context),
 ) -> RedirectResponse:
     _fable_or_404(ctx, project_id)
     if clear:
         return _run_fable_action(project_id, ctx.fable.set_budget, None, None)
-    result = validate_budget_form(limit_amount=limit_amount, currency=currency)
+    result = validate_budget_form(
+        limit_amount=limit_amount, currency=currency, confirm_large=confirm_large,
+    )
     if not result.ok or result.value is None:
-        return _fable_redirect(project_id, error="; ".join(result.errors.values()))
+        return _refuse(project_id, None, "; ".join(result.errors.values()))
     return _run_fable_action(
         project_id, ctx.fable.set_budget, result.value.limit_amount, result.value.currency,
     )
@@ -1277,6 +1314,24 @@ def fable_reference_decision(
     return _fable_redirect(project_id)
 
 
+@router.post("/fable/characters/{character_id}/delete", dependencies=[Depends(require_csrf)])
+def fable_delete_character(
+    character_id: str, project_id: str = Form(...),
+    ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    """Removes a character. Refused while any shot still names it -- the
+    service owns that rule; this route only reports it."""
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        ctx.fable.delete_character(character_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="character not found") from exc
+    except InvalidActionError as exc:
+        return _refuse(project_id, None, str(exc))
+    return _fable_redirect(project_id)
+
+
 @router.post("/fable/takes/{take_id}/select", dependencies=[Depends(require_csrf)])
 def fable_select_take(
     take_id: str, project_id: str = Form(...), ctx: AppContext = Depends(get_context),
@@ -1289,6 +1344,21 @@ def fable_select_take(
         raise HTTPException(status_code=404, detail="take not found") from exc
     except InvalidActionError as exc:
         return _fable_redirect(project_id, error=str(exc)[:300])
+    return _fable_redirect(project_id)
+
+
+@router.post("/fable/takes/{take_id}/deselect", dependencies=[Depends(require_csrf)])
+def fable_deselect_take(
+    take_id: str, project_id: str = Form(...), ctx: AppContext = Depends(get_context),
+) -> RedirectResponse:
+    from reel_harness.core.fable_service import FableProjectNotFoundError
+
+    try:
+        ctx.fable.deselect_take(take_id)
+    except FableProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="take not found") from exc
+    except InvalidActionError as exc:
+        return _refuse(project_id, None, str(exc))
     return _fable_redirect(project_id)
 
 

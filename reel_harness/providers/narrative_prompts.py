@@ -7,7 +7,7 @@ never silently treated as equivalent to what a new prompt would produce.
 Real vendor names never appear here; this is provider-neutral text."""
 from __future__ import annotations
 
-NARRATIVE_PROMPT_VERSION = "fable-adapt-v1"
+NARRATIVE_PROMPT_VERSION = "fable-adapt-v2"
 
 ADAPTATION_SYSTEM_PROMPT = """You are a film adaptation director. You turn a short story into a
 shootable shot plan for AI video generation.
@@ -78,7 +78,8 @@ Target total duration: about {target_duration_sec} seconds
 Aspect ratio: {aspect_ratio}
 Maximum characters: {max_characters}
 Maximum locations: {max_locations}
-Roughly {dialogue_percent}% of scenes may contain dialogue; the rest are visual/narration.
+Roughly {dialogue_percent}% of scenes should carry spoken dialogue. Prefer the source's own
+lines over invented ones, and prefer speaking them over narrating that they were spoken.
 Keep the original ending: {keep_ending}
 
 SOURCE STORY:
@@ -103,6 +104,16 @@ SHOOTING REQUIREMENTS -- these are checked, and a plan that misses them is sent 
 - A scene is a place and a continuous moment, not a single beat. If you write more than one
   scene, each one must hold at least two shots. Do not split one location into a scene per
   shot -- cutting between scenes tells the audience that time or place jumped.
+- The shots must form an ARC across the whole plan, not four views of one moment. The first
+  shot establishes the situation, the middle shots turn it, and the LAST shot must land the
+  source story's ending -- the thing that makes it a story rather than a scene. A plan whose
+  shots could be reordered without loss has not adapted the story, it has photographed it.
+- Cover the whole source, not one paragraph of it. Every scene needs a DIFFERENT
+  "source_beat", drawn from a different part of the text and in the order the text tells it.
+  Two scenes quoting the same sentence means the plan is standing still.
+- Give the audience the words. When the source contains spoken lines, put them in
+  "dialogue_line" rather than describing that someone spoke -- silent footage of a
+  conversation is the most common way an adaptation loses its story.
 """
 
 

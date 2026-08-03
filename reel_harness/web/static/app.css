@@ -1642,3 +1642,110 @@ details.advanced[open] > summary { border-bottom: 1px solid var(--border); }
   .shot-card { grid-template-columns: 1fr; }
   .shot-card .take-grid { order: 0; }
 }
+
+/* ---- Classified refusals -------------------------------------------
+   A refusal is a normal part of using this tool -- a gate not reached, a
+   budget exhausted -- so it reads as guidance rather than breakage. The
+   title says what happened, the body says what to do, and the exact
+   service message stays under a disclosure. */
+.alert-warn { border-color: var(--warn); background: var(--warn-soft); }
+.alert-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text);
+}
+.alert-body {
+  margin: var(--s2) 0 0;
+  color: var(--text-dim);
+}
+.alert-action { margin: var(--s3) 0 0; }
+.alert-detail { margin: var(--s3) 0 0; }
+.alert-detail > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.alert-detail p {
+  margin: var(--s2) 0 0;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Budget presets -------------------------------------------------
+   One click per ceiling, so setting a budget is a choice from real
+   options rather than a number invented on the spot. Still explicit:
+   nothing is applied until one is pressed. */
+.budget-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: 0 0 var(--s4);
+}
+.budget-presets .inline-form { margin: 0; }
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.checkbox input { margin: 0; }
+
+.btn-danger:not(:disabled) { color: var(--danger); }
+.btn-danger:not(:disabled):hover { border-color: var(--danger); }
+
+/* ---- Take preview: enlarging, and honest framing ---------------------
+   The grid thumbnails crop to fill their tile (object-fit: cover), which
+   is right for a contact sheet and wrong everywhere else -- the same rule
+   was still cropping in FULLSCREEN, so a 9:16 clip on a 16:9 monitor came
+   back filled and cut rather than letterboxed and whole. */
+.take-frame video:fullscreen,
+.take-frame video:-webkit-full-screen {
+  object-fit: contain;
+  background: #000;
+}
+.take-frame video { cursor: zoom-in; }
+
+/* Click-to-enlarge. A real <dialog>: Escape closes it, focus is trapped,
+   and it needs no framework. */
+#take-lightbox {
+  border: none;
+  background: transparent;
+  padding: 0;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+#take-lightbox::backdrop { background: rgba(0, 0, 0, 0.88); }
+.lightbox-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s3);
+}
+#take-lightbox video {
+  /* Whole frame, never cropped -- the point of enlarging is to judge the
+     shot, and a cropped judgement is worthless. */
+  object-fit: contain;
+  background: #000;
+  max-height: 86vh;
+  max-width: 96vw;
+  aspect-ratio: 9 / 16;
+  border-radius: var(--r-sm);
+}
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.take-selected-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}

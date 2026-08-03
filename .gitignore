@@ -14,3 +14,13 @@ fable_projects/
 shots/
 capture_ids.txt
 smoke_output/
+
+# Credential backups made when repairing a malformed .env -- these hold
+# real keys and must never be committed.
+.env.bak.*
+
+# Output from fable-reference-smoke and ad-hoc runs: generated media, and
+# in the smoke case images that cost money. Kept locally, never in git
+# (same rule as fable_projects/).
+smoke-out/
+story.txt

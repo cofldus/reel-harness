@@ -164,7 +164,13 @@ ALLOWED_SHOT_TRANSITIONS: dict[FableShotStatus, set[FableShotStatus]] = {
     },
     # Take selection resolves the review; rejection re-queues generation.
     FableShotStatus.REVIEW_REQUIRED: {FableShotStatus.SELECTED, FableShotStatus.READY},
-    FableShotStatus.SELECTED: set(),
+    # SELECTED -> REVIEW_REQUIRED is un-choosing a take. It used to be
+    # terminal, which was true only because nothing could undo a
+    # selection: choosing a take is a human JUDGEMENT, and judgements get
+    # revised. The service still refuses once the project has moved past
+    # take review, so a shot already cut into a rendered film cannot be
+    # quietly un-chosen underneath it.
+    FableShotStatus.SELECTED: {FableShotStatus.REVIEW_REQUIRED},
     FableShotStatus.REJECTED: {FableShotStatus.READY},  # un-reject: re-plan the shot
     FableShotStatus.FAILED: {FableShotStatus.READY},  # shot-level manual retry
 }

@@ -452,7 +452,10 @@ class AdaptationRequest:
     aspect_ratio: str
     max_characters: int = 2
     max_locations: int = 3
-    dialogue_ratio: float = 0.3
+    # Raised from 0.3: at 30% a four-shot plan routinely came back with a
+    # single spoken line or none, and silent footage of a conversation is
+    # the most common way an adaptation loses the story it adapted.
+    dialogue_ratio: float = 0.6
     keep_ending: bool = True
 
 

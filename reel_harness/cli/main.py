@@ -3269,6 +3269,8 @@ def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
         stop_on_error=args.stop_on_error,
         allow_paid_generation=settings.allow_paid_generation,
         takes_per_shot=settings.fable_takes_per_shot,
+        generation_timeout_seconds=settings.fable_generation_timeout_seconds,
+        generation_poll_interval_seconds=settings.fable_generation_poll_interval_seconds,
     )
     daemon = FableDaemon(
         ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,
