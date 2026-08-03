@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-03 (Fable F1-F6 complete, v0.5.0rc1 ready to tag, on branch
+Last updated: 2026-08-03 (Fable F1-F6 complete, UI v1 frozen, v0.5.0rc1 ready to tag, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
@@ -190,6 +190,58 @@ refusals over HTTP rather than assuming they carry over).
   browser E2E was NOT extended to Fable -- Playwright is not installed on
   this machine and those tests skip here, so adding a scenario that never
   runs would be a claim without a check behind it.
+
+## 이어서 시작할 때 (다음 세션용)
+
+브랜치 `phase6/fable-cinematic-engine`. **커밋은 전부 푸시되어 있고 로컬에만
+있는 작업은 없다.** 전체 스위트 1590 passed / 5 skipped, mypy는 win32와
+linux 양쪽 clean, ruff clean, 실제 Chromium E2E 포함 전부 green.
+
+### 바로 할 수 있는 일 (막힌 것 없음)
+
+1. **`v0.5.0rc1` 태그 + `main` 머지.** `reel-harness release-check`를 먼저
+   돌린다(8분 정도). 기존 태그 6개(v0.1.0 ~ v0.4.0rc1)는 절대 옮기거나
+   지우지 않는다. 지금 다는 건 일곱 번째 새 태그다.
+
+2. **완성작 1편을 실제 제공자로 만들어 보기 — 이것이 진짜 다음 마일스톤.**
+   지금까지 증명된 것은 "부품이 작동한다"까지다. 실제 제공자로 만든 영상은
+   API 확인용 8초 클립 **한 개**뿐이고, **이 파이프라인이 만든 완성된 영화를
+   아직 아무도 본 적이 없다.** 따라서 다음이 전부 미확인이다:
+   - 샷 4개에 걸쳐 같은 배우로 보이는가 (레퍼런스 방식이 실제로 통하는가)
+   - 컷을 이었을 때 영화처럼 흐르는가, 무관한 클립 4개인가
+   - 대사 줄이 실제 음성이 되는가, 최종 영상에 소리가 붙는가
+
+   비용: 각색 ~$0.03 + 레퍼런스 4장 ~$0.27 + Veo 8초x4샷 ~$3.2-4.8
+   = **약 $3.5-5**. 사용자의 명시적 승인 없이는 절대 실행하지 않는다.
+
+### 미결로 남긴 것
+
+- **Veo 단가.** 코드는 0.15/초, 구글 공식은 0.10. 첫 청구서(8초 클립 +
+  스틸 2장 = KRW 1,330 ≈ USD 0.93)는 0.10 쪽을 가리키지만 GCP 결제는
+  지연되므로 결론이 아니다. **Vertex AI SKU 항목의 수량 x 단가**를 봐야
+  끝난다. 그때까지 높은 값을 유지한다 — 낮게 잡으면 예산을 넘겨 쓰고,
+  높게 잡으면 게이트가 일찍 막힐 뿐이라 방향이 대칭이 아니다.
+- **대사 비중.** 대사가 여러 개인 원작에서도 살아남는지 미측정.
+  `reel-harness fable-adapt-eval --story <파일> --show-plans --yes`로 확인.
+
+### 배포 관련 (물어보면 답할 것)
+
+**공개 배포는 아직 안 된다.** 이 앱에는 로그인이 없다(`docs/OPERATIONS.md`가
+명시). 공개 URL에 올리면 누구나 사용자의 OpenAI/Veo 크레딧으로 생성을
+돌릴 수 있다. 인증은 6A-2로 계획만 되어 있고 코드가 없다. 선택지는
+(1) Cloudflare Access/Tailscale 등으로 접근 제한, (2) provider를 전부 fake로
+고정한 무비용 데모 공개, (3) 6A-2를 먼저 구현. 지금은 (1)이나 (2)를 권한다.
+
+### 이 프로젝트에서 지켜온 규칙
+
+- 스크린샷을 보기 전에는 UI 작업을 완료라고 부르지 않는다. 이번 페이즈의
+  실제 결함(자리표시자 붕괴, 한글 단어 중간 줄바꿈, CSP가 인라인 스타일을
+  버리던 문제, 페이크 클립에 구워진 레터박스)은 전부 눈으로 봐서 찾았다.
+- 데모/스크린샷 스크립트는 provider를 **전부** fake로 고정한다. 다섯 개만
+  고정하고 `narrative_provider`를 빠뜨려 실수로 유료 호출이 나간 적이 있다.
+- 유료 API 호출은 사용자가 명시적으로 승인할 때만.
+
+---
 
 ## Live verification (real credentials, real spend)
 
