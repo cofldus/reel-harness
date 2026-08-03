@@ -26,9 +26,11 @@ from reel_harness.web.dependencies import (
 )
 from reel_harness.web.fable_forms import validate_budget_form, validate_new_fable_form
 from reel_harness.web.fable_view_models import (
+    PROJECT_GROUPS,
     build_character_view,
     build_fable_detail_view,
     build_fable_summary_view,
+    build_next_action,
 )
 from reel_harness.web.forms import ALLOWED_LANGUAGES, ALLOWED_STYLES, validate_new_job_form
 from reel_harness.web.publication_forms import validate_create_publication_form
@@ -167,7 +169,16 @@ def _publisher_credentials_configured(provider: str, settings) -> tuple[bool, st
 def dashboard(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
     status_view = build_system_status_view(ctx)
     recent_jobs = [build_job_summary_view(j) for j in ctx.jobs.list_jobs(limit=5)]
-    return _render(request, "dashboard.html", {"status": status_view, "recent_jobs": recent_jobs})
+    # Fable is what this product is for, so the home page leads with work
+    # in progress rather than with queue counters.
+    recent = ctx.fable.list_projects()[:4]
+    covers = ctx.fable.project_cover_refs([p.id for p in recent])
+    recent_projects = [build_fable_summary_view(p, covers.get(p.id)) for p in recent]
+    return _render(request, "dashboard.html", {
+        "status": status_view,
+        "recent_jobs": recent_jobs,
+        "recent_projects": recent_projects,
+    })
 
 
 _FILTERABLE_STATUSES = (
@@ -204,6 +215,8 @@ def new_job_form(request: Request, ctx: AppContext = Depends(get_context)) -> HT
         "fake_visible": _fake_profile_visible(ctx.settings),
         "idempotency_key": str(uuid.uuid4()),
         "errors": {}, "values": {},
+        # Refinement proposal state -- absent on a normal GET.
+        "refinement": None, "refine_error": None, "refine_accepted": False,
     })
 
 
@@ -991,6 +1004,10 @@ def _fable_detail_context(ctx: AppContext, project_id: str) -> dict:
     return {
         "project": view, "has_video": has_video,
         "reusable_characters": reusable, "estimate": estimate,
+        # Resolved on the server so the page can state the next step
+        # outright instead of leaving the reader to find whichever of
+        # seven buttons happens to be live.
+        "next_action": build_next_action(view),
     }
 
 
@@ -1020,8 +1037,10 @@ def _run_fable_action(project_id: str, action, *args) -> RedirectResponse:
 @router.get("/fable", response_class=HTMLResponse)
 def fable_list(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
     projects = ctx.fable.list_projects()
+    covers = ctx.fable.project_cover_refs([p.id for p in projects])
     return _render(request, "fable_list.html", {
-        "projects": [build_fable_summary_view(p) for p in projects],
+        "projects": [build_fable_summary_view(p, covers.get(p.id)) for p in projects],
+        "groups": PROJECT_GROUPS,
     })
 
 
@@ -1033,6 +1052,7 @@ def _new_fable_context(ctx: AppContext, **overrides) -> dict:
         DURATION_CHOICES,
         GENRE_CHOICES,
         TONE_CHOICES,
+        WRITING_GUIDE,
     )
 
     context = {
@@ -1043,6 +1063,7 @@ def _new_fable_context(ctx: AppContext, **overrides) -> dict:
         "tone_choices": TONE_CHOICES,
         "duration_choices": DURATION_CHOICES,
         "default_duration": DEFAULT_DURATION_SEC,
+        "writing_guide": WRITING_GUIDE,
         "errors": {}, "values": {},
     }
     context.update(overrides)
@@ -1052,6 +1073,71 @@ def _new_fable_context(ctx: AppContext, **overrides) -> dict:
 @router.get("/fable/new", response_class=HTMLResponse)
 def new_fable_form(request: Request, ctx: AppContext = Depends(get_context)) -> HTMLResponse:
     return _render(request, "fable_new.html", _new_fable_context(ctx))
+
+
+@router.post("/fable/refine", response_class=HTMLResponse,
+             dependencies=[Depends(require_csrf)])
+def refine_fable_source(
+    request: Request,
+    title: str = Form(""), source_text: str = Form(""), language: str = Form("ko"),
+    aspect_ratio: str = Form("9:16"), takes_per_shot: int = Form(0),
+    genre: str = Form(""), tone: str = Form(""), target_duration_sec: int = Form(32),
+    idempotency_key: str = Form(""), proposal: str = Form(""), decision: str = Form("refine"),
+    ctx: AppContext = Depends(get_context),
+) -> HTMLResponse:
+    """Ask the director to rewrite the story, and show the result for
+    approval.
+
+    Deliberately a plain form POST that re-renders the page rather than a
+    fetch: the user has half a form filled in, and every field comes back
+    exactly as they left it. It also means the feature works with no
+    JavaScript at all.
+
+    The proposal is NEVER written into the story field by the server. It
+    is rendered beside the original and the user presses 'use this' --
+    their own writing is theirs, and a tool that silently replaces it has
+    overstepped.
+    """
+    values = {
+        "title": title, "source_text": source_text, "language": language,
+        "aspect_ratio": aspect_ratio, "takes_per_shot": takes_per_shot,
+        "genre": genre, "tone": tone, "target_duration_sec": target_duration_sec,
+    }
+
+    if decision == "accept" and proposal.strip():
+        values["source_text"] = proposal
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+            refine_accepted=True,
+        ))
+    if decision == "discard":
+        return _render(request, "fable_new.html", _new_fable_context(
+            ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+        ))
+
+    from reel_harness.core.errors import PaidGenerationNotAllowedError, PipelineError
+
+    refine_error = None
+    refinement = None
+    try:
+        refinement = ctx.fable.refine_source_text(
+            source_text, language=language, genre=genre or None, tone=tone or None,
+        )
+    except InvalidActionError:
+        refine_error = "보정할 이야기를 먼저 입력하세요."
+    except PaidGenerationNotAllowedError:
+        refine_error = (
+            "보정은 유료 LLM 호출입니다. 설정에서 유료 생성을 허용해야 사용할 수 있습니다."
+        )
+    except (PipelineError, ValueError) as exc:
+        # Not retried: this is one optional convenience, and a second
+        # opinion nobody asked for would just cost money again.
+        refine_error = f"보정에 실패했습니다. 원문은 그대로 두었습니다. ({type(exc).__name__})"
+
+    return _render(request, "fable_new.html", _new_fable_context(
+        ctx, idempotency_key=idempotency_key or str(uuid.uuid4()), values=values,
+        refinement=refinement, refine_error=refine_error,
+    ))
 
 
 # response_model=None because the return type is a Union of two Starlette

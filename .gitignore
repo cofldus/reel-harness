@@ -12,4 +12,5 @@ fable_projects/
 # Local scratch: screenshots and smoke output are inspected by hand and
 # regenerated on demand, never reviewed as source.
 shots/
+capture_ids.txt
 smoke_output/

@@ -55,7 +55,11 @@ from reel_harness.pipeline.reference_prompt import (
     compile_reference_prompt,
     reference_fingerprint,
 )
-from reel_harness.providers.base import AdaptationRequest, ReferenceImageRequest
+from reel_harness.providers.base import (
+    AdaptationRequest,
+    ReferenceImageRequest,
+    RefinementResult,
+)
 from reel_harness.storage.base import StorageBackend
 
 
@@ -174,6 +178,58 @@ class FableService:
                 session.expunge(project)
             return projects
 
+    def project_cover_refs(self, project_ids: list[str]) -> dict[str, tuple[str, str]]:
+        """Best available poster frame per project, as {id: (kind, ref)}.
+
+        A project card with no image is a card you cannot recognise at a
+        glance, and the pipeline produces something showable long before
+        the film exists: a character's reference still appears at casting,
+        a candidate clip at take review. This picks the most
+        representative artefact each project actually has.
+
+        `kind` is "take" (a video, whose first frame the browser draws) or
+        "character" (a still). A project with neither is simply absent
+        from the mapping and the card falls back to a slate.
+
+        Batched deliberately: one query for takes and one for characters
+        across ALL projects, because the obvious per-project version turns
+        a list page into an N+1.
+        """
+        if not project_ids:
+            return {}
+        covers: dict[str, tuple[str, str]] = {}
+        with self._session_factory() as session:
+            # Characters first, so a selected take overwrites them below --
+            # a moving frame from the actual film beats a face sheet.
+            characters = session.execute(
+                select(FableCharacter)
+                .where(FableCharacter.project_id.in_(project_ids))
+                .order_by(FableCharacter.created_at)
+            ).scalars()
+            for character in characters:
+                images = character.reference_images or {}
+                if not images or character.project_id in covers:
+                    continue
+                covers[character.project_id] = ("character", character.id)
+
+            selected = session.execute(
+                select(FableScene.project_id, FableTake.id)
+                .join(FableShot, FableShot.scene_id == FableScene.id)
+                .join(FableTake, FableTake.shot_id == FableShot.id)
+                .where(
+                    FableScene.project_id.in_(project_ids),
+                    FableTake.selected.is_(True),
+                    FableTake.media_path.is_not(None),
+                )
+                .order_by(FableScene.scene_order, FableShot.shot_order)
+            ).all()
+            for project_id, take_id in selected:
+                covers.setdefault(f"__take__{project_id}", ("take", take_id))
+        # Fold the take entries over the character ones.
+        for key in [k for k in covers if k.startswith("__take__")]:
+            covers[key[len("__take__"):]] = covers.pop(key)
+        return covers
+
     def project_shots(self, project_id: str) -> list[FableShot]:
         with self._session_factory() as session:
             shots = self._shots_for_project(session, project_id)
@@ -283,6 +339,37 @@ class FableService:
             str(project.target_duration_sec), project.aspect_ratio, NARRATIVE_PROMPT_VERSION,
         ]
         return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:32]
+
+    def refine_source_text(
+        self, source_text: str, *, language: str = "ko",
+        genre: str | None = None, tone: str | None = None, director=None,
+    ) -> RefinementResult:
+        """Rewrite a user's story so the pipeline can shoot it.
+
+        Stateless on purpose: this runs BEFORE a project exists, takes no
+        project_id, and writes nothing. The result is a PROPOSAL shown to
+        the user for approval -- their own writing is never overwritten by
+        this call, only by their explicit acceptance of what it returned.
+
+        Paid, and gated like every other paid call: `allow_paid_generation`
+        must be on, because this is a real LLM request even though it
+        produces no video. Refusing loudly is right -- a convenience button
+        that silently spends money is exactly the thing that switch exists
+        to prevent.
+        """
+        from reel_harness.providers.base import RefinementRequest
+
+        text = (source_text or "").strip()
+        if not text:
+            raise InvalidActionError("refine requires source text")
+        if not self._allow_paid_generation:
+            raise PaidGenerationNotAllowedError(
+                "source refinement is a paid LLM call; enable allow_paid_generation to use it",
+            )
+        resolved = director if director is not None else self._narrative_director_resolver(None)
+        return resolved.refine_source(
+            RefinementRequest(source_text=text, language=language, genre=genre, tone=tone),
+        )
 
     def adapt_project(self, project_id: str, director=None) -> StoryProject:
         """DRAFT -> ADAPTING -> STORY_REVIEW via the real Narrative

@@ -465,6 +465,44 @@ class AdaptationResult:
     usage: dict | None = None
 
 
+@dataclass
+class RefinementRequest:
+    """One source-text refinement (Fable F6).
+
+    Adaptation quality is bounded by the source text, and the qualities
+    that matter -- filmable action, a described face, real quoted speech,
+    a stated light source -- are craft knowledge a first-time writer has
+    no reason to have. This asks the director to supply them.
+
+    `genre`/`tone` are carried so the rewrite matches the film the user
+    has already said they want; the same hint discipline as
+    AdaptationRequest applies (a prompt hint, never a constraint).
+    """
+
+    source_text: str
+    language: str
+    genre: str | None = None
+    tone: str | None = None
+
+
+@dataclass
+class RefinementResult:
+    """The rewritten source plus provenance.
+
+    `notes` is what the model says it changed, shown to the user beside
+    the diff. It is explanatory only -- nothing downstream parses it, so a
+    provider that returns an empty list is degraded, not broken.
+    """
+
+    refined_text: str
+    notes: list[str]
+    provider_id: str
+    model_id: str
+    prompt_version: str
+    request_id: str | None = None
+    usage: dict | None = None
+
+
 class NarrativeDirector(Protocol):
     """Film-adaptation LLM contract (Fable F2). Separate from LLMProvider
     because the short-form script call's shapes (topic/ChannelContext ->
@@ -474,7 +512,13 @@ class NarrativeDirector(Protocol):
     `repair_adaptation` is the bounded repair loop's re-ask: the previous
     raw output plus the validation errors it produced, asking for a
     corrected complete JSON. Adapters that cannot meaningfully repair
-    (e.g. the deterministic fake in its happy mode) may simply re-run."""
+    (e.g. the deterministic fake in its happy mode) may simply re-run.
+
+    `refine_source` rewrites the user's own prose before adaptation. It is
+    a separate call rather than a mode of adapt_story because its output
+    is shown to a person for approval, never fed onward automatically --
+    the user's writing is theirs, and a tool that silently replaces it has
+    overstepped."""
 
     provider_id: str
 
@@ -483,6 +527,8 @@ class NarrativeDirector(Protocol):
     def repair_adaptation(
         self, request: AdaptationRequest, previous_raw: str, errors: list[str],
     ) -> AdaptationResult: ...
+
+    def refine_source(self, request: RefinementRequest) -> RefinementResult: ...
 
 
 class LLMProvider(Protocol):

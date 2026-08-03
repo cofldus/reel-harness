@@ -530,12 +530,12 @@ def test_reusable_actors_are_offered_only_at_the_casting_gate(client) -> None:
     target = _create(ctx, key="reuse-target")
     ctx.fable.adapt_project(target.id)
     # STORY_REVIEW: not casting yet, so nothing is offered.
-    assert "기존 배우 다시 쓰기" not in http.get(f"/fable/{target.id}").text
+    assert "배우 다시 쓰기" not in http.get(f"/fable/{target.id}").text
 
     ctx.fable.approve_story(target.id)  # -> CASTING
     page = http.get(f"/fable/{target.id}").text
-    assert "기존 배우 다시 쓰기" in page
-    assert "이 배우로 캐스팅" in page
+    assert "배우 다시 쓰기" in page
+    assert "이 배우로" in page
 
 
 def test_casting_an_existing_actor_through_the_form(client) -> None:
@@ -644,7 +644,7 @@ def test_a_project_with_no_budget_says_generation_is_locked(client) -> None:
     ctx.fable.adapt_project(project.id)
     ctx.fable.approve_story(project.id)
     page = http.get(f"/fable/{project.id}").text
-    assert "예산 한도가 없으면" in page
+    assert "예산 한도를 설정하기 전에는" in page
 
 
 def test_the_pipeline_shows_where_the_project_is(client) -> None:
@@ -681,4 +681,111 @@ def test_an_empty_casting_section_explains_itself(client) -> None:
     project = _create(ctx, key="empty-cast")
     page = http.get(f"/fable/{project.id}").text
     assert "캐스팅" in page
-    assert "각색을 먼저 실행하면" in page
+    assert "각색을 실행하면" in page
+
+
+# -- source refinement ---------------------------------------------------
+
+def _refine_client(monkeypatch, tmp_path, *, allow_paid: bool):
+    from reel_harness.bootstrap import AppContext
+    from reel_harness.config import Settings
+
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'refine.db').as_posix()}",
+        jobs_dir=tmp_path / "jobs",
+        fable_projects_dir=tmp_path / "fable_projects",
+        credential_dir=tmp_path / "secrets",
+        narrative_provider="fake",
+        allow_paid_generation=allow_paid,
+    )
+    ctx = AppContext(settings)
+    monkeypatch.setattr(api_app, "_ctx", ctx)
+    return TestClient(api_app.app), ctx
+
+
+def _post_refine(http, **fields):
+    http.get("/fable/new")
+    token = http.cookies.get(CSRF_COOKIE_NAME)
+    return http.post("/fable/refine", data={"csrf_token": token, **fields})
+
+
+def test_refine_proposes_without_touching_what_the_user_wrote(monkeypatch, tmp_path) -> None:
+    """The whole safety property of this feature: a proposal is shown, and
+    the story field still holds the user's own words until they accept."""
+    http, _ctx = _refine_client(monkeypatch, tmp_path, allow_paid=True)
+    mine = "그는 오래 후회했다. 그리고 아무 말도 하지 않았다."
+    page = _post_refine(http, source_text=mine, title="t", decision="refine").text
+
+    assert "AI 보정 제안" in page
+    # The textarea still contains the original, verbatim.
+    assert mine in page.split("<textarea", 1)[1].split("</textarea>", 1)[0]
+
+
+def test_refine_is_refused_when_paid_generation_is_off(monkeypatch, tmp_path) -> None:
+    """It is a real LLM call, so it obeys the same money switch as every
+    other paid call rather than being waved through as a convenience."""
+    http, _ctx = _refine_client(monkeypatch, tmp_path, allow_paid=False)
+    page = _post_refine(http, source_text="짧은 이야기입니다.", decision="refine").text
+    assert "유료" in page and "AI 보정 제안" not in page
+
+
+def test_accepting_a_proposal_puts_it_in_the_story_field(monkeypatch, tmp_path) -> None:
+    http, _ctx = _refine_client(monkeypatch, tmp_path, allow_paid=True)
+    page = _post_refine(
+        http, source_text="원래 글", proposal="보정된 글입니다", decision="accept",
+    ).text
+    assert "보정된 글입니다" in page.split("<textarea", 1)[1].split("</textarea>", 1)[0]
+
+
+def test_discarding_a_proposal_keeps_the_original(monkeypatch, tmp_path) -> None:
+    http, _ctx = _refine_client(monkeypatch, tmp_path, allow_paid=True)
+    page = _post_refine(
+        http, source_text="원래 글", proposal="보정된 글입니다", decision="discard",
+    ).text
+    body = page.split("<textarea", 1)[1].split("</textarea>", 1)[0]
+    assert "원래 글" in body and "보정된 글입니다" not in body
+
+
+def test_refine_keeps_the_rest_of_the_form(monkeypatch, tmp_path) -> None:
+    """A half-filled form that loses its other fields on a helper action is
+    worse than no helper at all."""
+    http, _ctx = _refine_client(monkeypatch, tmp_path, allow_paid=True)
+    page = _post_refine(
+        http, source_text="이야기", title="마지막 승객", genre="mystery",
+        target_duration_sec=48, decision="refine",
+    ).text
+    assert 'value="마지막 승객"' in page
+    assert '<option value="mystery" selected' in page or "mystery\" selected" in page
+
+
+def test_no_template_uses_an_inline_style_attribute() -> None:
+    """The app sends `style-src 'self'` with no 'unsafe-inline', so a
+    style="" attribute is silently dropped by the browser.
+
+    This is not theoretical: the project progress bars and the budget
+    meter were written with inline widths and had never rendered their
+    value at all -- a spending indicator that always read empty. The CSP
+    is right, so the rule is that presentation lives in the stylesheet.
+    """
+    import pathlib
+
+    templates = pathlib.Path("reel_harness/web/templates")
+    offenders = [
+        f"{path.relative_to(templates)}:{number}"
+        for path in templates.rglob("*.html")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if 'style="' in line
+    ]
+    assert not offenders, f"inline styles are dead under this CSP: {offenders}"
+
+
+def test_the_csp_still_forbids_inline_styles() -> None:
+    """Guards the assumption the test above rests on. If someone ever adds
+    'unsafe-inline' this should be a deliberate, visible decision."""
+    from fastapi.testclient import TestClient
+
+    from reel_harness.api.app import app
+
+    policy = TestClient(app).get("/fable").headers["content-security-policy"]
+    assert "style-src 'self'" in policy
+    assert "unsafe-inline" not in policy

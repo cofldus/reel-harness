@@ -71,6 +71,74 @@ DURATION_CHOICES = (
 )
 ALLOWED_DURATIONS = frozenset(value for value, _label in DURATION_CHOICES)
 DEFAULT_DURATION_SEC = 32
+
+
+@dataclass(frozen=True)
+class WritingGuideItem:
+    """One thing that measurably changes what the pipeline can produce.
+
+    `key` is matched by the browser's live checklist (see app.js); the
+    rest is copy. Server-side rather than hardcoded in the template so the
+    same list can be asserted in tests and reused if a CLI or API ever
+    wants to explain the same thing.
+    """
+
+    key: str
+    label: str
+    why: str
+    bad: str
+    good: str
+
+
+# Adaptation quality is bounded by the source text, and the things that
+# matter are not guessable from the outside: a character's clothes are
+# what the reference image is built from, summarised speech yields no
+# dialogue line, and an inner state no camera can see yields no shot. A
+# first-time writer has no way to know any of that, so the form says it --
+# each item paired with the pipeline consequence, and with an example,
+# because a contrast pair teaches faster than a rule.
+WRITING_GUIDE: tuple[WritingGuideItem, ...] = (
+    WritingGuideItem(
+        key="character",
+        label="인물을 눈에 보이게",
+        why="배우 레퍼런스 이미지가 이 묘사로 만들어집니다. 나이·머리·옷차림처럼 "
+            "카메라에 실제로 찍히는 것을 쓰세요.",
+        bad="지우는 지쳐 있었다.",
+        good="서른쯤의 지우는 젖은 트렌치코트 차림에 머리를 하나로 묶고 있었다.",
+    ),
+    WritingGuideItem(
+        key="place",
+        label="장소와 빛",
+        why="영상의 톤과 조명이 여기서 정해집니다. 시간대와 광원을 한 줄만 적어도 "
+            "모든 샷의 분위기가 달라집니다.",
+        bad="호텔에서 그녀는 기다렸다.",
+        good="새벽 세 시 호텔 방, 네온 간판이 창으로 붉게 들어온다.",
+    ),
+    WritingGuideItem(
+        key="dialogue",
+        label="대사는 따옴표 안에 그대로",
+        why="따옴표 안의 말이 그대로 샷의 대사가 됩니다. 요약해서 쓰면 그 대사는 "
+            "영상에서 사라집니다.",
+        bad="그녀는 가겠다고 말했다.",
+        good="“나 갈게.” 그녀가 문고리를 잡은 채 말했다.",
+    ),
+    WritingGuideItem(
+        key="action",
+        label="동작은 찍을 수 있는 것으로",
+        why="카메라가 담을 수 없는 마음속 상태는 샷이 되지 못합니다. 몸으로 드러나는 "
+            "행동으로 바꿔 쓰세요.",
+        bad="그는 지난 일을 오래 후회했다.",
+        good="그는 사진을 반으로 접어 주머니에 밀어 넣었다.",
+    ),
+    WritingGuideItem(
+        key="turn",
+        label="무언가 바뀌는 순간",
+        why="시작과 끝이 같으면 샷이 나열만 되고 이야기가 되지 않습니다. 결정·발견·"
+            "포기 같은 전환점이 하나는 있어야 합니다.",
+        bad="그녀는 계속 비를 바라보았다.",
+        good="한참 뒤, 그녀는 창을 닫고 가방을 집어 들었다.",
+    ),
+)
 # ISO-4217-shaped: three letters. Not validated against a real currency
 # table -- the fake tier bills in "FAKE", and inventing a whitelist would
 # reject a legitimate provider's currency for no benefit.

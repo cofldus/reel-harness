@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-01 (Fable F1-F5 complete, v0.5.0rc1 ready to tag, on branch
+Last updated: 2026-08-03 (Fable F1-F6 complete, v0.5.0rc1 ready to tag, on branch
 `phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
 The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
@@ -60,6 +60,63 @@ In priority order:
    session that built this, because tagging a release whose two real
    adapters have never made a single live call would be stamping a
    version on something nobody has watched work.
+
+## Fable F6 — product design pass and source refinement
+
+The engine worked end to end after F5, but the interface it worked behind
+was still the operations console the short-form pipeline had grown: every
+section a card of equal weight, the paid-generation controls in a sidebar
+that outshouted the work, and no answer anywhere to "what do I do next".
+F6 is a design phase, plus the one feature that pass made obvious.
+
+**Brand.** Fable Studio — "Cinematic Story-to-Video Studio". The header
+brand is a template block, so Fable owns its identity inside its own
+section while the job queue and publish log keep the console's.
+
+**Design system** (`web/static/app.css`, rewritten). One spacing ramp, one
+radius set, one weight ramp. Ink-charcoal ground with a champagne-gold
+accent reserved for exactly three meanings (primary action, current step,
+selected); a cinema violet used ONLY to mark machine-authored content, so
+"the AI wrote this" is legible at a glance without a second brand colour.
+Type is SUITE for the wordmark and headings, SUIT for everything else,
+both self-hosted (see `static/fonts/NOTICE.md`) because a CDN font breaks
+offline use and leaks usage. `word-break: keep-all` is load-bearing:
+without it Korean splits mid-word.
+
+**Information architecture.** The detail page now resolves the next action
+on the SERVER (`build_next_action`) and states it once, at the top, with
+its cost on the button that spends it. Everything below is reference
+material, styled quieter. The budget dropped from a sidebar column to a
+collapsible bar. On phones the primary action also rides in a sticky
+footer above a four-item tab bar.
+
+**Source refinement** (F6's one new capability). Adaptation quality is
+bounded by the source text, and what matters is craft knowledge a
+first-time writer has no reason to have — a character's clothes become
+the reference image, summarised speech yields no dialogue line, an inner
+state no camera can see yields no shot. Two answers ship: a live
+checklist beside the box (keyword heuristics, advisory, never gating),
+and `NarrativeDirector.refine_source` — a paid LLM rewrite that is shown
+as a PROPOSAL beside the original and never replaces the user's own words
+without an explicit press. Gated by `allow_paid_generation` like every
+other paid call, and not retried: it is one optional convenience, and a
+second opinion nobody asked for still costs money.
+
+**A real bug this phase found.** The app sends `style-src 'self'` with no
+`'unsafe-inline'`, so every `style=""` attribute in every template was
+being silently dropped by the browser — the project progress bars and the
+budget meter had never once rendered their value. The CSP is correct, so
+the markup was fixed: presentation moved into the stylesheet, per-element
+fill expressed as `.fill-N` classes at 5% steps, and two tests now guard
+both halves (no template may carry an inline style; the CSP must keep
+forbidding them).
+
+**Screenshot verification.** Every screen is captured in both schemes plus
+mobile before being called done — the placeholder-collapse, the Korean
+word-break and the CSP bug were all found by looking, not by reading the
+source.
+
+---
 
 ## Fable F5 — Veo adapter, film editor, and the v0.5.0rc1 release
 

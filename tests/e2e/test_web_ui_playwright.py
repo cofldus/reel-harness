@@ -112,9 +112,12 @@ def test_full_demo_job_flow_in_a_real_browser(tmp_path) -> None:
             browser = p.chromium.launch()
             page = browser.new_page()
             try:
-                # 1. Dashboard loads.
+                # 1. Dashboard loads, and offers the short-form queue.
+                #    The home page now leads with Fable, so the job
+                #    pipeline is reached through the nav rather than from
+                #    a hero button.
                 page.goto(base_url + "/")
-                assert page.get_by_text("새 영상 만들기").first.is_visible()
+                assert page.get_by_role("link", name="숏폼 작업").first.is_visible()
 
                 # 2. Create a real Demo job via the form.
                 page.goto(base_url + "/jobs/new")

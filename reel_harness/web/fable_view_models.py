@@ -81,6 +81,27 @@ def shot_status_label(status: str) -> str:
     return SHOT_STATUS_LABELS.get(status, status)
 
 
+# Which shelf a project sits on in the list. The list was one flat table
+# sorted by time, so "the two projects waiting on me" were mixed in with
+# forty finished ones and there was no way to see them as a set.
+PROJECT_GROUPS: tuple[tuple[str, str], ...] = (
+    ("action", "확인 필요"),
+    ("working", "진행 중"),
+    ("done", "완성됨"),
+    ("stopped", "중단됨"),
+)
+
+
+def project_group(status: str) -> str:
+    if status == FableProjectStatus.COMPLETED.value:
+        return "done"
+    if status in (FableProjectStatus.FAILED.value, FableProjectStatus.CANCELLED.value):
+        return "stopped"
+    if status in PROJECT_NEEDS_ACTION_STATUSES:
+        return "action"
+    return "working"
+
+
 @dataclass
 class FableProjectSummaryView:
     project_id: str
@@ -91,6 +112,16 @@ class FableProjectSummaryView:
     needs_action: bool
     is_terminal: bool
     detail_url: str
+    # Which segment tab this project belongs under.
+    group: str = "working"
+    # How far along the seven gates, as a 0-100 integer -- a card needs a
+    # sense of progress that a status word alone does not carry.
+    progress: int = 0
+    # Poster frame for the card, and how to render it. "video" draws its
+    # own first frame from a metadata-only fetch; "image" is a character
+    # still; None falls back to a slate.
+    cover_url: str | None = None
+    cover_kind: str | None = None
 
 
 # The seven gates a project walks, in order, with the working states that
@@ -273,17 +304,57 @@ class FableProjectDetailView:
     characters_blocked_reason: str | None
 
 
-def build_fable_summary_view(project) -> FableProjectSummaryView:
+def build_fable_summary_view(project, cover: tuple[str, str] | None = None) -> FableProjectSummaryView:
+    """`cover` is (kind, ref) from FableService.project_cover_refs -- passed
+    in rather than looked up here so the list page stays one batched query
+    instead of an N+1."""
+    status = project.status
+    steps = build_pipeline_steps(status)
+    done = sum(1 for step in steps if step.state == "done")
     return FableProjectSummaryView(
         project_id=project.id,
         title=project.title,
-        status=project.status,
-        status_label=project_status_label(project.status),
+        status=status,
+        status_label=project_status_label(status),
         elapsed=format_elapsed_since(project.created_at),
-        needs_action=project.status in PROJECT_NEEDS_ACTION_STATUSES,
-        is_terminal=project.status in _TERMINAL_VALUES,
+        needs_action=status in PROJECT_NEEDS_ACTION_STATUSES,
+        is_terminal=status in _TERMINAL_VALUES,
         detail_url=f"/fable/{project.id}",
+        group=project_group(status),
+        progress=round(done * 100 / len(steps)),
+        **_cover_fields(project, status, cover),
     )
+
+
+# A <video preload="metadata"> paints nothing until it is seeked, so a
+# cover rendered straight from the file shows solid black. This media
+# fragment lands just inside the clip, which makes the browser decode and
+# paint a real frame -- the poster we want without storing a poster.
+_POSTER_SEEK = "#t=0.1"
+
+
+def _cover_fields(project, status: str, cover: tuple[str, str] | None) -> dict:
+    """Best available image, in order of how representative it is.
+
+    A finished film is its own cover; failing that a chosen candidate
+    clip; failing that a character's reference still. Each is an artefact
+    that already exists on disk, so a card costs no extra stored
+    thumbnail.
+    """
+    if status == FableProjectStatus.COMPLETED.value:
+        return {"cover_url": f"/fable/{project.id}/video{_POSTER_SEEK}", "cover_kind": "video"}
+    if cover is None:
+        return {"cover_url": None, "cover_kind": None}
+    kind, ref = cover
+    if kind == "take":
+        return {
+            "cover_url": f"/fable/{project.id}/takes/{ref}/video{_POSTER_SEEK}",
+            "cover_kind": "video",
+        }
+    return {
+        "cover_url": f"/fable/{project.id}/characters/{ref}/reference/face",
+        "cover_kind": "image",
+    }
 
 
 def build_character_view(character, project_id: str | None = None) -> FableCharacterView:
@@ -451,6 +522,144 @@ def build_fable_detail_view(project, characters, shots_with_takes, budget) -> Fa
         # non-terminal status allows -- see ALLOWED_PROJECT_TRANSITIONS.
         can_cancel=status not in _TERMINAL_VALUES,
         characters_blocked_reason=blocked_reason,
+    )
+
+
+@dataclass
+class NextActionView:
+    """The one thing to do next, resolved on the server rather than left
+    for the reader to infer.
+
+    The detail page used to scatter seven possible buttons across seven
+    sections and let you hunt for whichever one was live. Every gate
+    looked equally important, and the two that spend money sat in a
+    sidebar that read as chrome. So the page now answers the question
+    directly, once, at the top: what is this waiting on, what happens if
+    you press the button, and what does pressing it cost.
+
+    `tone` drives the visual treatment: `waiting` is on you, `working` is
+    on the machine, `blocked` needs a fix first, `done` is finished.
+    """
+
+    title: str
+    body: str
+    tone: str
+    # None when the project is working, finished, or blocked -- in those
+    # states there is deliberately nothing to press.
+    label: str | None = None
+    action: str | None = None
+    # Value for the /approve route's `step` field, when that is the route.
+    step: str | None = None
+    # Drives the cost chip. The two paid gates must never look like the
+    # five free ones.
+    costs_money: bool = False
+
+
+def build_next_action(view: FableProjectDetailView) -> NextActionView:
+    project_id = view.project_id
+    if view.can_adapt:
+        return NextActionView(
+            title="각색을 실행하세요",
+            body="원작을 읽고 등장인물·장소·장면·샷으로 나눕니다. LLM 호출 한 번이라 "
+                 "영상 생성보다 훨씬 저렴하고, 결과는 다음 화면에서 확인한 뒤 승인합니다.",
+            tone="waiting",
+            label="각색 실행",
+            action=f"/fable/{project_id}/adapt",
+        )
+    if view.can_approve_story:
+        return NextActionView(
+            title="각색 결과를 검토하세요",
+            body="아래 로그라인과 시놉시스가 원작의 의도와 맞는지 확인하세요. "
+                 "승인하면 등장인물 캐스팅으로 넘어갑니다.",
+            tone="waiting",
+            label="이 각색으로 진행",
+            action=f"/fable/{project_id}/approve",
+            step="story",
+        )
+    if view.can_generate_references:
+        return NextActionView(
+            title="배우 레퍼런스를 생성하세요",
+            body="등장인물마다 네 방향 스틸을 만들어, 모든 샷에서 같은 얼굴이 유지되게 합니다. "
+                 "여기서부터 실제 비용이 발생합니다.",
+            tone="waiting",
+            label="배우 이미지 생성",
+            action=f"/fable/{project_id}/references",
+            costs_money=True,
+        )
+    if view.characters_blocked_reason:
+        return NextActionView(
+            title="배우 검수를 먼저 끝내야 합니다",
+            body=view.characters_blocked_reason,
+            tone="blocked",
+        )
+    if view.can_approve_characters:
+        return NextActionView(
+            title="이 배우들로 확정하세요",
+            body="확정한 얼굴이 모든 샷의 기준이 됩니다. 이후 바꾸려면 레퍼런스를 다시 생성해야 하니 "
+                 "지금 충분히 보세요.",
+            tone="waiting",
+            label="배우 확정하고 스토리보드로",
+            action=f"/fable/{project_id}/approve",
+            step="characters",
+        )
+    if view.can_approve_shots:
+        return NextActionView(
+            title="스토리보드를 승인하면 촬영이 시작됩니다",
+            body="아래 샷 계획을 확인하세요. 승인하면 샷마다 후보 영상을 생성합니다 — "
+                 "이 프로젝트에서 가장 큰 비용이 드는 단계입니다.",
+            tone="waiting",
+            label="영상 생성 시작",
+            action=f"/fable/{project_id}/approve",
+            step="shots",
+            costs_money=True,
+        )
+    if view.can_render:
+        return NextActionView(
+            title="선택한 후보들을 한 편으로 잇습니다",
+            body="새로 생성하는 것이 아니라 이미 만들어진 클립을 이어 붙이는 작업이라, "
+                 "추가 비용은 들지 않습니다.",
+            tone="waiting",
+            label="최종 렌더",
+            action=f"/fable/{project_id}/render",
+        )
+    if view.can_approve_final:
+        return NextActionView(
+            title="완성본을 확인하세요",
+            body="아래 영상을 끝까지 본 뒤 승인하세요. 승인하면 프로젝트가 완료됩니다.",
+            tone="waiting",
+            label="최종 승인",
+            action=f"/fable/{project_id}/approve",
+            step="final",
+        )
+    if view.status == FableProjectStatus.TAKE_REVIEW.value:
+        return NextActionView(
+            title="샷마다 쓸 후보를 고르세요",
+            body="아래 스토리보드에서 샷별 후보 영상을 비교하고 하나씩 선택하세요. "
+                 "모든 샷이 정해지면 편집 단계로 넘어갑니다.",
+            tone="waiting",
+        )
+    if view.status == FableProjectStatus.COMPLETED.value:
+        return NextActionView(
+            title="완성되었습니다",
+            body="아래에서 최종 영상을 내려받을 수 있습니다.",
+            tone="done",
+        )
+    if view.status == FableProjectStatus.CANCELLED.value:
+        return NextActionView(
+            title="취소된 프로젝트입니다",
+            body="이미 사용한 금액은 되돌아오지 않습니다. 이어서 작업하려면 새 프로젝트를 만드세요.",
+            tone="blocked",
+        )
+    if view.status == FableProjectStatus.FAILED.value:
+        return NextActionView(
+            title="진행 중 실패했습니다",
+            body=view.failure_summary or "아래 오류 내용을 확인하세요.",
+            tone="blocked",
+        )
+    return NextActionView(
+        title=f"{view.status_label} 진행 중입니다",
+        body="끝나면 이 화면이 자동으로 갱신됩니다. 창을 닫아도 작업은 계속됩니다.",
+        tone="working",
     )
 
 

@@ -118,3 +118,63 @@ def build_repair_prompt(previous_raw: str, errors: list[str]) -> str:
         errors="\n".join(f"- {error}" for error in errors),
         previous_raw=previous_raw[:4000],
     )
+
+
+# --- Source refinement (Fable F6) ------------------------------------------
+#
+# Versioned separately from the adaptation prompt: the two evolve for
+# different reasons, and a refinement wording change must not invalidate
+# adaptation provenance.
+REFINEMENT_PROMPT_VERSION = "fable-refine-v1"
+
+REFINEMENT_SYSTEM_PROMPT = """\
+You rewrite a user's short story so an AI film pipeline can shoot it. You are a
+script doctor, not a co-author.
+
+ABSOLUTE RULES -- breaking any of these makes the output useless:
+- Do NOT change the plot. Same events, same order, same outcome, same ending.
+- Do NOT add or remove characters, and do NOT rename anyone.
+- Do NOT add a moral, a twist, or an interpretation the original did not state.
+- Keep the author's own sentences wherever they already work. You are adding
+  and converting, not replacing prose you were not asked to touch.
+- Keep the original language. Do not translate.
+
+WHAT TO FIX, and only this:
+1. Characters must be visible. Give each person an approximate age and
+   concrete, filmable appearance (hair, clothing, build). A reference image is
+   generated from this description, so "tired" is useless and "in a soaked grey
+   trench coat, hair tied back" is not.
+2. Every scene needs a place and a light source. State the time of day and
+   where the light comes from.
+3. Speech must be quoted directly. Convert reported speech ("she said she
+   would leave") into an actual line of dialogue in quotation marks.
+4. Actions must be filmable. Replace inner states no camera can record
+   ("he regretted it") with the physical behaviour that shows them.
+5. There must be at least one visible change: a decision, a discovery, a
+   refusal. If the original already has one, leave it alone.
+
+Return a single JSON object and nothing else:
+{"refined_text": "<the rewritten story>",
+ "notes": ["<short note, in the story's language, per change you made>"]}
+"""
+
+REFINEMENT_USER_TEMPLATE = """\
+Language: {language}
+Genre hint: {genre}
+Tone hint: {tone}
+
+Rewrite the story below under the rules above.
+
+--- STORY ---
+{source_text}
+--- END STORY ---
+"""
+
+
+def build_refinement_prompt(request) -> str:
+    return REFINEMENT_USER_TEMPLATE.format(
+        language=request.language,
+        genre=request.genre or "unspecified",
+        tone=request.tone or "unspecified",
+        source_text=request.source_text,
+    )

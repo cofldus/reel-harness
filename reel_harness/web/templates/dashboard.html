@@ -1,46 +1,114 @@
 {% extends "base.html" %}
-{% block title %}대시보드 - Reel Harness{% endblock %}
+{% block title %}Fable Studio — Cinematic Story-to-Video{% endblock %}
+{% set nav_active = 'home' %}
 {% block content %}
-<section class="status-banner status-{{ status.preflight_overall|lower }}" aria-live="polite">
-  <strong>시스템 상태: {{ status.preflight_overall }}</strong>
-  <a href="/system">자세히 보기</a>
-</section>
 
-<section class="hero">
-  <a class="btn btn-primary" href="/jobs/new">새 영상 만들기</a>
-</section>
+{# The home screen used to open with a preflight banner and three queue
+   counters -- an operations dashboard for a machine, on the front door of
+   a filmmaking tool. What belongs here is what the product does, what you
+   have in progress, and one way in. System health is real and stays on
+   the page, but as a footnote you check, not the headline. #}
 
-<section class="stat-tiles">
-  <div class="stat-tile">
-    <span class="stat-value">{{ status.queue_depth }}</span>
-    <span class="stat-label">대기/재시도 중</span>
-  </div>
-  <div class="stat-tile">
-    <span class="stat-value">{{ status.job_status_counts.get("COMPLETED", 0) }}</span>
-    <span class="stat-label">완료</span>
-  </div>
-  <div class="stat-tile">
-    <span class="stat-value">{{ status.job_status_counts.get("FAILED", 0) }}</span>
-    <span class="stat-label">실패</span>
+<section class="landing">
+  <p class="eyebrow">Cinematic Story-to-Video Studio</p>
+  <h1 class="display">이야기를 넣으면,<br>한 편의 영화가 나옵니다.</h1>
+  <p class="lede">
+    짧은 소설이나 이야기를 각색해 등장인물을 캐스팅하고, 샷 단위로 영상을 생성한 뒤
+    한 편으로 잇습니다. 모든 단계는 당신이 확인하고 승인한 뒤에만 넘어갑니다.
+  </p>
+  <div class="actions actions-loose">
+    <a class="btn btn-primary btn-lg" href="/fable/new">새 작품 시작하기</a>
+    <a class="btn btn-lg" href="/fable">내 작품 보기</a>
   </div>
 </section>
 
-<section>
-  <h2>최근 작업</h2>
+<ol class="flow" aria-label="제작 흐름">
+  <li><span class="flow-num">1</span><span class="flow-label">각색</span><span class="flow-note">이야기를 장면과 샷으로</span></li>
+  <li><span class="flow-num">2</span><span class="flow-label">캐스팅</span><span class="flow-note">배우 얼굴을 만들고 고정</span></li>
+  <li><span class="flow-num">3</span><span class="flow-label">스토리보드</span><span class="flow-note">샷마다 카메라와 길이</span></li>
+  <li><span class="flow-num">4</span><span class="flow-label">촬영</span><span class="flow-note">샷별 후보 영상 생성</span></li>
+  <li><span class="flow-num">5</span><span class="flow-label">편집·완성</span><span class="flow-note">고른 컷을 한 편으로</span></li>
+</ol>
+
+{% if recent_projects %}
+<section class="review">
+  <div class="review-head">
+    <h2>이어서 작업하기</h2>
+    <a href="/fable">전체 보기</a>
+  </div>
+  <ul class="project-grid">
+    {% for project in recent_projects %}
+    <li class="project-card">
+      <div class="project-cover">
+        {% if project.cover_kind == 'video' %}
+        <video src="{{ project.cover_url }}" preload="metadata" muted playsinline tabindex="-1" aria-hidden="true"></video>
+        {% elif project.cover_kind == 'image' %}
+        <img src="{{ project.cover_url }}" alt="" loading="lazy">
+        {% else %}
+        <span class="project-slate" aria-hidden="true">Fable</span>
+        {% endif %}
+      </div>
+      <div class="project-card-body">
+        <div class="project-card-title"><a href="{{ project.detail_url }}">{{ project.title }}</a></div>
+        <div class="progress-track" aria-hidden="true"><span class="fill fill-{{ (project.progress / 5) | round | int * 5 }}"></span></div>
+        <div class="project-card-foot">
+          <span class="badge {{ 'badge-action' if project.needs_action else 'badge-status' }}">
+            {{ '확인 필요' if project.needs_action else project.status_label }}
+          </span>
+          <span class="meta">{{ project.elapsed }} 전</span>
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="review">
+  <div class="empty-state">
+    <h3>아직 작품이 없습니다</h3>
+    <p>이야기 한 편만 있으면 시작할 수 있습니다. 예시 이야기가 준비되어 있으니 그대로 눌러봐도 됩니다.</p>
+    <div class="actions"><a class="btn btn-primary" href="/fable/new">첫 작품 만들기</a></div>
+  </div>
+</section>
+{% endif %}
+
+{# Secondary: the short-form job queue and system health. Real, but not
+   what this page is about. #}
+<section class="review">
+  <div class="review-head">
+    <h2>작업 상태 <span class="review-count">숏폼 파이프라인</span></h2>
+    <a href="/system">시스템 상태</a>
+  </div>
+  <div class="stat-tiles">
+    <div class="stat-tile">
+      <span class="stat-value">{{ status.queue_depth }}</span>
+      <span class="meta">대기·재시도 중</span>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-value">{{ status.job_status_counts.get("COMPLETED", 0) }}</span>
+      <span class="meta">완료</span>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-value">{{ status.job_status_counts.get("FAILED", 0) }}</span>
+      <span class="meta">실패</span>
+    </div>
+    <div class="stat-tile">
+      <span class="stat-value stat-word status-{{ status.preflight_overall|lower }}">{{ status.preflight_overall }}</span>
+      <span class="meta">시스템 점검</span>
+    </div>
+  </div>
   {% if recent_jobs %}
   <ul class="job-summary-list">
     {% for job in recent_jobs %}
     <li class="job-row">
       <a href="{{ job.detail_url }}">
-        <span class="job-topic">{{ job.topic or "(주제 없음)" }}</span>
+        <span>{{ job.topic or "(주제 없음)" }}</span>
         <span class="badge badge-status">{{ job.status_label }}</span>
       </a>
     </li>
     {% endfor %}
   </ul>
   <a href="/jobs">전체 작업 목록 보기</a>
-  {% else %}
-  <p class="empty-state">아직 만든 영상이 없습니다. Demo Mode로 첫 영상을 만들어보세요.</p>
   {% endif %}
 </section>
 {% endblock %}

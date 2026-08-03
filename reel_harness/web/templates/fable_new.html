@@ -1,43 +1,159 @@
 {% extends "base.html" %}
-{% block title %}새 프로젝트 · Fable{% endblock %}
-{% block brand %}<a class="brand brand-fable" href="/fable">Fable</a>{% endblock %}
+{% block title %}새 작품 · Fable Studio{% endblock %}
+{% set nav_active = 'new' %}
 {% block content %}
-<div class="fable">
 
+<header class="page-head">
+  <h1 class="display">새 작품</h1>
+  <p class="lede">
+    이야기를 넣으면 AI가 장면과 샷으로 각색합니다. 각 단계마다 결과를 확인하고 승인하게 되며,
+    지금 만들기만 해서는 아무 비용도 들지 않습니다.
+  </p>
+</header>
 
-<h1>새 프로젝트</h1>
-<p class="meta">이야기를 넣으면 AI가 장면과 샷으로 각색합니다. 각 단계마다 확인하고 승인하게 됩니다 — 자동으로 넘어가는 곳은 없습니다.</p>
-
-<form method="post" action="/fable">
+<form method="post" action="/fable" class="compose">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
 
-  <div class="form-field">
+  <div class="form-field compose-title-field {{ 'has-error' if errors.get('title') }}">
     <label for="title">제목</label>
-    <input type="text" id="title" name="title" value="{{ values.get('title', '') }}" maxlength="200"
-           placeholder="비 오는 밤" autofocus>
+    <input type="text" id="title" name="title" class="compose-title"
+           value="{{ values.get('title', '') }}" maxlength="200"
+           placeholder="제목을 붙여주세요" aria-label="제목" autofocus>
     {% if errors.get('title') %}<p class="field-error" role="alert">{{ errors['title'] }}</p>{% endif %}
   </div>
 
-  <div class="form-field">
-    <label for="source_text">원작 텍스트</label>
-    <textarea id="source_text" name="source_text" rows="12"
-              placeholder="그날 밤, 지우는 호텔 창밖의 비를 오래 바라보았다. 전화벨이 울렸지만 받지 않았다.">{{ values.get('source_text', '') }}</textarea>
+  <div class="form-field {{ 'has-error' if errors.get('source_text') }}">
     <div class="field-foot">
-      <p class="hint">각색은 이 텍스트만 근거로 삼습니다. 각 장면은 실제 원문을 인용해야 통과합니다.</p>
-      <button type="button" class="btn btn-ghost" data-sample-story>예시 이야기 넣기</button>
+      <label for="source_text">원작 이야기</label>
+      <div class="actions">
+        <button type="button" class="btn btn-ghost btn-sm" data-sample-story>예시 이야기 넣기</button>
+        {# A separate formaction so this submits the SAME form -- every
+           field the user has already filled in comes back untouched, and
+           it works with JavaScript off. #}
+        <button type="submit" class="btn btn-sm btn-assist" formaction="/fable/refine"
+                name="decision" value="refine">
+          AI로 보정하기
+        </button>
+      </div>
     </div>
-    {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
+    <p class="hint">각색은 이 글만 근거로 삼습니다. 여기 없는 건 만들어지지 않습니다.</p>
+
+    {% if refine_accepted %}
+    <p class="alert alert-info" role="status">보정본을 반영했습니다. 그대로 두어도 되고, 직접 더 고쳐도 됩니다.</p>
+    {% endif %}
+    {% if refine_error %}
+    <p class="alert alert-error" role="alert">{{ refine_error }}</p>
+    {% endif %}
+
+    {# The single biggest lever on output quality is this textarea, and the
+       things that matter are not guessable: that a character's clothes
+       become the reference image, that summarised speech produces no
+       dialogue line, that an unfilmable inner state produces no shot. So
+       the form teaches them -- beside the box, while you write, with the
+       reason each one matters to THIS pipeline. #}
+    <div class="write">
+      <div class="write-main">
+        <textarea id="source_text" name="source_text" rows="16" data-story class="compose-story"
+                  placeholder="그날 밤, 지우는 호텔 창밖의 비를 오래 바라보았다. 전화벨이 울렸지만 받지 않았다.">{{ values.get('source_text', '') }}</textarea>
+        {% if errors.get('source_text') %}<p class="field-error" role="alert">{{ errors['source_text'] }}</p>{% endif %}
+        <p class="write-count"><span data-char-count>0</span>자 <span class="meta" data-length-note></span></p>
+      </div>
+
+      {# The proposal sits BESIDE the original, never replacing it. What
+         the user wrote is theirs; the model gets to suggest, and only an
+         explicit press adopts it. #}
+      {% if refinement %}
+      <aside class="write-guide proposal">
+        <p class="eyebrow proposal-eyebrow">AI 보정 제안</p>
+        <div class="proposal-text">{{ refinement.refined_text }}</div>
+        {% if refinement.notes %}
+        <ul class="proposal-notes">
+          {% for note in refinement.notes %}<li>{{ note }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <input type="hidden" name="proposal" value="{{ refinement.refined_text }}">
+        <div class="actions">
+          <button type="submit" class="btn btn-primary btn-sm" formaction="/fable/refine"
+                  name="decision" value="accept">이 보정본 쓰기</button>
+          <button type="submit" class="btn btn-ghost btn-sm" formaction="/fable/refine"
+                  name="decision" value="discard">원문 유지</button>
+        </div>
+        <p class="hint">원문은 왼쪽에 그대로 있습니다. 쓰기를 누르기 전에는 아무것도 바뀌지 않습니다.</p>
+      </aside>
+      {% else %}
+      <aside class="write-guide">
+        <p class="eyebrow">잘 나오는 원작의 조건</p>
+        <ul class="checklist" data-checklist>
+          {% for item in writing_guide %}
+          <li class="check" data-check="{{ item.key }}">
+            <span class="check-box" aria-hidden="true"></span>
+            <div>
+              <button type="button" class="check-label" aria-expanded="false">{{ item.label }}</button>
+              <div class="check-detail" hidden>
+                <p class="check-why">{{ item.why }}</p>
+                <p class="example example-bad"><span class="example-tag">이렇게 말고</span>{{ item.bad }}</p>
+                <p class="example example-good"><span class="example-tag">이렇게</span>{{ item.good }}</p>
+              </div>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+        <p class="hint">
+          체크는 글자만 보고 짐작한 힌트입니다. 다 채우지 않아도 만들 수 있고,
+          비어 있어도 잘 쓴 글일 수 있습니다.
+        </p>
+      </aside>
+      {% endif %}
+    </div>
   </div>
 
-  {# Everything below has a working default, so it is folded away: the
-     required decision is the story, and asking for seven more up front
-     is how a form stops getting filled in. #}
-  <details class="advanced" {% if errors %}open{% endif %}>
-    <summary>세부 설정 <span class="meta">(기본값으로 두어도 됩니다)</span></summary>
+  {# The three settings that visibly change the result stay up front; the
+     rest have working defaults and fold away. Asking for seven decisions
+     before the first one is made is how a form stops getting filled in. #}
+  <h2 class="compose-section"><span class="eyebrow">이 영화의 결</span></h2>
 
-    <div class="field-grid">
-      <div class="form-field">
+  <div class="field-grid">
+    <div class="form-field select-wrap {{ 'has-error' if errors.get('genre') }}">
+      <label for="genre">장르</label>
+      <select id="genre" name="genre">
+        {% for value, label in genre_choices %}
+        <option value="{{ value }}" {{ 'selected' if values.get('genre', '') == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
+    </div>
+
+    <div class="form-field select-wrap {{ 'has-error' if errors.get('tone') }}">
+      <label for="tone">분위기</label>
+      <select id="tone" name="tone">
+        {% for value, label in tone_choices %}
+        <option value="{{ value }}" {{ 'selected' if values.get('tone', '') == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
+    </div>
+
+    <div class="form-field select-wrap {{ 'has-error' if errors.get('target_duration_sec') }}">
+      <label for="target_duration_sec">목표 길이</label>
+      <select id="target_duration_sec" name="target_duration_sec" data-duration>
+        {% for value, label in duration_choices %}
+        <option value="{{ value }}" {{ 'selected' if values.get('target_duration_sec', default_duration)|int == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
+    </div>
+  </div>
+
+  {# Length is an abstraction; shots are what actually get generated and
+     what actually get billed. Saying so before the form is submitted is
+     the difference between an informed choice and a surprise. #}
+  <p class="estimate" data-estimate aria-live="polite"></p>
+
+  <details class="advanced" {% if errors %}open{% endif %}>
+    <summary>세부 설정 <span class="meta">언어 · 화면비 · 후보 수</span></summary>
+    <div class="advanced-body field-grid">
+      <div class="form-field select-wrap">
         <label for="language">언어</label>
         <select id="language" name="language">
           <option value="ko" {{ 'selected' if values.get('language', 'ko') == 'ko' }}>한국어</option>
@@ -46,27 +162,7 @@
         {% if errors.get('language') %}<p class="field-error" role="alert">{{ errors['language'] }}</p>{% endif %}
       </div>
 
-      <div class="form-field">
-        <label for="genre">장르</label>
-        <select id="genre" name="genre">
-          {% for value, label in genre_choices %}
-          <option value="{{ value }}" {{ 'selected' if values.get('genre', '') == value }}>{{ label }}</option>
-          {% endfor %}
-        </select>
-        {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
-      </div>
-
-      <div class="form-field">
-        <label for="tone">분위기</label>
-        <select id="tone" name="tone">
-          {% for value, label in tone_choices %}
-          <option value="{{ value }}" {{ 'selected' if values.get('tone', '') == value }}>{{ label }}</option>
-          {% endfor %}
-        </select>
-        {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
-      </div>
-
-      <div class="form-field">
+      <div class="form-field select-wrap">
         <label for="aspect_ratio">화면비</label>
         <select id="aspect_ratio" name="aspect_ratio">
           <option value="9:16" {{ 'selected' if values.get('aspect_ratio', '9:16') == '9:16' }}>9:16 세로 (숏폼)</option>
@@ -75,36 +171,24 @@
         {% if errors.get('aspect_ratio') %}<p class="field-error" role="alert">{{ errors['aspect_ratio'] }}</p>{% endif %}
       </div>
 
-      <div class="form-field">
-        <label for="target_duration_sec">목표 길이</label>
-        <select id="target_duration_sec" name="target_duration_sec">
-          {% for value, label in duration_choices %}
-          <option value="{{ value }}" {{ 'selected' if values.get('target_duration_sec', default_duration)|int == value }}>{{ label }}</option>
-          {% endfor %}
-        </select>
-        <p class="hint">참조 이미지를 쓰는 샷은 8초 고정이라, 길이는 곧 샷 수이고 샷 수가 곧 비용입니다.</p>
-        {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
-      </div>
-
-      <div class="form-field">
+      <div class="form-field select-wrap">
         <label for="takes_per_shot">샷당 후보 수</label>
-        <select id="takes_per_shot" name="takes_per_shot">
-          <option value="0">기본값 사용 ({{ default_takes }})</option>
+        <select id="takes_per_shot" name="takes_per_shot" data-takes>
+          <option value="0">기본값 ({{ default_takes }}개)</option>
           {% for choice in takes_choices %}
           <option value="{{ choice }}" {{ 'selected' if values.get('takes_per_shot') == choice }}>{{ choice }}개</option>
           {% endfor %}
         </select>
-        <p class="hint">후보 하나하나가 별도의 유료 생성입니다. 4를 고르면 비용도 네 배입니다.</p>
+        <p class="hint">후보 하나가 곧 유료 생성 한 번입니다. 4를 고르면 비용도 네 배입니다.</p>
         {% if errors.get('takes_per_shot') %}<p class="field-error" role="alert">{{ errors['takes_per_shot'] }}</p>{% endif %}
       </div>
     </div>
   </details>
 
   <div class="actions">
-    <button type="submit" class="btn btn-primary">프로젝트 만들기</button>
-    <a class="btn" href="/fable">취소</a>
+    <button type="submit" class="btn btn-primary btn-lg">작품 만들기</button>
+    <a class="btn btn-lg" href="/fable">취소</a>
   </div>
-  <p class="hint">만들기만 해서는 아무 비용도 들지 않습니다. 각색과 영상 생성은 다음 화면에서 따로 승인합니다.</p>
+  <p class="hint">각색과 영상 생성은 다음 화면에서 따로 승인합니다.</p>
 </form>
-</div>{# /fable #}
 {% endblock %}

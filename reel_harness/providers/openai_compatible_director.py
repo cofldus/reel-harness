@@ -20,10 +20,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from reel_harness.providers.base import AdaptationRequest, AdaptationResult
+from reel_harness.providers.base import (
+    AdaptationRequest,
+    AdaptationResult,
+    RefinementRequest,
+    RefinementResult,
+)
 from reel_harness.providers.narrative_prompts import (
     ADAPTATION_SYSTEM_PROMPT,
     NARRATIVE_PROMPT_VERSION,
+    REFINEMENT_PROMPT_VERSION,
+    REFINEMENT_SYSTEM_PROMPT,
+    build_refinement_prompt,
     build_repair_prompt,
     build_user_prompt,
 )
@@ -86,3 +94,50 @@ class OpenAICompatibleNarrativeDirector(OpenAICompatibleLLMProvider):
             raw_text=content, provider_id=self.provider_id, model_id=self.model_id,
             prompt_version=NARRATIVE_PROMPT_VERSION, request_id=request_id, usage=usage,
         )
+
+    def refine_source(self, request: RefinementRequest) -> RefinementResult:
+        """Rewrite the user's own prose so the pipeline can shoot it.
+
+        Deliberately NOT wired into the repair loop: a refusal or a
+        malformed response here is a dead end for one optional convenience,
+        not a failed adaptation, so it degrades to "the model returned
+        nothing usable" and the user keeps the text they already had.
+        Retrying a creative rewrite would also just spend money on a second
+        opinion nobody asked for."""
+        content, request_id, usage = self._chat(
+            REFINEMENT_SYSTEM_PROMPT, build_refinement_prompt(request),
+        )
+        refined, notes = _parse_refinement(content)
+        return RefinementResult(
+            refined_text=refined, notes=notes,
+            provider_id=self.provider_id, model_id=self.model_id,
+            prompt_version=REFINEMENT_PROMPT_VERSION, request_id=request_id, usage=usage,
+        )
+
+
+def _parse_refinement(content: str) -> tuple[str, list[str]]:
+    """Tolerant of a fenced block, strict about the outcome.
+
+    A model that returns prose instead of JSON has still done the work, so
+    the whole response becomes the refined text rather than being thrown
+    away -- but an EMPTY result raises, because silently handing the user
+    back a blank textarea would destroy what they wrote.
+    """
+    import json
+
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.split(chr(10), 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        document = json.loads(text)
+    except ValueError:
+        document = None
+    if isinstance(document, dict):
+        refined = str(document.get("refined_text") or "").strip()
+        raw_notes = document.get("notes") or []
+        notes = [str(note).strip() for note in raw_notes if str(note).strip()][:8]
+    else:
+        refined, notes = text, []
+    if not refined:
+        raise ValueError("refinement returned no text")
+    return refined, notes
