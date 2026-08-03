@@ -1488,3 +1488,155 @@ details.advanced[open] > summary { border-bottom: 1px solid var(--border); }
    shot means a card full of ceiling. */
 .project-cover video, .project-cover img { object-position: 50% 50%; }
 .take-frame video { object-position: 50% 50%; background: #000; }
+
+/* ── choice chips ─────────────────────────────────────────────────────
+   These replace every <select> on the compose screen.
+
+   A native select's popup list is painted by the operating system, not
+   the page: CSS reaches the closed control and stops there. (Chromium 135
+   added `appearance: base-select` + `::picker(select)` which finally
+   opens it up, but it is one engine only, so it cannot be the design.)
+   For a handful of options a dropdown was the wrong control anyway --
+   every choice is visible at once here, and picking one is a single tap
+   instead of tap-scan-tap. Real radios underneath: same names, same POST,
+   arrow-key navigation, no JavaScript. */
+
+.chipset { border: 0; padding: 0; margin: 0 0 var(--s6); min-width: 0; }
+.chipset legend {
+  padding: 0;
+  margin-bottom: var(--s3);
+  font-size: var(--t-sm);
+  font-weight: var(--w-semi);
+  color: var(--text-2);
+}
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+.chip-opt { position: relative; cursor: pointer; }
+/* Visually hidden, not display:none -- it must stay focusable and stay in
+   the radio group's keyboard order. */
+.chip-opt input {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: 0; padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.chip-opt > span {
+  display: block;
+  padding: var(--s2) var(--s4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.875rem;
+  font-weight: var(--w-mid);
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+.chip-opt:hover > span { border-color: var(--muted); color: var(--text); }
+.chip-opt input:checked + span {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: var(--w-semi);
+}
+.chip-opt input:focus-visible + span { box-shadow: var(--focus); }
+
+/* Duration reads as a card, because it carries two facts -- the length
+   and the shot count that actually drives the bill. */
+.chips-cards { gap: var(--s3); }
+.chip-card > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-md);
+  min-width: 92px;
+}
+.chip-card strong { font-size: 1rem; font-weight: var(--w-card); color: var(--text); }
+.chip-card em { font-style: normal; font-size: var(--t-xs); color: var(--muted); }
+.chip-card input:checked + span strong,
+.chip-card input:checked + span em { color: var(--accent); }
+
+/* ── the story field ──────────────────────────────────────────────────
+   A bare left rule read as an unfinished box. It is a page now: an inset
+   surface, a ruled margin, and room around the text so writing in it
+   feels like writing rather than filling in a field. */
+
+.compose-story {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: var(--surface);
+  padding: var(--s5);
+  font-size: 1rem;
+  line-height: 2.05;
+  min-height: 360px;
+}
+.compose-story:hover { border-left-color: var(--muted); }
+.compose-story:focus {
+  border-color: var(--border-strong);
+  border-left-color: var(--accent);
+}
+.write-count { padding-left: var(--s2); }
+
+/* ── storyboard as a shot list ────────────────────────────────────────
+   A shot list is a list of rows, not a wall of cards. Stacked as tall
+   cards each shot took most of a screen, so comparing shot 1 against
+   shot 4 -- the whole point of a storyboard -- meant scrolling and
+   remembering. One row per shot: the plan on the left, its candidate
+   frames on the right, all of it scannable at once. */
+
+.shot-grid { grid-template-columns: 1fr; gap: var(--s3); }
+.shot-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s5);
+  align-items: center;
+  border-top: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: var(--s4) var(--s4) var(--s4) var(--s5);
+}
+.shot-card[data-status="SELECTED"] { border-left-color: var(--accent); }
+.shot-card[data-status="REVIEW_REQUIRED"] { border-left-color: var(--border-strong); }
+.shot-card[data-status="FAILED"] { border-left-color: var(--danger); }
+.shot-info { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+
+/* Candidate frames: thumbnail sized for comparison, not for viewing.
+   The browser's own fullscreen is one click away when a clip earns a
+   real look, so four control bars stacked down the page buy nothing. */
+.shot-card .take-grid {
+  display: flex;
+  gap: var(--s3);
+  margin: 0;
+  grid-template-columns: none;
+}
+.shot-card .take { width: 84px; flex: none; }
+.shot-card .take-frame { aspect-ratio: 9 / 16; }
+.shot-card .take-frame video { height: 100%; }
+
+@media (max-width: 760px) {
+  .shot-card { grid-template-columns: 1fr; align-items: start; gap: var(--s3); }
+  .shot-card .take-grid { overflow-x: auto; padding-bottom: var(--s1); }
+}
+
+/* Frame first, description after -- the order a real shot list reads in,
+   and it closes the empty gutter that opened when the description was
+   stretched across the row with the thumbnail pinned to the far edge. */
+.shot-card {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  align-items: center;
+}
+.shot-card .take-grid { order: -1; }
+.shot-card .take { width: 68px; }
+.shot-card .take .btn { font-size: 0.6875rem; min-height: 22px; padding: 1px var(--s1); }
+.shot-info { gap: var(--s1); }
+@media (max-width: 760px) {
+  .shot-card { grid-template-columns: 1fr; }
+  .shot-card .take-grid { order: 0; }
+}

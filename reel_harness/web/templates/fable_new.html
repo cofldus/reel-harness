@@ -113,37 +113,58 @@
      before the first one is made is how a form stops getting filled in. #}
   <h2 class="compose-section"><span class="eyebrow">이 영화의 결</span></h2>
 
-  <div class="field-grid">
-    <div class="form-field select-wrap {{ 'has-error' if errors.get('genre') }}">
-      <label for="genre">장르</label>
-      <select id="genre" name="genre">
-        {% for value, label in genre_choices %}
-        <option value="{{ value }}" {{ 'selected' if values.get('genre', '') == value }}>{{ label }}</option>
-        {% endfor %}
-      </select>
-      {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
+  {# Radio chips, not <select>. A native select's popup list is drawn by
+     the operating system and cannot be styled at all -- you can dress the
+     closed control and nothing else -- so on a screen trying to look like
+     a production tool it is the one element that always looks like a
+     system dialog. These are real radios: same field names, same POST,
+     arrow-key navigable as a group, and no JavaScript. #}
+  <fieldset class="chipset {{ 'has-error' if errors.get('genre') }}">
+    <legend>장르</legend>
+    <div class="chips">
+      {% for value, label in genre_choices %}
+      <label class="chip-opt">
+        <input type="radio" name="genre" value="{{ value }}"
+               {{ 'checked' if values.get('genre', '') == value }}>
+        <span>{{ label }}</span>
+      </label>
+      {% endfor %}
     </div>
+    {% if errors.get('genre') %}<p class="field-error" role="alert">{{ errors['genre'] }}</p>{% endif %}
+  </fieldset>
 
-    <div class="form-field select-wrap {{ 'has-error' if errors.get('tone') }}">
-      <label for="tone">분위기</label>
-      <select id="tone" name="tone">
-        {% for value, label in tone_choices %}
-        <option value="{{ value }}" {{ 'selected' if values.get('tone', '') == value }}>{{ label }}</option>
-        {% endfor %}
-      </select>
-      {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
+  <fieldset class="chipset {{ 'has-error' if errors.get('tone') }}">
+    <legend>분위기</legend>
+    <div class="chips">
+      {% for value, label in tone_choices %}
+      <label class="chip-opt">
+        <input type="radio" name="tone" value="{{ value }}"
+               {{ 'checked' if values.get('tone', '') == value }}>
+        <span>{{ label }}</span>
+      </label>
+      {% endfor %}
     </div>
+    {% if errors.get('tone') %}<p class="field-error" role="alert">{{ errors['tone'] }}</p>{% endif %}
+  </fieldset>
 
-    <div class="form-field select-wrap {{ 'has-error' if errors.get('target_duration_sec') }}">
-      <label for="target_duration_sec">목표 길이</label>
-      <select id="target_duration_sec" name="target_duration_sec" data-duration>
-        {% for value, label in duration_choices %}
-        <option value="{{ value }}" {{ 'selected' if values.get('target_duration_sec', default_duration)|int == value }}>{{ label }}</option>
-        {% endfor %}
-      </select>
-      {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
+  {# Length is really a shot count, and a shot is the billing unit, so
+     each card states both rather than hiding the number that matters. #}
+  <fieldset class="chipset {{ 'has-error' if errors.get('target_duration_sec') }}">
+    <legend>목표 길이</legend>
+    <div class="chips chips-cards">
+      {% for value, label in duration_choices %}
+      <label class="chip-opt chip-card">
+        <input type="radio" name="target_duration_sec" value="{{ value }}" data-duration
+               {{ 'checked' if values.get('target_duration_sec', default_duration)|int == value }}>
+        <span>
+          <strong>{{ value }}초</strong>
+          <em>{{ (value / 8) | int }}샷</em>
+        </span>
+      </label>
+      {% endfor %}
     </div>
-  </div>
+    {% if errors.get('target_duration_sec') %}<p class="field-error" role="alert">{{ errors['target_duration_sec'] }}</p>{% endif %}
+  </fieldset>
 
   {# Length is an abstraction; shots are what actually get generated and
      what actually get billed. Saying so before the form is submitted is
@@ -152,36 +173,59 @@
 
   <details class="advanced" {% if errors %}open{% endif %}>
     <summary>세부 설정 <span class="meta">언어 · 화면비 · 후보 수</span></summary>
-    <div class="advanced-body field-grid">
-      <div class="form-field select-wrap">
-        <label for="language">언어</label>
-        <select id="language" name="language">
-          <option value="ko" {{ 'selected' if values.get('language', 'ko') == 'ko' }}>한국어</option>
-          <option value="en" {{ 'selected' if values.get('language') == 'en' }}>English</option>
-        </select>
-        {% if errors.get('language') %}<p class="field-error" role="alert">{{ errors['language'] }}</p>{% endif %}
-      </div>
+    <div class="advanced-body">
+      <fieldset class="chipset">
+        <legend>언어</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="language" value="ko"
+                   {{ 'checked' if values.get('language', 'ko') == 'ko' }}>
+            <span>한국어</span>
+          </label>
+          <label class="chip-opt">
+            <input type="radio" name="language" value="en"
+                   {{ 'checked' if values.get('language') == 'en' }}>
+            <span>English</span>
+          </label>
+        </div>
+      </fieldset>
 
-      <div class="form-field select-wrap">
-        <label for="aspect_ratio">화면비</label>
-        <select id="aspect_ratio" name="aspect_ratio">
-          <option value="9:16" {{ 'selected' if values.get('aspect_ratio', '9:16') == '9:16' }}>9:16 세로 (숏폼)</option>
-          <option value="16:9" {{ 'selected' if values.get('aspect_ratio') == '16:9' }}>16:9 가로</option>
-        </select>
+      <fieldset class="chipset">
+        <legend>화면비</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="aspect_ratio" value="9:16"
+                   {{ 'checked' if values.get('aspect_ratio', '9:16') == '9:16' }}>
+            <span>9:16 세로</span>
+          </label>
+          <label class="chip-opt">
+            <input type="radio" name="aspect_ratio" value="16:9"
+                   {{ 'checked' if values.get('aspect_ratio') == '16:9' }}>
+            <span>16:9 가로</span>
+          </label>
+        </div>
         {% if errors.get('aspect_ratio') %}<p class="field-error" role="alert">{{ errors['aspect_ratio'] }}</p>{% endif %}
-      </div>
+      </fieldset>
 
-      <div class="form-field select-wrap">
-        <label for="takes_per_shot">샷당 후보 수</label>
-        <select id="takes_per_shot" name="takes_per_shot" data-takes>
-          <option value="0">기본값 ({{ default_takes }}개)</option>
+      <fieldset class="chipset">
+        <legend>샷당 후보 수</legend>
+        <div class="chips">
+          <label class="chip-opt">
+            <input type="radio" name="takes_per_shot" value="0" data-takes
+                   {{ 'checked' if not values.get('takes_per_shot') }}>
+            <span>기본값 {{ default_takes }}개</span>
+          </label>
           {% for choice in takes_choices %}
-          <option value="{{ choice }}" {{ 'selected' if values.get('takes_per_shot') == choice }}>{{ choice }}개</option>
+          <label class="chip-opt">
+            <input type="radio" name="takes_per_shot" value="{{ choice }}" data-takes
+                   {{ 'checked' if values.get('takes_per_shot') == choice }}>
+            <span>{{ choice }}개</span>
+          </label>
           {% endfor %}
-        </select>
+        </div>
         <p class="hint">후보 하나가 곧 유료 생성 한 번입니다. 4를 고르면 비용도 네 배입니다.</p>
         {% if errors.get('takes_per_shot') %}<p class="field-error" role="alert">{{ errors['takes_per_shot'] }}</p>{% endif %}
-      </div>
+      </fieldset>
     </div>
   </details>
 

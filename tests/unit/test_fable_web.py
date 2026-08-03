@@ -755,7 +755,11 @@ def test_refine_keeps_the_rest_of_the_form(monkeypatch, tmp_path) -> None:
         target_duration_sec=48, decision="refine",
     ).text
     assert 'value="마지막 승객"' in page
-    assert '<option value="mystery" selected' in page or "mystery\" selected" in page
+    # Genre is a radio chip group now, not a <select>: a native select's
+    # popup list is OS-drawn and unstyleable.
+    assert 'value="mystery"' in page
+    body = page.split('name="genre" value="mystery"', 1)[1][:60]
+    assert "checked" in body
 
 
 def test_no_template_uses_an_inline_style_attribute() -> None:

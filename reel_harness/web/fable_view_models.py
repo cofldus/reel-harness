@@ -440,8 +440,12 @@ def build_shot_view(shot, takes, project_id: str | None = None) -> FableShotView
                 attempt_number=take.attempt_number,
                 status=take.status,
                 status_label=take_status_label(take.status),
+                # The media fragment matters: a <video preload="metadata">
+                # paints nothing until it is seeked, so without it the
+                # storyboard renders a grid of black rectangles instead
+                # of the frames you are supposed to be choosing between.
                 video_url=(
-                    f"/fable/{project_id}/takes/{take.id}/video"
+                    f"/fable/{project_id}/takes/{take.id}/video{_POSTER_SEEK}"
                     if project_id and take.media_path else None
                 ),
                 selected=take.selected,

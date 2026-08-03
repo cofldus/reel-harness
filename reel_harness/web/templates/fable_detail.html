@@ -225,6 +225,7 @@
   <ul class="shot-grid">
     {% for shot in project.shots %}
     <li class="shot-card" data-status="{{ shot.status }}">
+      <div class="shot-info">
       <div class="shot-head">
         <span class="shot-slate">{{ '%02d' | format(shot.shot_order) }}</span>
         <span class="badge {{ 'badge-ok' if shot.status == 'SELECTED' else 'badge-status' }}">{{ shot.status_label }}</span>
@@ -239,6 +240,7 @@
         {% if shot.camera_movement %}<li>{{ shot.camera_movement.replace('_', ' ') }}</li>{% endif %}
         {% if shot.duration_sec %}<li>{{ shot.duration_sec }}s</li>{% endif %}
       </ul>
+      </div>{# /shot-info #}
 
       {% if shot.takes %}
       <ul class="take-grid">
