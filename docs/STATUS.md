@@ -52,9 +52,47 @@ Fixes 4 and 5 are verified only as far as "the string reaches the prompt".
 - Does dialogue come out as real spoken Korean audio?
 - Do the shots cut together into something that reads as a story?
 
-Answering that needs one more full run on a NEW project: roughly
-**USD 3.5–5**. **Never run it without the user's explicit approval.**
-Do not plan the next phase on a guess about what it will show.
+### That run happened — 2026-08-04, project 「우산」, USD 5.336
+
+A second full run on a fresh story (two characters, two spoken lines,
+four distinct beats) after the five fixes. **The five fixes hold.**
+
+Verified by looking, not by inference:
+
+- **The film is a film.** Four shots that are four different moments:
+  a wide of the clerk behind the counter with rain on the glass, the old
+  man entering, the umbrella changing hands, and the old man walking out
+  into the rain seen through the doors. The `source_beat` fix works.
+- **Characters stay themselves.** Both actors match their approved
+  reference sheets — same navy uniform polo, same grey hair and black
+  coat — and shot 3 holds both of them in frame together. The reference
+  sheets really are reaching generation now.
+- **720x1280**, 32.03s, h264 + aac 48kHz stereo. The 360p hard-coding is
+  gone and the file has a real audio track (mean -31 dB, not silence).
+- **The prompt asks for speech correctly**: `노인 speaks aloud,
+  lip-synced, saying "우산 있나?" in Korean`, with `generate_audio=True`.
+
+**Still unverified: whether the audio contains intelligible Korean
+speech.** Measurement cannot settle it — a speech-band (300-3400Hz)
+comparison between the two shots with dialogue and the two without shows
+no usable difference, because rain ambience is broadband and dominates.
+Someone has to press play. File:
+`fable_projects/c136cf74-a2d0-4915-8777-13b913091df0/final/final.mp4`
+
+Frames extracted for review: `shots/film/shot1..4.png`.
+
+### Found during that run (not yet fixed)
+
+- **Failed reference attempts leak files.** 준호's directory holds 8 PNGs
+  while only 4 are registered; a 429 and a NO_IMAGE refusal each left
+  their partial output behind. Nothing cleans them up, so a project that
+  retries a few times quietly accumulates megabytes of orphans.
+- **Google refusals arrive as `UPSTREAM_TRANSIENT`.** One attempt failed
+  with `NO_IMAGE` (`finish_reason`), which is the model declining rather
+  than a transport fault. It is retryable in the same way a 429 is, so a
+  genuine persistent refusal would retry until the budget stops it. The
+  429s here really were transient — a third attempt succeeded — but the
+  two outcomes should not share a code.
 
 ## Running it for real
 
