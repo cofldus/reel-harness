@@ -1,249 +1,138 @@
 # Status
 
-Last updated: 2026-08-03 (Fable F1-F6 complete, UI v1 frozen, v0.5.0rc1 ready to tag, on branch
-`phase6/fable-cinematic-engine`). Phase 2A through 5B plus deployment
-sub-phase 6A-1 (dual SQLite/PostgreSQL backend) are merged into `main`.
-The deployment track (6A-2 auth .. 6A-5 production mode) is parked; the
-Fable cinematic engine is the active track and owns `v0.5.0rc1`.
+Last updated: 2026-08-04 (Fable complete and merged to main, UI v1 frozen, v0.5.0rc1 ready to tag, on branch
+`phase6/fable-cinematic-engine`). Phase 2A through 5B, deployment
+sub-phase 6A-1 (dual SQLite/PostgreSQL backend), and the whole Fable
+cinematic engine are merged into `main`. The deployment track (6A-2 auth
+.. 6A-5 production mode) is parked.
 
 ---
 
 # HANDOFF — read this first if you are picking up mid-flight
 
-Branch: **`phase6/fable-cinematic-engine`** (always push here; `main`
-holds everything through 6A-1). Working tree should be clean and in sync
-with origin — if it is not, inspect before doing anything else.
+Branch: **`main`**. Everything is merged and pushed; `origin/main` and the
+local HEAD agree. `phase6/fable-cinematic-engine` is fully merged into
+main and should not be worked on further — start new work from `main`.
 
-## Where the work stands
+Full suite: **1647 passed / 5 skipped**. mypy clean on win32 AND
+`--platform linux`. ruff clean.
 
-Fable is a five-sub-phase build: **all five are done.** The remaining
-work is not implementation -- it is LIVE VERIFICATION, which needs GCP
-credentials this machine does not have.
+## What is actually built
 
-- **F1 (done)** — cinematic domain (6 tables, schema v8), project/shot
-  state machines, `CinematicVideoProvider` Protocol + fake tier, project
-  service + separate storage root + CLI, third worker/lease lane,
-  offline vertical slice e2e.
-- **F2 (done)** — real Narrative Director: strict schema, whole-document
-  validation, bounded repair loop, fake + openai-compatible adapters,
-  canonical shot-prompt compiler. **Live-verified against gpt-4o.**
-- **F3 (done)** — reference images, cost/budget, demo + google
-  image adapters, multiple candidate takes. Commits 1 (reference provider
-  contract), 2 (cost/budget, schema v10), 3 (casting gate + reference
-  sheets, schema v11), 4 (demo + google adapters), 5 (multiple takes,
-  schema v12) and 6 (e2e + reference smoke) are all done and pushed.
-- **F4 (done)** — `/v1/fable/*` API and the `/fable` web UI: the whole
-  lifecycle by clicking, following the Phase 5A/5B patterns with no new
-  domain logic.
-- **F5 (done)** — Vertex AI Veo adapter, film editor (dissolves, fades,
-  audio crossfade), and the `v0.5.0rc1` release. `release-check` reports
-  `ready_to_tag: True`; **the tag has not been created** -- see below.
+Fable — story in, film out — is complete and merged: cinematic domain and
+state machines, real Narrative Director with a bounded repair loop,
+reference-image casting with cost/budget gates, the `/v1/fable/*` API and
+the `/fable` web UI, the Vertex AI Veo adapter, and the film editor.
+Everything walks explicit human approval gates; nothing advances on its
+own.
 
-## The immediate work: live verification
+`docs/DESIGN.md` holds the frozen UI v1 design system. Fix clear
+usability defects; do not revisit taste.
 
-Everything is implemented. Nothing that talks to Google has ever been
-run against Google, because there are no credentials on this machine.
-In priority order:
+## The one thing that matters next
 
-1. **`fable-reference-smoke --confirm-paid-generation`** (~$0.13). The
-   cheapest possible answer to "does the real image model accept its own
-   output back as a character reference, and do the two images look like
-   the same person?" The second half needs human eyes -- use
-   `--keep-output` and look.
-2. **One reference-driven Veo generation.** This is what answers the open
-   SynthID question below. If Veo rejects watermarked images as
-   character references, the consistency strategy needs rethinking, and
-   finding that out costs one 8s clip.
-3. **Tag `v0.5.0rc1`** once (1) and (2) either pass or have their results
-   recorded in the CHANGELOG's known-limitations section. The release
-   check already passes; the tag was deliberately NOT created by the
-   session that built this, because tagging a release whose two real
-   adapters have never made a single live call would be stamping a
-   version on something nobody has watched work.
+**Nobody has watched a film this pipeline made.**
 
-## Fable F6 — product design pass and source refinement
+One complete film WAS produced with real providers (project 「마지막 손님」,
+about USD 5.34, reached COMPLETED). That single run exposed five defects
+no test caught, all now fixed and merged:
 
-The engine worked end to end after F5, but the interface it worked behind
-was still the operations console the short-form pipeline had grown: every
-section a card of equal weight, the paid-generation controls in a sidebar
-that outshouted the work, and no answer anywhere to "what do I do next".
-F6 is a design phase, plus the one feature that pass made obvious.
+1. The worker hard-coded 360p, so the real provider refused the first shot.
+2. Approved reference sheets were never passed to generation — the entire
+   casting gate was decorative.
+3. The poll waited 12 seconds against a provider that takes one to three
+   minutes, so every shot timed out and retried.
+4. `dialogue_line` was never compiled into the prompt, so nobody spoke.
+5. Every shot shared one `source_beat`, so the result was four unrelated
+   clips rather than a film.
 
-**Brand.** Fable Studio — "Cinematic Story-to-Video Studio". The header
-brand is a template block, so Fable owns its identity inside its own
-section while the job queue and publish log keep the console's.
+Fixes 4 and 5 are verified only as far as "the string reaches the prompt".
+**How Veo actually interprets them is unobserved.** So these remain open:
 
-**Design system** (`web/static/app.css`, rewritten). One spacing ramp, one
-radius set, one weight ramp. Ink-charcoal ground with a champagne-gold
-accent reserved for exactly three meanings (primary action, current step,
-selected); a cinema violet used ONLY to mark machine-authored content, so
-"the AI wrote this" is legible at a glance without a second brand colour.
-Type is SUITE for the wordmark and headings, SUIT for everything else,
-both self-hosted (see `static/fonts/NOTICE.md`) because a CDN font breaks
-offline use and leaks usage. `word-break: keep-all` is load-bearing:
-without it Korean splits mid-word.
+- Does dialogue come out as real spoken Korean audio?
+- Do the shots cut together into something that reads as a story?
 
-**Information architecture.** The detail page now resolves the next action
-on the SERVER (`build_next_action`) and states it once, at the top, with
-its cost on the button that spends it. Everything below is reference
-material, styled quieter. The budget dropped from a sidebar column to a
-collapsible bar. On phones the primary action also rides in a sticky
-footer above a four-item tab bar.
+Answering that needs one more full run on a NEW project: roughly
+**USD 3.5–5**. **Never run it without the user's explicit approval.**
+Do not plan the next phase on a guess about what it will show.
 
-**Source refinement** (F6's one new capability). Adaptation quality is
-bounded by the source text, and what matters is craft knowledge a
-first-time writer has no reason to have — a character's clothes become
-the reference image, summarised speech yields no dialogue line, an inner
-state no camera can see yields no shot. Two answers ship: a live
-checklist beside the box (keyword heuristics, advisory, never gating),
-and `NarrativeDirector.refine_source` — a paid LLM rewrite that is shown
-as a PROPOSAL beside the original and never replaces the user's own words
-without an explicit press. Gated by `allow_paid_generation` like every
-other paid call, and not retried: it is one optional convenience, and a
-second opinion nobody asked for still costs money.
+## Running it for real
 
-**A real bug this phase found.** The app sends `style-src 'self'` with no
-`'unsafe-inline'`, so every `style=""` attribute in every template was
-being silently dropped by the browser — the project progress bars and the
-budget meter had never once rendered their value. The CSP is correct, so
-the markup was fixed: presentation moved into the stylesheet, per-element
-fill expressed as `.fill-N` classes at 5% steps, and two tests now guard
-both halves (no template may carry an inline style; the CSP must keep
-forbidding them).
+`.env` is gitignored and does not travel. On a fresh machine:
 
-**Screenshot verification.** Every screen is captured in both schemes plus
-mobile before being called done — the placeholder-collapse, the Korean
-word-break and the CSP bug were all found by looking, not by reading the
-source.
+```
+REEL_HARNESS_NARRATIVE_PROVIDER=openai-compatible
+REEL_HARNESS_LLM_BASE_URL=https://api.openai.com/v1
+REEL_HARNESS_LLM_MODEL=gpt-4o
+REEL_HARNESS_LLM_API_KEY=<OpenAI key>
+REEL_HARNESS_GOOGLE_USE_VERTEX=true
+REEL_HARNESS_GOOGLE_PROJECT=<GCP project id>
+REEL_HARNESS_GOOGLE_LOCATION=us-central1
+REEL_HARNESS_REFERENCE_IMAGE_PROVIDER=google
+REEL_HARNESS_CINEMATIC_PROVIDER=google
+REEL_HARNESS_ALLOW_PAID_GENERATION=true
+```
 
----
+**Check every line ends with a newline.** A key that ran into the next
+variable has already broken a session once: the credential was corrupted
+AND the Vertex switch silently failed to parse.
 
-## Fable F5 — Veo adapter, film editor, and the v0.5.0rc1 release
+Auth is ADC, not an API key. `gcloud auth application-default login` opens
+a browser, so the USER must run it — it cannot be driven from here.
 
-- **Vertex AI Veo adapter** (`providers/google_cinematic_video.py`),
-  written against the INSTALLED SDK's real types
-  (`GenerateVideosConfig`, `VideoGenerationReferenceType.ASSET`,
-  `GenerateVideosOperation.done/.error/.response`,
-  `rai_media_filtered_count/_reasons`, `Video.video_bytes`) --
-  introspected, not recalled, the approach that caught the published docs
-  contradicting themselves during F3. Three documented constraints are
-  enforced BEFORE submission because each costs a generation to learn the
-  hard way: reference-driven runs are fixed at 8s/720p (asking otherwise
-  silently returns something else), max 3 reference images, and
-  `person_generation=allow_adult`. A safety-filtered result is
-  `moderated`, never `failed`. `us-central1` is enforced at startup, not
-  defaulted. Videos are downloaded immediately (they are deleted after
-  two days). `cancel_generation` is honest about being local-only -- the
-  SDK has no cancel for a video operation, and claiming otherwise would
-  leave an operator believing a paid generation stopped.
-- **Film editor** (`media/film_editor.py`). F1's `-c copy` concat can
-  only produce hard cuts, because stream copy cannot blend two clips.
-  This builds the xfade/acrossfade filtergraph that can. The arithmetic
-  is the reviewable part: a transition OVERLAPS the two clips it joins,
-  so each one shortens the film and shifts where the next lands --
-  offsets track the running duration rather than a fixed multiple, and
-  the fade-out is computed from the shortened total. `render_final` picks
-  its path from the plan: no pixel mixing keeps the lossless copy, and
-  only a dissolve/fade/mute pays for a re-encode. Clip durations are
-  re-measured with ffprobe at render time, because a provider returning
-  7.9s for an 8s request would otherwise misplace every later transition.
-  An impossible plan is refused at startup AND before ffmpeg runs, so it
-  cannot waste a whole paid run before surfacing at the last step.
-- **Verification**: 1529 passed / 9 skipped, mypy clean on both platforms,
-  ruff clean, `release-check` PASS. The editor is exercised against REAL
-  ffmpeg -- a dissolve renders and measures shorter than the clip sum,
-  and every transition name offered is confirmed to be one ffmpeg
-  actually implements. **The Veo adapter has never made a live call.**
+**Serve with `--fable-workers 1`.** The default is 0 (`cli/main.py`), so
+without it, approving shots queues work that nothing ever picks up and
+the page just sits there.
 
-## Fable F4 — web UI and the /v1/fable/* API
+## Open, unresolved
 
-Two commits. Neither adds domain logic: every route in both layers calls
-the same `FableService` method the CLI already uses, so every gate that
-refuses the CLI refuses them identically (the tests assert those
-refusals over HTTP rather than assuming they carry over).
+- **Veo per-second price.** Code assumes 0.15, Google publishes 0.10 for
+  the Fast tier. Settle it from a Vertex AI SKU line showing quantity ×
+  unit price, not a running total. Held high meanwhile: quoting low lets
+  a project overrun the ceiling its owner set, quoting high only makes
+  the gate refuse affordable work. The directions are not symmetric.
+- **Character cap bypass.** Project 「야생환상」 ended up with 4 characters
+  against an adaptation cap of 2; two appeared 13 minutes after the
+  adaptation and were generated separately. Check whether the UI's
+  "reuse an approved actor" path goes around the cap.
+- **Lost work on generation timeout.** Past the 10-minute limit the shot
+  is unrecoverable and the money is already spent. The right fix is a
+  hold line — persist `next_poll_at` and let a worker resume later, the
+  pattern the publish worker already uses. Not built.
+- **Dialogue density.** Whether speech survives in a source with several
+  spoken lines is unmeasured. Check with
+  `reel-harness fable-adapt-eval --story <file> --show-plans --yes`.
 
-- **API** (`/v1/fable/*`): create/list/read, shots with their takes,
-  characters with their reference-sheet state, budget get/set, a
-  read-only estimate, and every action (adapt, references, per-character
-  approve/reject, the four gates, take selection, render, cancel). One
-  uniform error contract -- 404 missing, 409 not-valid-now, 422
-  malformed, 502 provider failed -- so an out-of-order gate approval is a
-  refusal rather than a 500 with a transition traceback. Response models
-  are explicit rather than serialized ORM rows, and a test pins the exact
-  field set so a new column cannot leak.
-- **Web UI** (`/fable`): list, create form, detail page. Every `can_*`
-  mirrors the real service precondition, so a shown button is an accepted
-  one; a blocked character gate states which characters are unapproved
-  rather than silently hiding the button. Forms are disabled rather than
-  removed (hiding a form hides its CSRF field -- a real Phase 5A bug),
-  every mutating route is CSRF-gated and answers Post/Redirect/Get so a
-  refresh cannot re-submit a paid generation, and the status fragment
-  self-terminates its poll once a person is what's needed.
-- Hit the same FastAPI trap Phase 5A documented -- a route returning
-  `HTMLResponse | RedirectResponse` crashes the app at import time
-  because FastAPI tries to build a Pydantic model from a Union of
-  Starlette classes. `response_model=None`, same fix as POST /jobs.
-- **Verification**: 49 new tests, plus a real `serve` process smoke
-  (create -> adapt over the API, the detail page rendering the right
-  next-step button, the estimate pricing the plan, the CSRF cookie set,
-  an unauthenticated `/v1/fable/*` call refused 401). The Playwright
-  browser E2E was NOT extended to Fable -- Playwright is not installed on
-  this machine and those tests skip here, so adding a scenario that never
-  runs would be a claim without a check behind it.
+## Releases
 
-## 이어서 시작할 때 (다음 세션용)
+Tags: `v0.1.0`, `v0.1.0rc1`, `v0.1.0rc2`, `v0.2.0rc1`, `v0.3.0rc1`,
+`v0.4.0rc1`, `v0.5.0rc1`. **Never move or delete any of them.**
 
-**`v0.5.0rc1` 태그 완료, `main` 머지 완료, 둘 다 푸시됨.** 머지 후 main에서
-1592 passed / 5 skipped, mypy·ruff clean, `release-check`가 `ready_to_tag:
-True`. 현재 브랜치는 `main`이고 로컬에만 있는 작업은 없다.
+`v0.5.0rc1` is tagged but predates the five fixes above, so it is a
+release that does not work against real providers. That is what an rc is
+for — the tag stays put and the next release candidate carries the fixes.
 
-기존 태그 7개(v0.1.0 ~ v0.5.0rc1)는 어떤 경우에도 옮기거나 지우지 않는다.
+## Deployment
 
-### 다음 마일스톤 — 완성작 1편을 실제 제공자로 만들기
+**Not ready for public deployment.** There is no authentication at all
+(`docs/OPERATIONS.md` says so outright): anyone who reaches the port can
+spend the owner's OpenAI and Veo credits. Auth is planned as 6A-2 and has
+no code. Viable today: put it behind Cloudflare Access or Tailscale, or
+publish a zero-cost demo with every provider pinned to fake.
 
-지금까지 증명된 것은 **"부품이 작동한다"**까지다. 실제 제공자로 만든 영상은
-API 확인용 8초 클립 **한 개**뿐이고, **이 파이프라인이 만든 완성된 영화를
-아직 아무도 본 적이 없다.** 따라서 다음이 전부 미확인이다:
+## House rules
 
-- 샷 4개에 걸쳐 같은 배우로 보이는가 (레퍼런스 방식이 실제로 통하는가)
-- 컷을 이었을 때 영화처럼 흐르는가, 무관한 클립 4개인가
-- 대사 줄이 실제 음성이 되는가, 최종 영상에 소리가 붙는가
-- 32초가 이야기로 읽히는가
-
-비용: 각색 ~$0.03 + 레퍼런스 4장 ~$0.27 + Veo 8초x4샷 ~$3.2-4.8
-= **약 $3.5-5**. **사용자의 명시적 승인 없이는 절대 실행하지 않는다.**
-
-여기서 무엇이 나오는지 봐야 그다음 할 일이 정해진다. 지금 추측으로 다음
-페이즈를 계획하지 마라.
-
-### 미결로 남긴 것
-
-- **Veo 단가.** 코드는 0.15/초, 구글 공식은 0.10. 첫 청구서(8초 클립 +
-  스틸 2장 = KRW 1,330 ≈ USD 0.93)는 0.10 쪽을 가리키지만 GCP 결제는
-  지연되므로 결론이 아니다. **Vertex AI SKU 항목의 수량 x 단가**를 봐야
-  끝난다. 그때까지 높은 값을 유지한다 — 낮게 잡으면 예산을 넘겨 쓰고,
-  높게 잡으면 게이트가 일찍 막힐 뿐이라 방향이 대칭이 아니다.
-- **대사 비중.** 대사가 여러 개인 원작에서도 살아남는지 미측정.
-  `reel-harness fable-adapt-eval --story <파일> --show-plans --yes`로 확인.
-
-### 배포 관련 (물어보면 답할 것)
-
-**공개 배포는 아직 안 된다.** 이 앱에는 로그인이 없다(`docs/OPERATIONS.md`가
-명시). 공개 URL에 올리면 누구나 사용자의 OpenAI/Veo 크레딧으로 생성을
-돌릴 수 있다. 인증은 6A-2로 계획만 되어 있고 코드가 없다. 선택지는
-(1) Cloudflare Access/Tailscale 등으로 접근 제한, (2) provider를 전부 fake로
-고정한 무비용 데모 공개, (3) 6A-2를 먼저 구현. 지금은 (1)이나 (2)를 권한다.
-
-### 이 프로젝트에서 지켜온 규칙
-
-- 스크린샷을 보기 전에는 UI 작업을 완료라고 부르지 않는다. 이번 페이즈의
-  실제 결함(자리표시자 붕괴, 한글 단어 중간 줄바꿈, CSP가 인라인 스타일을
-  버리던 문제, 페이크 클립에 구워진 레터박스)은 전부 눈으로 봐서 찾았다.
-- 데모/스크린샷 스크립트는 provider를 **전부** fake로 고정한다. 다섯 개만
-  고정하고 `narrative_provider`를 빠뜨려 실수로 유료 호출이 나간 적이 있다.
-- 유료 API 호출은 사용자가 명시적으로 승인할 때만.
-- UI v1은 동결이다(`docs/DESIGN.md`). 명확한 사용성 결함만 고치고 취향
-  수정은 하지 않는다.
+- **Look at the screen before calling UI work done.** Every real defect
+  this phase — collapsed placeholders, Korean breaking mid-word, the CSP
+  silently discarding inline styles, letterboxing baked into fake clips —
+  was found by looking, never by reading source.
+- **Pin every provider to fake in demo and screenshot scripts.** Pinning
+  five of six and missing `narrative_provider` once sent real paid calls.
+- **Paid API calls only on explicit approval.**
+- **Per commit:** targeted tests → mypy on BOTH platforms → ruff → full
+  suite → push. If the shell kills long background runs, split the suite
+  (unit, then integration + e2e; 5–9 minutes per chunk).
+- **Never claim something was verified when it was not.** Say `NOT RUN`.
 
 ---
 
