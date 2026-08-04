@@ -249,6 +249,10 @@ WHAT TO FIX, and only this:
 5. There must be at least one visible change: a decision, a discovery, a
    refusal. If the original already has one, leave it alone.
 
+NUMBERING -- `shot_order` restarts at 1 in every scene. It is the shot's place WITHIN
+its scene, not its place in the film. A scene of two shots is [1, 2] whether it is the
+first scene or the last; do not number straight through from the previous scene.
+
 FIELD DISCIPLINE -- each of these has one job:
 - `logline` is one sentence stating who wants what and what happens. It must be
   literally true of the story and must not attribute feelings the source never

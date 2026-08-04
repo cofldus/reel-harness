@@ -211,3 +211,92 @@ def test_registry_resolves_the_adapter_from_settings() -> None:
 
     fake = resolve_llm_provider("fake")
     assert fake.provider_id == "fake"
+
+
+# -- newer-model parameter compatibility ---------------------------------
+#
+# Found by pointing the pipeline at a model released after this adapter
+# was written. The request shape it had always sent was rejected outright
+# with HTTP 400, before a single token was generated -- so the adapter
+# had quietly pinned the project to older models, and the failure looked
+# like a network fault rather than a request the endpoint would never
+# accept.
+
+def _ok(request):
+    return httpx.Response(200, json=_completion_body(json.dumps(VALID_SCRIPT)))
+
+
+def test_the_default_temperature_is_not_sent_at_all() -> None:
+    """Some models accept only the default temperature and reject the
+    parameter outright. Sending it when it changes nothing is how a
+    working request becomes a 400."""
+    provider = _provider(_ok, temperature=1.0)
+    assert "temperature" not in provider._build_payload("sys", "user")
+
+    opinionated = _provider(_ok, temperature=0.2)
+    assert opinionated._build_payload("sys", "user")["temperature"] == 0.2
+
+
+def test_the_token_cap_follows_whichever_name_the_endpoint_accepts() -> None:
+    provider = _provider(_ok)
+    assert "max_tokens" in provider._build_payload("sys", "user")
+
+    provider._token_key = "max_completion_tokens"
+    payload = provider._build_payload("sys", "user")
+    assert "max_completion_tokens" in payload
+    assert "max_tokens" not in payload
+
+
+def test_a_rejected_request_is_not_treated_as_transient() -> None:
+    """A 400 is the request being wrong, which retrying cannot fix. Left
+    as transient it would be retried into a bill or a stuck job, and the
+    operator would never learn which parameter was at fault."""
+    from reel_harness.core.errors import ProviderNotConfiguredError
+
+    def rejects(request):
+        return httpx.Response(400, json={
+            "error": {"message": "Unsupported value: 'seed' is not supported"},
+        })
+
+    provider = _provider(rejects)
+    with pytest.raises(ProviderNotConfiguredError) as excinfo:
+        provider._chat("sys", "user")
+    assert "seed" in str(excinfo.value)
+
+
+def test_a_renamed_token_parameter_is_honoured_and_retried() -> None:
+    """The endpoint names the parameter it wants. Honouring it beats
+    failing the run and leaving every newer model unusable."""
+    seen: list[dict] = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        if "max_tokens" in body:
+            return httpx.Response(400, json={"error": {
+                "message": "Unsupported parameter: 'max_tokens' is not supported "
+                           "with this model. Use 'max_completion_tokens' instead.",
+            }})
+        return httpx.Response(200, json=_completion_body(json.dumps(VALID_SCRIPT)))
+
+    provider = _provider(handler)
+    provider._chat("sys", "user")
+    assert "max_tokens" in seen[0]
+    assert "max_completion_tokens" in seen[1]
+
+
+def test_the_error_body_is_read_defensively() -> None:
+    """A provider error body is untrusted input that ends up in logs."""
+    from reel_harness.providers.openai_compatible_llm import _error_message
+
+    class Broken:
+        def json(self):
+            raise ValueError("not json")
+
+    assert _error_message(Broken()) == ""
+
+    class Long:
+        def json(self):
+            return {"error": {"message": "x" * 1000}}
+
+    assert len(_error_message(Long())) == 300

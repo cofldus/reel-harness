@@ -5,7 +5,12 @@ import time
 import uuid
 from typing import Any
 
-from reel_harness.core.errors import ProviderAuthError, SchemaValidationError, TransientProviderError
+from reel_harness.core.errors import (
+    ProviderAuthError,
+    ProviderNotConfiguredError,
+    SchemaValidationError,
+    TransientProviderError,
+)
 from reel_harness.providers.base import ChannelContext, ScriptResult, TopicResult
 
 PROMPT_VERSION = "openai-compat-script-v1"
@@ -117,17 +122,41 @@ class OpenAICompatibleLLMProvider:
             usage=usage,
         )
 
-    def _chat(self, system_prompt: str, user_prompt: str) -> tuple[str, str | None, dict | None]:
-        payload = {
+    # Newer models reject two long-standing parameters outright: they take
+    # only the default temperature, and they renamed max_tokens to
+    # max_completion_tokens. Sending the old shape fails the whole request
+    # with HTTP 400 before a single token is generated, which is how this
+    # adapter silently locked the project to older models -- the pipeline
+    # reported "unexpected HTTP 400" and nothing said the request itself
+    # was the problem.
+    #
+    # Both are demoted to hints rather than requirements. Temperature is
+    # sent only when it differs from the default, so a model that allows
+    # just the default is never asked for something else; the token cap is
+    # sent under whichever name the endpoint accepts, discovered once per
+    # process from the error the endpoint itself returns.
+    _DEFAULT_TEMPERATURE = 1.0
+
+    def _build_payload(self, system_prompt: str, user_prompt: str) -> dict:
+        payload: dict = {
             "model": self.model_id,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": self._temperature,
-            "max_tokens": self._max_output_tokens,
             "response_format": {"type": "json_object"},
         }
+        if self._temperature != self._DEFAULT_TEMPERATURE:
+            payload["temperature"] = self._temperature
+        payload[self._token_limit_key] = self._max_output_tokens
+        return payload
+
+    @property
+    def _token_limit_key(self) -> str:
+        return getattr(self, "_token_key", "max_tokens")
+
+    def _chat(self, system_prompt: str, user_prompt: str) -> tuple[str, str | None, dict | None]:
+        payload = self._build_payload(system_prompt, user_prompt)
         correlation_id = str(uuid.uuid4())
         attempts = self._max_retries + 1
         last_transient: Exception | None = None
@@ -159,6 +188,27 @@ class OpenAICompatibleLLMProvider:
                     f"llm endpoint returned HTTP {response.status_code} (request_id={request_id})"
                 )
                 continue
+            if response.status_code == 400:
+                detail = _error_message(response)
+                # The endpoint tells us exactly which parameter it will
+                # not take. Honour it once and retry rather than failing
+                # the run: the alternative is every newer model being
+                # unusable until someone reads a 400 by hand.
+                if "max_completion_tokens" in detail and self._token_limit_key == "max_tokens":
+                    self._token_key = "max_completion_tokens"
+                    payload = self._build_payload(system_prompt, user_prompt)
+                    continue
+                if "temperature" in detail and "temperature" in payload:
+                    self._temperature = self._DEFAULT_TEMPERATURE
+                    payload = self._build_payload(system_prompt, user_prompt)
+                    continue
+                # A 400 is the request being wrong, which retrying cannot
+                # fix -- and it is NOT transient, so it must not be
+                # retried into a bill or a stuck job.
+                raise ProviderNotConfiguredError(
+                    f"llm endpoint rejected the request for model {self.model_id!r}: "
+                    f"{detail or 'no detail'} (request_id={request_id})"
+                )
             if response.status_code != 200:
                 raise TransientProviderError(
                     f"llm endpoint returned unexpected HTTP {response.status_code} (request_id={request_id})"
@@ -201,3 +251,20 @@ def _parse_retry_after(raw: str | None) -> float | None:
         return max(0.0, float(raw))
     except ValueError:
         return None
+
+
+def _error_message(response) -> str:
+    """The endpoint's own explanation, or empty.
+
+    Never raises and never returns the body wholesale: a provider error
+    body is untrusted input that ends up in logs, so only the message
+    field is taken and it is length-capped.
+    """
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - a malformed body is not a crash
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message") or "")[:300]
+    return ""
