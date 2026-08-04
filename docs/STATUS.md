@@ -1,7 +1,7 @@
 # Status
 
-Last updated: 2026-08-04 (Fable complete and merged to main, UI v1 frozen, v0.5.0rc1 ready to tag, on branch
-`phase6/fable-cinematic-engine`). Phase 2A through 5B, deployment
+Last updated: 2026-08-04 (Fable complete and merged to main, UI v1 frozen,
+`v0.5.0rc1` tagged, working branch is now `main`). Phase 2A through 5B, deployment
 sub-phase 6A-1 (dual SQLite/PostgreSQL backend), and the whole Fable
 cinematic engine are merged into `main`. The deployment track (6A-2 auth
 .. 6A-5 production mode) is parked.
