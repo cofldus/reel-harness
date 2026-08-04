@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v5"
+COMPILER_VERSION = "fable-shot-v6"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -53,10 +53,18 @@ _SET_CONTINUITY = (
     "no relocation, no redecoration, no change of time of day"
 )
 
+# The body list is not decoration. A real generated shot came back with a
+# man whose torso faced the counter while his legs stretched sideways at
+# roughly a right angle, as though the hips had come apart. Faces, fingers
+# and duplicated limbs were already forbidden; nothing forbade the joint
+# itself being wrong, which is the artifact most likely to make a frame
+# unusable because it is visible at a glance and cannot be cropped out.
 _PROHIBITED_ARTIFACTS = (
+    "anatomically correct body, natural joints and correct proportions, "
+    "no bent or broken torso, no dislocated hips, no limbs at impossible angles, "
     "no distorted faces, no extra or malformed fingers, no duplicated limbs, "
-    "no morphing clothing, no text overlays, no watermark, no subtitles, "
-    "no burned-in captions"
+    "no detached or floating body parts, no morphing clothing, "
+    "no text overlays, no watermark, no subtitles, no burned-in captions"
 )
 
 # The identity keys copied verbatim into every shot, in this order, so a

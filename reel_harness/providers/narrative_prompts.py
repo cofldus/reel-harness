@@ -249,6 +249,17 @@ WHAT TO FIX, and only this:
 5. There must be at least one visible change: a decision, a discovery, a
    refusal. If the original already has one, leave it alone.
 
+FIELD DISCIPLINE -- each of these has one job:
+- `logline` is one sentence stating who wants what and what happens. It must be
+  literally true of the story and must not attribute feelings the source never
+  states. A real run produced "the lonely clerk ... then they look at each other's
+  backs", which is both invented and physically impossible. If you cannot say it
+  plainly, the sentence is wrong.
+- `expression` is a FACIAL expression: what the face is doing. "wet", "tired from
+  work", "in a black coat" are states or costume, not expressions, and they reach
+  the video model as a direction it cannot act on.
+- `blocking` is where the body is in the frame, not what it feels.
+
 Return a single JSON object and nothing else:
 {"refined_text": "<the rewritten story>",
  "notes": ["<short note, in the story's language, per change you made>"]}

@@ -268,3 +268,17 @@ def test_a_cut_to_a_different_person_does_not_hold_the_previous_one() -> None:
     assert "the space, the light" in switched
     # The frame being cut from is still described either way.
     assert "준호" in switched and "우산을 건넨다" in switched
+
+
+def test_the_prompt_forbids_broken_bodies_not_only_bad_faces() -> None:
+    """A real generated shot came back with a man whose torso faced the
+    counter while his legs stretched sideways at about a right angle.
+    Faces, fingers and duplicated limbs were already forbidden; the joint
+    being wrong was not, and it is the artifact most likely to make a
+    frame unusable -- visible at a glance and impossible to crop out."""
+    from reel_harness.pipeline.shot_prompt import compile_shot_prompt
+
+    text = compile_shot_prompt(_shot(), _project(), _bible())
+    assert "anatomically correct body" in text
+    assert "no bent or broken torso" in text
+    assert "impossible angles" in text
