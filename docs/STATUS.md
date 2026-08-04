@@ -10,166 +10,126 @@ cinematic engine are merged into `main`. The deployment track (6A-2 auth
 
 # HANDOFF — read this first if you are picking up mid-flight
 
-Branch: **`main`**. Everything is merged and pushed; `origin/main` and the
-local HEAD agree. `phase6/fable-cinematic-engine` is fully merged into
-main and should not be worked on further — start new work from `main`.
+Branch **`main`**, everything merged and pushed. Full suite **1665 passed
+/ 5 skipped**, mypy clean on win32 AND `--platform linux`, ruff clean.
 
-Full suite: **1647 passed / 5 skipped**. mypy clean on win32 AND
-`--platform linux`. ruff clean.
+Adaptation model is now **`gpt-5.6-terra`** (`.env`). It is measurably
+better than gpt-4o: 4-5 distinct camera angles instead of ~3, less
+movement concentration, and it writes usable dialogue.
 
-## What is actually built
+## What the user asked for next, in their order
 
-Fable — story in, film out — is complete and merged: cinematic domain and
-state machines, real Narrative Director with a bounded repair loop,
-reference-image casting with cost/budget gates, the `/v1/fable/*` API and
-the `/fable` web UI, the Vertex AI Veo adapter, and the film editor.
-Everything walks explicit human approval gates; nothing advances on its
-own.
+These came from watching a real 64-second film and are the queue.
 
-`docs/DESIGN.md` holds the frozen UI v1 design system. Fix clear
-usability defects; do not revisit taste.
+1. **Raise the character cap.** `AdaptationRequest.max_characters` is 2,
+   a short-form default. The mother is central to the test story and was
+   simply CUT, so the hospital and crash shots had a person with no
+   reference sheet -- Veo invented her and made her **male**. Needs to be
+   a setting, and 4 is the obvious starting value. This is the clearest
+   bug of the three.
 
-## The one thing that matters next
+2. **Subtitles are being burned in.** `no subtitles, no burned-in
+   captions` is already in the prompt and Veo ignores it, apparently
+   because asking for spoken lip-synced dialogue pulls captions along.
+   Not solved by asking harder; see (3).
 
-**Nobody has watched a film this pipeline made.**
+3. **Split dialogue out of Veo and into Korean TTS** -- the user's own
+   proposal, and it is a good one. Veo would generate picture plus
+   ambience only; spoken lines would be synthesised separately and mixed
+   in. What it buys: total control of voice identity, correct gender and
+   age, correct pronunciation, no burned-in captions, and roughly 20%
+   cheaper video (silent Veo). What it costs: **lip sync**, the one thing
+   the current path does that this cannot. The user judged that trade
+   worth making.
+   Infrastructure already exists -- `TTSProvider` and an
+   openai-compatible adapter run in the short-form pipeline.
+   **Open question the user asked and nobody answered: which engine.**
+   Candidates were OpenAI TTS (key and adapter already present), Google
+   Cloud TTS (GCP already configured, strong Korean voices), ElevenLabs
+   (separate account). Do not guess -- synthesise one line on two or
+   three and let the user listen.
 
-One complete film WAS produced with real providers (project 「마지막 손님」,
-about USD 5.34, reached COMPLETED). That single run exposed five defects
-no test caught, all now fixed and merged:
+## Also found, not yet fixed
 
-1. The worker hard-coded 360p, so the real provider refused the first shot.
-2. Approved reference sheets were never passed to generation — the entire
-   casting gate was decorative.
-3. The poll waited 12 seconds against a provider that takes one to three
-   minutes, so every shot timed out and retried.
-4. `dialogue_line` was never compiled into the prompt, so nobody spoke.
-5. Every shot shared one `source_beat`, so the result was four unrelated
-   clips rather than a film.
+- **Props appear before they are acquired.** Shot 1 already showed 도윤
+  holding the glowing watch he is only handed in shot 2. The scene's
+  `source_beat` mentions the watch, and nothing in the prompt says what a
+  character does NOT yet have.
+- **In-world signage is gibberish.** Shop signs rendered "CLACK" and
+  "맑ㄱ환뀁". The prohibition list covers overlay text and subtitles, not
+  text inside the world.
+- **`insufficient_quota` is misclassified as transient.** OpenAI credits
+  ran out mid-session and returned HTTP 429, which the adapter retried
+  four times per call and reported as a plain rate limit. It is
+  permanent, not transient, and the real message ("You have no credits
+  remaining") never surfaced -- roughly 20 minutes were spent waiting for
+  a limit that was never going to clear. This was offered as a fix and
+  not done.
+- **Repair budget is fully consumed on longer stories.** A 64-second
+  adaptation used both repairs every run, so one more failure fails the
+  adaptation outright and each one costs three LLM calls instead of one.
+  The reasons were never captured -- rate limits interrupted the
+  investigation.
 
-Fixes 4 and 5 are verified only as far as "the string reaches the prompt".
-**How Veo actually interprets them is unobserved.** So these remain open:
+## Films made (watch these before changing anything)
 
-- Does dialogue come out as real spoken Korean audio?
-- Do the shots cut together into something that reads as a story?
+| Project | Length | Spend | Where |
+|---|---|---|---|
+| 「우산」재촬영 | 32s | $5.34 | `fable_projects/6ffb3780-.../final/final.mp4` |
+| 「내일을 파는 가게」 | 64s | **$10.27** | `shots/film3/내일을_파는_가게.mp4` |
 
-### That run happened — 2026-08-04, project 「우산」, USD 5.336
+Frames: `shots/film2/` and `shots/film3/`.
 
-A second full run on a fresh story (two characters, two spoken lines,
-four distinct beats) after the five fixes. **The five fixes hold.**
+The second one answered the question that prompted it. The user asked
+whether the output had any narrative at all; it did not, and the cause
+was **both** the material (the sample stories were test fixtures I wrote,
+with no conflict in them) and the format (32 seconds / 4 shots cannot
+hold an arc). Given a real story with stakes and a turn, and 64 seconds,
+the adaptation produced 8 shots across 4 scenes with 100% dialogue, 7
+shot sizes, 6 angles, and a camera that dollies in on the bargain and
+dollies out on the closing image. The pipeline was not the problem.
 
-Verified by looking, not by inference:
+**Durations must be multiples of 8** -- reference-driven Veo shots are
+fixed at 8 seconds, so 60s is unreachable and 64s is the nearest.
 
-- **The film is a film.** Four shots that are four different moments:
-  a wide of the clerk behind the counter with rain on the glass, the old
-  man entering, the umbrella changing hands, and the old man walking out
-  into the rain seen through the doors. The `source_beat` fix works.
-- **Characters stay themselves.** Both actors match their approved
-  reference sheets — same navy uniform polo, same grey hair and black
-  coat — and shot 3 holds both of them in frame together. The reference
-  sheets really are reaching generation now.
-- **720x1280**, 32.03s, h264 + aac 48kHz stereo. The 360p hard-coding is
-  gone and the file has a real audio track (mean -31 dB, not silence).
-- **The prompt asks for speech correctly**: `노인 speaks aloud,
-  lip-synced, saying "우산 있나?" in Korean`, with `generate_audio=True`.
+## Still open from before
 
-**Still unverified: whether the audio contains intelligible Korean
-speech.** Measurement cannot settle it — a speech-band (300-3400Hz)
-comparison between the two shots with dialogue and the two without shows
-no usable difference, because rain ambience is broadband and dominates.
-Someone has to press play. File:
-`fable_projects/c136cf74-a2d0-4915-8777-13b913091df0/final/final.mp4`
-
-Frames extracted for review: `shots/film/shot1..4.png`.
-
-### Found during that run (not yet fixed)
-
-- **Failed reference attempts leak files.** 준호's directory holds 8 PNGs
-  while only 4 are registered; a 429 and a NO_IMAGE refusal each left
-  their partial output behind. Nothing cleans them up, so a project that
-  retries a few times quietly accumulates megabytes of orphans.
-- **Google refusals arrive as `UPSTREAM_TRANSIENT`.** One attempt failed
-  with `NO_IMAGE` (`finish_reason`), which is the model declining rather
-  than a transport fault. It is retryable in the same way a 429 is, so a
-  genuine persistent refusal would retry until the budget stops it. The
-  429s here really were transient — a third attempt succeeded — but the
-  two outcomes should not share a code.
-
-## Running it for real
-
-`.env` is gitignored and does not travel. On a fresh machine:
-
-```
-REEL_HARNESS_NARRATIVE_PROVIDER=openai-compatible
-REEL_HARNESS_LLM_BASE_URL=https://api.openai.com/v1
-REEL_HARNESS_LLM_MODEL=gpt-4o
-REEL_HARNESS_LLM_API_KEY=<OpenAI key>
-REEL_HARNESS_GOOGLE_USE_VERTEX=true
-REEL_HARNESS_GOOGLE_PROJECT=<GCP project id>
-REEL_HARNESS_GOOGLE_LOCATION=us-central1
-REEL_HARNESS_REFERENCE_IMAGE_PROVIDER=google
-REEL_HARNESS_CINEMATIC_PROVIDER=google
-REEL_HARNESS_ALLOW_PAID_GENERATION=true
-```
-
-**Check every line ends with a newline.** A key that ran into the next
-variable has already broken a session once: the credential was corrupted
-AND the Vertex switch silently failed to parse.
-
-Auth is ADC, not an API key. `gcloud auth application-default login` opens
-a browser, so the USER must run it — it cannot be driven from here.
-
-**Serve with `--fable-workers 1`.** The default is 0 (`cli/main.py`), so
-without it, approving shots queues work that nothing ever picks up and
-the page just sits there.
-
-## Open, unresolved
-
-- **Veo per-second price.** Code assumes 0.15, Google publishes 0.10 for
-  the Fast tier. Settle it from a Vertex AI SKU line showing quantity ×
-  unit price, not a running total. Held high meanwhile: quoting low lets
-  a project overrun the ceiling its owner set, quoting high only makes
-  the gate refuse affordable work. The directions are not symmetric.
-- **Character cap bypass.** Project 「야생환상」 ended up with 4 characters
-  against an adaptation cap of 2; two appeared 13 minutes after the
-  adaptation and were generated separately. Check whether the UI's
-  "reuse an approved actor" path goes around the cap.
-- **Lost work on generation timeout.** Past the 10-minute limit the shot
-  is unrecoverable and the money is already spent. The right fix is a
-  hold line — persist `next_poll_at` and let a worker resume later, the
-  pattern the publish worker already uses. Not built.
-- **Dialogue density.** Whether speech survives in a source with several
-  spoken lines is unmeasured. Check with
-  `reel-harness fable-adapt-eval --story <file> --show-plans --yes`.
+- **Veo per-second price.** Code assumes 0.15, Google publishes 0.10.
+  Settle from a Vertex AI SKU line showing quantity × unit price. Held
+  high meanwhile: quoting low lets a project overrun its ceiling,
+  quoting high only refuses affordable work.
+- **ADR-0003 (continuous scenes via extend)** is proposed, not built. A
+  live probe confirmed extend refuses reference images but keeps the
+  character anyway, because the footage is its own reference. Unknown:
+  whether an extension bills for the new seconds or the whole returned
+  video (2.5x on a 29-second scene), and whether quality holds past one
+  extension.
 
 ## Releases
 
 Tags: `v0.1.0`, `v0.1.0rc1`, `v0.1.0rc2`, `v0.2.0rc1`, `v0.3.0rc1`,
 `v0.4.0rc1`, `v0.5.0rc1`. **Never move or delete any of them.**
-
-`v0.5.0rc1` is tagged but predates the five fixes above, so it is a
-release that does not work against real providers. That is what an rc is
-for — the tag stays put and the next release candidate carries the fixes.
+`v0.5.0rc1` predates every real-provider fix, so it does not work against
+real providers -- that is what an rc is for.
 
 ## Deployment
 
-**Not ready for public deployment.** There is no authentication at all
-(`docs/OPERATIONS.md` says so outright): anyone who reaches the port can
-spend the owner's OpenAI and Veo credits. Auth is planned as 6A-2 and has
-no code. Viable today: put it behind Cloudflare Access or Tailscale, or
-publish a zero-cost demo with every provider pinned to fake.
+**Not ready.** No authentication exists at all: anyone reaching the port
+can spend the owner's OpenAI and Veo credits. Auth is planned as 6A-2 and
+has no code. Viable today: Cloudflare Access or Tailscale, or a zero-cost
+demo with every provider pinned to fake.
 
 ## House rules
 
-- **Look at the screen before calling UI work done.** Every real defect
-  this phase — collapsed placeholders, Korean breaking mid-word, the CSP
-  silently discarding inline styles, letterboxing baked into fake clips —
-  was found by looking, never by reading source.
-- **Pin every provider to fake in demo and screenshot scripts.** Pinning
-  five of six and missing `narrative_provider` once sent real paid calls.
+- **Look at the screen, and listen, before calling anything done.** Every
+  real defect this phase was found by watching: broken anatomy, a female
+  narrator nobody wrote, the same man sounding like three people, a clerk
+  walking in through a door he was already behind, a door closing wrong.
+- **Pin every provider to fake in demo scripts.** Pinning five of six and
+  missing `narrative_provider` once sent real paid calls.
 - **Paid API calls only on explicit approval.**
 - **Per commit:** targeted tests → mypy on BOTH platforms → ruff → full
-  suite → push. If the shell kills long background runs, split the suite
-  (unit, then integration + e2e; 5–9 minutes per chunk).
+  suite → push.
 - **Never claim something was verified when it was not.** Say `NOT RUN`.
 
 ---
