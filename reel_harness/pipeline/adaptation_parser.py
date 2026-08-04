@@ -240,6 +240,22 @@ def _craft_errors(
                 "them into one scene"
             )
 
+    # Dialogue density. Prose narrates what a screenplay lets people say,
+    # and an adaptation that only forwards the source's quoted lines
+    # produces a film where almost nobody speaks -- a real run gave one
+    # spoken line across four shots. Writing lines is an adaptation's job;
+    # writing EVENTS is not, which the prompt constrains separately.
+    if len(shots) >= 2:
+        spoken = sum(1 for shot in shots if (shot.dialogue_line or "").strip())
+        wanted = len(shots) // 2
+        if spoken < wanted:
+            errors.append(
+                f"only {spoken} of {len(shots)} shots carry a dialogue_line -- at least "
+                f"{wanted} should. Where the source describes an exchange or a reaction "
+                "without quoting it, write the line the character would speak; invent "
+                "lines, never events"
+            )
+
     if len(shots) >= 3:
         angles = {shot.camera_angle for shot in shots}
         if len(angles) < 2:

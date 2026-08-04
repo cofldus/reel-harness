@@ -153,3 +153,56 @@ def test_shot_lighting_wins_over_location_default() -> None:
         _shot(lighting="harsh overhead"), _project(), _CHARACTER_BIBLE, _LOCATION,
     )
     assert "harsh overhead" in prompt
+
+
+# -- audio performance ---------------------------------------------------
+#
+# Both of these come from watching a real film the pipeline produced.
+# Neither is theoretical: the first shot came back narrated by a woman who
+# is not in the story, and the old man sounded like a different person in
+# each of his shots.
+
+def _bible() -> dict:
+    return {
+        "fixed_identity": {"face": "lined face", "hair": "grey", "wardrobe": "black coat"},
+        "wardrobe": "black coat",
+        "voice_profile": {"style": "low, restrained"},
+        "age_range": "60s",
+    }
+
+
+def test_a_silent_shot_asks_for_silence_rather_than_saying_nothing() -> None:
+    """Emitting nothing is not the same as asking for quiet. The model
+    generates an audio track either way, and with no instruction it
+    invents a speaker -- which is how a two-man scene acquired a female
+    narrator."""
+    from reel_harness.pipeline.shot_prompt import _dialogue_slot
+
+    shot = _shot(dialogue_line=None)
+    text = _dialogue_slot(shot, _project(), _bible())
+    assert "no spoken dialogue" in text
+    assert "no narration" in text and "no voiceover" in text
+
+
+def test_a_speaking_shot_carries_the_voice_not_only_the_words() -> None:
+    """Each clip is generated independently, so without a vocal anchor the
+    voice is re-rolled per shot. `voice_style` reached the character bible
+    from adaptation and was never compiled -- the face was pinned by
+    reference images while nothing pinned the voice."""
+    from reel_harness.pipeline.shot_prompt import _dialogue_slot
+
+    shot = _shot(dialogue_line="우산 있나?")
+    text = _dialogue_slot(shot, _project(), _bible())
+    assert '"우산 있나?"' in text
+    assert "low, restrained" in text
+    assert "60s voice" in text
+    assert "same voice as in every other shot" in text
+
+
+def test_a_speaking_shot_still_works_without_a_bible() -> None:
+    """A missing bible degrades to words-only rather than raising."""
+    from reel_harness.pipeline.shot_prompt import _dialogue_slot
+
+    text = _dialogue_slot(_shot(dialogue_line="가져가세요."), _project(), None)
+    assert '"가져가세요."' in text
+    assert "same voice" not in text

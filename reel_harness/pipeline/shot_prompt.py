@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v3"
+COMPILER_VERSION = "fable-shot-v4"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -136,7 +136,7 @@ def compile_shot_prompt(
         # dialogue_line was previously compiled into nothing at all, so a
         # speaking shot was generated as a silent one and the project's
         # language never reached the model.
-        _dialogue_slot(shot, project),
+        _dialogue_slot(shot, project, character_bible),
         # 15 quality floor, 16 prohibitions
         _VISUAL_QUALITY,
         _PROHIBITED_ARTIFACTS,
@@ -178,15 +178,30 @@ def _narrative_position(position: ShotPosition | None) -> str:
     return where
 
 
-def _dialogue_slot(shot, project) -> str:
-    """The spoken-line fragment, or empty for a silent shot.
+def _dialogue_slot(shot, project, character_bible: dict | None = None) -> str:
+    """The audio-performance fragment: what is said, by whom, in what
+    voice — or an explicit instruction to stay quiet.
 
-    The line is quoted verbatim so the model reproduces the words rather
-    than paraphrasing the sentiment, and the speaker is named so a
-    two-hander does not put the line in the wrong mouth."""
+    Two things watching a real film exposed here.
+
+    A silent shot used to emit NOTHING, which is not the same as asking
+    for silence: the model still generates an audio track, and with no
+    instruction it invents a speaker. The first shot of a two-man scene
+    came back narrated by a woman who is not in the film. So a shot with
+    no line now says so.
+
+    And a speaking shot said only WHAT was said, never how the character
+    sounds. Each 8-second clip is generated independently, so with no
+    vocal anchor the voice is re-rolled every shot and the same person
+    sounds like three different people. `voice_style` was already in the
+    character bible, carried all the way from adaptation, and was simply
+    never compiled — reference images pinned the face while nothing
+    pinned the voice.
+    """
     line = (getattr(shot, "dialogue_line", None) or "").strip()
     if not line:
-        return ""
+        return "no spoken dialogue in this shot, ambient sound only, no narration, no voiceover"
+
     language = _SPOKEN_LANGUAGE_NAMES.get(
         (getattr(project, "language", "") or "").lower(),
     )
@@ -194,6 +209,23 @@ def _dialogue_slot(shot, project) -> str:
     spoken = f'{speaker} speaks aloud, lip-synced, saying "{line}"'
     if language:
         spoken += f" in {language}"
+
+    # The vocal anchor: whatever the adaptation decided this character
+    # sounds like, plus the age band, since age is the single strongest
+    # cue for keeping a voice recognisable across separate generations.
+    bible = character_bible or {}
+    # The service nests it as {"voice_profile": {"style": ...}}; the flat
+    # key is accepted too so a bible written by anything else still works.
+    profile = bible.get("voice_profile")
+    voice = str(
+        (profile.get("style") if isinstance(profile, dict) else profile)
+        or bible.get("voice_style", "")
+        or ""
+    ).strip()
+    age = str(bible.get("age_range", "") or "").strip()
+    anchor = ", ".join(part for part in (voice, f"{age} voice" if age else "") if part)
+    if anchor:
+        spoken += f", spoken in a {anchor}, the same voice as in every other shot"
     return spoken
 
 

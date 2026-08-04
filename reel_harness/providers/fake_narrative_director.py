@@ -161,9 +161,16 @@ class FakeNarrativeDirector:
                 per_scene += total_shots - per_scene * scene_count
             shots = []
             for shot_index in range(per_scene):
+                # Half the shots speak, matching the density rule a real
+                # plan has to satisfy. The source's own quoted line goes
+                # first; the rest are stand-ins, since the fake is proving
+                # the SHAPE passes validation, not writing dialogue.
                 line = None
-                if dialogue_line and not placed_dialogue and shot_index == 0:
-                    line, placed_dialogue = dialogue_line, True
+                if shot_number % 2 == 0:
+                    if dialogue_line and not placed_dialogue:
+                        line, placed_dialogue = dialogue_line, True
+                    else:
+                        line = f"대사 {shot_number // 2 + 1}."
                 shots.append({
                     "shot_order": shot_index + 1,
                     "shot_size": sizes[shot_number % len(sizes)],

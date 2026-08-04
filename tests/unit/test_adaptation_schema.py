@@ -62,7 +62,8 @@ def _valid_adaptation() -> dict:
                      "action": "창밖을 바라본다", "duration_sec": 4.0},
                     {"shot_order": 2, "shot_size": "close_up", "camera_angle": "profile",
                      "camera_movement": "locked", "subject": "지우",
-                     "action": "전화벨 소리에 시선을 내린다", "duration_sec": 3.0},
+                     "action": "전화벨 소리에 시선을 내린다", "duration_sec": 3.0,
+                     "dialogue_line": "받지 않을 거야."},
                 ],
             },
             {
@@ -73,7 +74,8 @@ def _valid_adaptation() -> dict:
                 "shots": [
                     {"shot_order": 1, "shot_size": "medium_close_up", "camera_angle": "eye_level",
                      "camera_movement": "dolly_in", "subject": "지우",
-                     "action": "천천히 문 쪽으로 돌아선다", "duration_sec": 4.0},
+                     "action": "천천히 문 쪽으로 돌아선다", "duration_sec": 4.0,
+                     "dialogue_line": "이제 그만하자."},
                     {"shot_order": 2, "shot_size": "wide", "camera_angle": "low_angle",
                      "camera_movement": "locked", "subject": "지우",
                      "action": "문 앞에 멈춰 선다", "duration_sec": 3.0},
@@ -295,7 +297,7 @@ def test_a_plan_that_ignores_the_requested_runtime_is_sent_back() -> None:
     assert any("4 shots" in e and "needs 15" in e for e in errors)
 
     # Within one either way is room to end on a beat, not a defect.
-    assert not [e for e in _craft_errors(model, source, target_shot_count=5) if "shots" in e]
+    assert not [e for e in _craft_errors(model, source, target_shot_count=5) if "needs" in e]
 
 
 def test_quoted_speech_in_the_source_must_survive_into_some_shot() -> None:
@@ -313,7 +315,7 @@ def test_quoted_speech_in_the_source_must_survive_into_some_shot() -> None:
     kept = [_shot(1, dialogue_line="이제 그만하자."),
             _shot(2, camera_angle="low_angle", camera_movement="pan"), _shot(3), _shot(4)]
     model, _ = _plan(kept, source=spoken_source)
-    assert not [e for e in _craft_errors(model, spoken_source, None) if "dialogue_line" in e]
+    assert not [e for e in _craft_errors(model, spoken_source, None) if "no shot carries" in e]
 
 
 def test_a_sequence_shot_from_one_angle_is_sent_back() -> None:
@@ -342,7 +344,8 @@ def test_a_plan_that_satisfies_every_craft_rule_passes_clean() -> None:
     spoken_source = '그가 말했다. "이제 그만하자." 그리고 돌아섰다.'
     model, _ = _plan([
         _shot(1, dialogue_line="이제 그만하자."),
-        _shot(2, camera_angle="low_angle", camera_movement="pan"),
+        _shot(2, camera_angle="low_angle", camera_movement="pan",
+              dialogue_line="가야 해."),
         _shot(3, camera_angle="high_angle", camera_movement="dolly_in"),
         _shot(4),
     ], source=spoken_source)
@@ -377,3 +380,33 @@ def test_a_single_scene_piece_is_never_asked_to_subdivide() -> None:
     model, source = _plan([_shot(1), _shot(2, camera_angle="low_angle", camera_movement="pan"),
                            _shot(3, camera_angle="high_angle"), _shot(4)])
     assert not [e for e in _craft_errors(model, source, None) if "scene" in e]
+
+
+def test_a_film_where_almost_nobody_speaks_is_sent_back() -> None:
+    """Prose narrates what a screenplay lets people say. A real run gave
+    one spoken line across four shots because the adaptation only ever
+    forwarded the source's quoted speech -- writing lines is an
+    adaptation's job, and the prompt constrains it to lines rather than
+    events."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    quiet = [_shot(1, dialogue_line="한 마디."), _shot(2), _shot(3), _shot(4)]
+    model, source = _plan(quiet)
+    assert any("carry a dialogue_line" in e for e in _craft_errors(model, source, None))
+
+    talkative = [_shot(1, dialogue_line="한 마디."), _shot(2, dialogue_line="두 마디."),
+                 _shot(3), _shot(4)]
+    model, source = _plan(talkative)
+    assert not [e for e in _craft_errors(model, source, None) if "carry a dialogue_line" in e]
+
+
+def test_silence_is_allowed_where_it_is_the_point() -> None:
+    """Half, not all: a departure or a held look earns its silence, and a
+    rule demanding every shot speak would make worse films."""
+    from reel_harness.pipeline.adaptation_parser import _craft_errors
+
+    model, source = _plan([
+        _shot(1, dialogue_line="가져가세요."), _shot(2, dialogue_line="고맙네."),
+        _shot(3), _shot(4),
+    ])
+    assert not [e for e in _craft_errors(model, source, None) if "carry a dialogue_line" in e]

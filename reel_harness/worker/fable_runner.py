@@ -133,8 +133,17 @@ def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project
         }
         if location_record is not None else {}
     )
+    # age_range lives on the character row rather than inside the bible,
+    # and the prompt needs it: age is the strongest single cue for keeping
+    # a voice recognisable across independently generated shots. Merged
+    # into a copy so the stored bible is never mutated.
+    character_bible = None
+    if character is not None:
+        character_bible = dict(character.bible or {})
+        if character.age_range:
+            character_bible.setdefault("age_range", character.age_range)
     return compile_shot_prompt(
-        shot, project, character_bible=(character.bible if character is not None else None),
+        shot, project, character_bible=character_bible,
         location=location, position=shot_position(session, shot, project),
     )
 

@@ -97,6 +97,15 @@ SHOOTING REQUIREMENTS -- these are checked, and a plan that misses them is sent 
   the requested runtime). Within one of that number is fine; half of it is not.
 - Every line of speech that appears in quotation marks in the source MUST survive as the
   dialogue_line of the shot where it is spoken. Do not summarise it into an action.
+- WRITE DIALOGUE GENEROUSLY. At least half the shots should carry a dialogue_line. Prose
+  narrates what a screenplay lets people say, so where the source describes an exchange, a
+  question, a refusal or a reaction without quoting it, write the line the character would
+  actually speak. Adapting prose into speech is your job.
+  You may invent LINES. You may not invent EVENTS: no new characters, no new incidents, no
+  outcome the source did not reach. A written line must be something this character, in this
+  moment, would plausibly say -- short, spoken, in their own register, never expository.
+  Leave a shot silent only when silence is the point (a departure, a held look, an empty
+  room).
 - Do not shoot the whole sequence from one camera_angle. Vary the angle so the scene reads
   as coverage rather than a single setup.
 - Do not leave every shot locked off. At least one shot needs a motivated camera move, and
@@ -149,7 +158,7 @@ A good plan for 4 shots:
        "action": "편의점 앞 의자에 앉아 캔을 딴다", "dialogue_line": null},
       {"shot_order": 2, "shot_size": "close_up", "camera_angle": "high_angle",
        "camera_movement": "locked", "subject": "민재",
-       "action": "캔을 따던 손이 멈춘다", "dialogue_line": null},
+       "action": "캔을 따던 손이 멈춘다", "dialogue_line": "…누구지."},
       {"shot_order": 3, "shot_size": "medium", "camera_angle": "three_quarter",
        "camera_movement": "pan", "subject": "민재",
        "action": "소리가 난 쪽으로 고개를 돌린다", "dialogue_line": "민재야."},
@@ -162,7 +171,10 @@ A good plan for 4 shots:
 
 Why this passes: four shots for the four requested, ONE scene holding all of them
 because the place and the moment never change, four different angles, one motivated
-move on the turn, and the spoken line placed on the shot where it is heard.
+move on the turn, the source's own line placed on the shot where it is heard, and a
+second short line WRITTEN for shot 2 -- the source only says his hand stopped, and
+"…누구지." is what that pause sounds like without inventing anything that happens.
+Half the shots speak; the closing shot stays silent because standing up is the beat.
 """
 
 
