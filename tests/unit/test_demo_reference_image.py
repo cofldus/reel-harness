@@ -109,7 +109,7 @@ def test_the_whole_casting_workflow_runs_on_the_demo_tier(session_factory, tmp_p
     assert fable.generate_references(project.id).status == "CHARACTER_REVIEW"
 
     for character in fable.project_characters(project.id):
-        assert len(character.reference_images) == 4
+        assert len(character.reference_images) == 5
         fable.approve_reference(character.id)
     assert fable.approve_characters(project.id).status == "SHOT_REVIEW"
     # Free tier: casting spent nothing.

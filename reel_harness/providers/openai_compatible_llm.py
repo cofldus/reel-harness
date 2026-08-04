@@ -224,6 +224,24 @@ class OpenAICompatibleLLMProvider:
                 raise SchemaValidationError("llm refused the request (no content returned)")
             content = message.get("content")
             if not isinstance(content, str) or not content.strip():
+                # A reasoning model spends the SAME budget on thinking and
+                # on answering, so a cap sized for the answer alone can be
+                # consumed entirely before a single visible token is
+                # written. Seen for real: reasoning_tokens == the whole
+                # 6000-token cap, finish_reason "length", content empty.
+                # Reported as "llm returned an empty response", which
+                # names the symptom and hides the cause.
+                usage = data.get("usage") or {}
+                details = usage.get("completion_tokens_details") or {}
+                reasoning = details.get("reasoning_tokens")
+                if data["choices"][0].get("finish_reason") == "length":
+                    raise SchemaValidationError(
+                        "llm hit its token cap before writing any output"
+                        + (f" (reasoning used {reasoning} tokens" if reasoning else "")
+                        + f" of a {self._max_output_tokens} cap) -- raise the model's"
+                        " output-token setting, which on a reasoning model has to cover"
+                        " thinking as well as the answer"
+                    )
                 raise SchemaValidationError("llm returned an empty response")
 
             body_request_id = data.get("id")

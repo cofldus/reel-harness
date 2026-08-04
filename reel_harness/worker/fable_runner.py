@@ -167,12 +167,28 @@ def shot_position(session, shot: FableShot, project: StoryProject) -> ShotPositi
     for index, candidate in enumerate(ordered):
         if candidate.id == shot.id:
             prior = ordered[index - 1] if index > 0 else None
+            # The most recent EARLIER shot featuring this same subject.
+            # In a two-hander the shots alternate, so a character's own
+            # last appearance is almost never the previous shot -- and
+            # without it the model has no idea they are already in the
+            # room, which is how a clerk who never left his counter
+            # walked in through the front door.
+            same = next(
+                (
+                    earlier for earlier in reversed(ordered[:index])
+                    if (earlier.subject or "").strip() == (shot.subject or "").strip()
+                    and (shot.subject or "").strip()
+                ),
+                None,
+            )
             return ShotPosition(
                 index=index + 1, total=len(ordered),
                 previous_action=prior.action if prior else None,
                 previous_subject=prior.subject if prior else None,
                 previous_blocking=prior.blocking if prior else None,
                 previous_shot_size=prior.shot_size if prior else None,
+                subject_last_action=same.action if same else None,
+                subject_last_blocking=same.blocking if same else None,
             )
     return None
 

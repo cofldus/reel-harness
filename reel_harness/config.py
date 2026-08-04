@@ -205,8 +205,14 @@ class Settings(BaseSettings):
     # (bible + characters + locations + scenes + shots), so it gets its
     # own output budget and read timeout rather than reusing the script
     # call's much smaller ones.
+    # 24000 rather than 6000: on a reasoning model this budget covers the
+    # thinking as well as the answer, and a full-length story consumed the
+    # entire 6000 on reasoning alone -- finish_reason "length", zero
+    # content. A shot plan itself is only a few thousand tokens, so the
+    # extra headroom costs nothing on models that do not reason and
+    # rescues the ones that do.
     narrative_max_output_tokens: int = Field(
-        6000, validation_alias=_llm_alias(
+        24000, validation_alias=_llm_alias(
             "REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS", "NARRATIVE_MAX_OUTPUT_TOKENS"))
     narrative_read_timeout_seconds: float = Field(
         120.0, validation_alias=_llm_alias(

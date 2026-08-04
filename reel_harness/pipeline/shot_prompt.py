@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v6"
+COMPILER_VERSION = "fable-shot-v7"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -60,6 +60,10 @@ _SET_CONTINUITY = (
 # itself being wrong, which is the artifact most likely to make a frame
 # unusable because it is visible at a glance and cannot be cropped out.
 _PROHIBITED_ARTIFACTS = (
+    # Objects have to obey physics too. A door closed itself wrongly in a
+    # real shot -- the body list said nothing about the world the body is
+    # standing in.
+    "doors, handles and objects move the way real ones do, "
     "anatomically correct body, natural joints and correct proportions, "
     "no bent or broken torso, no dislocated hips, no limbs at impossible angles, "
     "no distorted faces, no extra or malformed fingers, no duplicated limbs, "
@@ -180,6 +184,12 @@ class ShotPosition:
     previous_subject: str | None = None
     previous_blocking: str | None = None
     previous_shot_size: str | None = None
+    # Where THIS shot's subject was last left, which is not the same as
+    # the previous shot. In a two-hander the shots alternate, so the
+    # frame before a character reappears is almost always somebody
+    # else's -- and without this the model re-invents where they are.
+    subject_last_action: str | None = None
+    subject_last_blocking: str | None = None
 
 
 def _narrative_position(position: ShotPosition | None, subject: str = "") -> str:
@@ -198,6 +208,10 @@ def _narrative_position(position: ShotPosition | None, subject: str = "") -> str
         where = f"final shot of a {position.total}-shot short film, resolving it"
     else:
         where = f"shot {position.index} of {position.total} in a continuous short film"
+    same_subject = bool(
+        subject and position.previous_subject
+        and subject.strip() == position.previous_subject.strip()
+    )
     if position.previous_action:
         # Describe the frame being cut FROM, not merely the verb in it.
         # Watching a real film, the shots did not feel continuous: each
@@ -215,10 +229,6 @@ def _narrative_position(position: ShotPosition | None, subject: str = "") -> str
         # most of a two-hander -- "keep that person where they were" aims
         # the instruction at the wrong actor, and the previous subject
         # gets dragged into a frame they should have left.
-        same_subject = bool(
-            subject and position.previous_subject
-            and subject.strip() == position.previous_subject.strip()
-        )
         carry = (
             "keep that person in the same place, in the same clothes, carrying whatever "
             "they were carrying"
@@ -227,6 +237,20 @@ def _narrative_position(position: ShotPosition | None, subject: str = "") -> str
             "unchanged from that frame"
         )
         where += f", continuing directly from that moment -- {tail}; {carry}"
+
+    # A character who was on screen earlier is already somewhere. Saying
+    # so is what stops the clerk who has been behind his counter all film
+    # from walking in through the front door: the shots alternate between
+    # two people, so his own last appearance is never the previous shot,
+    # and the staging clause above never covers him.
+    if not same_subject and position.subject_last_blocking and subject:
+        where += (
+            f"; {subject} is already in this location and was last seen "
+            f"{position.subject_last_blocking}"
+        )
+        if position.subject_last_action:
+            where += f" after they {position.subject_last_action}"
+        where += " -- they do not enter or arrive, they are already here"
     return where
 
 

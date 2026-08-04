@@ -103,7 +103,7 @@ def test_casting_commands_walk_the_gate(monkeypatch, tmp_path, capsys) -> None:
     assert payload["status"] == "CHARACTER_REVIEW"
     character = payload["characters"][0]
     assert set(character["reference_images"]) == {
-        "face", "three_quarter", "full_body", "wardrobe",
+        "face", "three_quarter", "full_body", "wardrobe", "back",
     }
     assert character["reference_approved"] is False
 

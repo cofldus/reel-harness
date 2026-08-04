@@ -44,20 +44,28 @@ REFERENCE_ASPECT_RATIO = "9:16"
 
 
 class ReferenceView(StrEnum):
-    """The four views of a character reference sheet. FACE is first by
-    contract -- see the module docstring."""
+    """The views of a character reference sheet. FACE is first by
+    contract -- see the module docstring.
+
+    BACK exists because films end with people walking away. Every other
+    view faces the camera, so a shot of someone from behind had nothing
+    to match and the model invented a back each time -- the old man's
+    receding figure, which is the last image of the story, differed from
+    shot to shot. One more image per character is cheap next to a video
+    second."""
 
     FACE = "face"
     THREE_QUARTER = "three_quarter"
     FULL_BODY = "full_body"
     WARDROBE = "wardrobe"
+    BACK = "back"
 
 
 # Ordered, and the order is load-bearing: index 0 is generated from text
 # alone; every later view is chained off it.
 REFERENCE_VIEWS: tuple[ReferenceView, ...] = (
     ReferenceView.FACE, ReferenceView.THREE_QUARTER,
-    ReferenceView.FULL_BODY, ReferenceView.WARDROBE,
+    ReferenceView.FULL_BODY, ReferenceView.WARDROBE, ReferenceView.BACK,
 )
 
 # Per-view framing. Written as camera direction rather than art direction
@@ -79,6 +87,11 @@ _VIEW_FRAMING: dict[ReferenceView, str] = {
     ReferenceView.WARDROBE: (
         "wardrobe detail, garment and fabric texture clearly visible, "
         "even soft lighting, plain neutral background"
+    ),
+    ReferenceView.BACK: (
+        "full-body view from directly behind, facing away from camera, "
+        "back of the head and shoulders and the garment's back clearly visible, "
+        "arms relaxed at the sides, even soft lighting, plain neutral background"
     ),
 }
 

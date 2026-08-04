@@ -76,7 +76,9 @@ def casting(session_factory, tmp_path):
 def test_face_is_the_first_view() -> None:
     """Load-bearing: everything else chains off index 0."""
     assert REFERENCE_VIEWS[0] is ReferenceView.FACE
-    assert len(REFERENCE_VIEWS) == 4
+    # Five now: BACK was added because films end with people walking
+    # away, and every other view faces the camera.
+    assert len(REFERENCE_VIEWS) == 5
 
 
 def test_every_view_carries_the_same_fixed_identity(casting) -> None:
@@ -90,7 +92,7 @@ def test_every_view_carries_the_same_fixed_identity(casting) -> None:
     prompts = {v: compile_reference_prompt(v, character, project) for v in REFERENCE_VIEWS}
     assert all(identity in prompt for prompt in prompts.values())
     # ...while still being four DIFFERENT prompts (framing differs).
-    assert len(set(prompts.values())) == 4
+    assert len(set(prompts.values())) == 5
 
 
 def test_every_view_states_the_adult_constraint(casting) -> None:

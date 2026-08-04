@@ -282,3 +282,46 @@ def test_the_prompt_forbids_broken_bodies_not_only_bad_faces() -> None:
     assert "anatomically correct body" in text
     assert "no bent or broken torso" in text
     assert "impossible angles" in text
+
+
+def test_a_character_who_was_already_here_does_not_arrive_again() -> None:
+    """The shots of a two-hander alternate, so a character's own last
+    appearance is almost never the previous shot. Without carrying it,
+    the clerk who had been behind his counter all film walked in through
+    the front door."""
+    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
+
+    text = _narrative_position(ShotPosition(
+        index=3, total=4,
+        previous_action="문을 열고 들어온다", previous_subject="노인",
+        previous_blocking="문가에 서 있다",
+        subject_last_action="젖은 창밖을 바라본다",
+        subject_last_blocking="계산대 안에 서 있다",
+    ), "준호")
+    assert "준호 is already in this location" in text
+    assert "계산대 안에 서 있다" in text
+    assert "they do not enter or arrive" in text
+
+
+def test_the_reminder_is_skipped_when_the_shot_stays_on_one_person() -> None:
+    """Staying on the same person is already covered by holding their
+    staging; saying both would be noise."""
+    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
+
+    text = _narrative_position(ShotPosition(
+        index=2, total=4, previous_action="창밖을 바라본다",
+        previous_subject="준호", previous_blocking="계산대 안에 서 있다",
+        subject_last_blocking="계산대 안에 서 있다",
+    ), "준호")
+    assert "already in this location" not in text
+    assert "keep that person in the same place" in text
+
+
+def test_objects_are_required_to_behave_physically() -> None:
+    """A door closed itself wrongly in a real shot. The prohibitions
+    described the body and said nothing about the world it stands in."""
+    from reel_harness.pipeline.shot_prompt import compile_shot_prompt
+
+    assert "doors, handles and objects move the way real ones do" in compile_shot_prompt(
+        _shot(), _project(), _bible(),
+    )
