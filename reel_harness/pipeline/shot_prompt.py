@@ -24,15 +24,29 @@ differently-compiled prompt is a different generation request."""
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
-COMPILER_VERSION = "fable-shot-v1"
+# v2 adds the spoken-dialogue slots. Bumped deliberately: the fingerprint
+# is part of a take's identity, so a shot compiled before dialogue existed
+# and the same shot compiled after are genuinely different requests and
+# must not be mistaken for a replay of each other.
+COMPILER_VERSION = "fable-shot-v3"
+
+# Human-readable language names for the speech instruction. A model is
+# told "speaking in Korean", not "ko" -- the ISO code is what this
+# codebase stores, not what a prompt should say.
+_SPOKEN_LANGUAGE_NAMES = {
+    "ko": "Korean",
+    "en": "English",
+}
 
 # Appended to every prompt: the quality floor and the artifact
 # prohibitions that apply regardless of shot content.
 _VISUAL_QUALITY = "photorealistic cinematic footage, natural human motion, filmic depth of field"
 _PROHIBITED_ARTIFACTS = (
     "no distorted faces, no extra or malformed fingers, no duplicated limbs, "
-    "no morphing clothing, no text overlays, no watermark"
+    "no morphing clothing, no text overlays, no watermark, no subtitles, "
+    "no burned-in captions"
 )
 
 # The identity keys copied verbatim into every shot, in this order, so a
@@ -69,6 +83,7 @@ def fixed_identity_values(character_bible: dict | None) -> list[str]:
 
 def compile_shot_prompt(
     shot, project, character_bible: dict | None = None, location: dict | None = None,
+    position: ShotPosition | None = None,
 ) -> str:
     """Assembles the canonical prompt. `shot` is a FableShot,
     `project` a StoryProject; `character_bible` and `location` are the
@@ -109,13 +124,77 @@ def compile_shot_prompt(
         # 11 lighting, 12 atmosphere
         shot.lighting or (location.get("continuity") or {}).get("lighting", ""),
         str(bible.get("visual_style", "")),
-        # 13 temporal continuity
+        # 13 temporal continuity: where this shot sits in the film, and
+        # what the audience just saw. Without it every shot is generated
+        # with identical context -- all four sharing one scene's beat --
+        # and the result is four unrelated clips rather than a sequence.
+        _narrative_position(position),
         str(continuity.get("source_beat", "")),
-        # 14 quality floor, 15 prohibitions
+        # 14 spoken dialogue. Three things have to be present together or
+        # the shot comes back silent: WHAT is said, that it is SPOKEN
+        # aloud rather than captioned, and in WHICH language. The stored
+        # dialogue_line was previously compiled into nothing at all, so a
+        # speaking shot was generated as a silent one and the project's
+        # language never reached the model.
+        _dialogue_slot(shot, project),
+        # 15 quality floor, 16 prohibitions
         _VISUAL_QUALITY,
         _PROHIBITED_ARTIFACTS,
     ]
     return ", ".join(slot.strip() for slot in slots if slot and slot.strip())
+
+
+@dataclass(frozen=True)
+class ShotPosition:
+    """Where one shot sits in the finished film.
+
+    Passed in rather than derived, because a shot row knows its order
+    WITHIN a scene but nothing about the scene's place in the film -- and
+    "shot 1" of scene 3 is not the opening of anything."""
+
+    index: int          # 1-based, across the whole film
+    total: int
+    previous_action: str | None = None
+
+
+def _narrative_position(position: ShotPosition | None) -> str:
+    """States the shot's place in the sequence and what immediately
+    precedes it.
+
+    A model given only "a woman looks out of a window" makes a clip. The
+    same model told it is the third of four, following a specific action,
+    makes a shot of a film -- it is the only signal in the prompt that
+    the clips belong to one continuous piece."""
+    if position is None or position.total <= 1:
+        return ""
+    if position.index == 1:
+        where = f"opening shot of a {position.total}-shot short film"
+    elif position.index == position.total:
+        where = f"final shot of a {position.total}-shot short film, resolving it"
+    else:
+        where = f"shot {position.index} of {position.total} in a continuous short film"
+    if position.previous_action:
+        where += f", continuing directly from: {position.previous_action}"
+    return where
+
+
+def _dialogue_slot(shot, project) -> str:
+    """The spoken-line fragment, or empty for a silent shot.
+
+    The line is quoted verbatim so the model reproduces the words rather
+    than paraphrasing the sentiment, and the speaker is named so a
+    two-hander does not put the line in the wrong mouth."""
+    line = (getattr(shot, "dialogue_line", None) or "").strip()
+    if not line:
+        return ""
+    language = _SPOKEN_LANGUAGE_NAMES.get(
+        (getattr(project, "language", "") or "").lower(),
+    )
+    speaker = shot.subject or "the actor"
+    spoken = f'{speaker} speaks aloud, lip-synced, saying "{line}"'
+    if language:
+        spoken += f" in {language}"
+    return spoken
 
 
 def prompt_fingerprint(prompt: str) -> str:

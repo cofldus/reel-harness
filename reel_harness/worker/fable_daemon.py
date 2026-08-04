@@ -24,7 +24,12 @@ from reel_harness.worker.fable_lease import (
     recover_stale_shots,
     release_shot_lease,
 )
-from reel_harness.worker.fable_runner import run_shot, takes_per_shot_for
+from reel_harness.worker.fable_runner import (
+    DEFAULT_GENERATION_TIMEOUT_SEC,
+    DEFAULT_POLL_INTERVAL_SEC,
+    run_shot,
+    takes_per_shot_for,
+)
 from reel_harness.worker.heartbeat import LeaseHeartbeat
 
 
@@ -45,6 +50,14 @@ class FableDaemonConfig:
     # Settings.fable_takes_per_shot. A project may override it for itself;
     # this is the operator-wide default the override falls back to.
     takes_per_shot: int = 1
+    # Settings.fable_generation_timeout_seconds / _poll_interval_seconds.
+    # Defaults match the runner's, so a daemon built without an opinion
+    # still waits long enough for a real generation.
+    # Named generation_* to keep it distinct from poll_interval_seconds
+    # above, which is how often this daemon looks for WORK -- a different
+    # question from how often it asks about one running generation.
+    generation_timeout_seconds: float = DEFAULT_GENERATION_TIMEOUT_SEC
+    generation_poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SEC
 
 
 class FableDaemon:
@@ -173,6 +186,8 @@ class FableDaemon:
                     session, shot, provider, self._storage, lease_token=lease_token,
                     allow_paid_generation=cfg.allow_paid_generation,
                     takes_per_shot=takes_per_shot_for(project, cfg.takes_per_shot),
+                    generation_timeout_sec=cfg.generation_timeout_seconds,
+                    poll_interval_sec=cfg.generation_poll_interval_seconds,
                 )
             finally:
                 heartbeat.stop()

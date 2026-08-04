@@ -59,13 +59,40 @@ from reel_harness.db.cinematic_models import (
     StoryProject,
 )
 from reel_harness.observability import log_worker_event
-from reel_harness.pipeline.shot_prompt import compile_shot_prompt, prompt_fingerprint
-from reel_harness.providers.base import CinematicGenerationRequest, CinematicVideoProvider
+from reel_harness.pipeline.generation_plan import (
+    GenerationPlanConflict,
+    resolve_parameters,
+    select_reference_images,
+)
+from reel_harness.pipeline.shot_prompt import (
+    ShotPosition,
+    compile_shot_prompt,
+    prompt_fingerprint,
+)
+from reel_harness.providers.base import (
+    CinematicGenerationRequest,
+    CinematicGenerationStatus,
+    CinematicVideoProvider,
+)
 from reel_harness.storage.base import StorageBackend
 from reel_harness.worker.fable_lease import assert_shot_lease
 
-_POLL_LIMIT = 60
-_POLL_INTERVAL_SEC = 0.2
+# How long to wait for one generation, and how often to ask. These used to
+# be a fixed 60 x 0.2s = 12 SECONDS, which was sized for the fake tier
+# (it completes in one or two polls). A real video model takes one to
+# three MINUTES, so every real generation timed out, was written off as
+# UPSTREAM_TRANSIENT, and was billed anyway -- the provider kept working
+# on a job nobody was still listening for.
+#
+# The budget is now wall-clock and configurable, and the interval is
+# separate from it so the fake tier still finishes instantly in tests
+# rather than sleeping through a real-world cadence.
+DEFAULT_GENERATION_TIMEOUT_SEC = 600.0
+DEFAULT_POLL_INTERVAL_SEC = 5.0
+# The fake/demo tiers answer immediately, so the first poll costs nothing
+# and the loop exits before any sleep. Kept small so a test that does
+# sleep is not slowed by the real-world default.
+_FIRST_POLL_DELAY_SEC = 0.0
 
 
 def _fenced_commit(session, shot: FableShot, lease_token: str | None) -> bool:
@@ -76,6 +103,17 @@ def _fenced_commit(session, shot: FableShot, lease_token: str | None) -> bool:
         return False
     session.commit()
     return True
+
+
+def subject_character(session, shot: FableShot, project: StoryProject):
+    """The character this shot is OF. Its approved reference sheet is what
+    keeps one virtual actor recognizable across separately generated
+    clips -- the entire reason casting exists."""
+    return session.execute(
+        select(FableCharacter).where(
+            FableCharacter.project_id == project.id, FableCharacter.name == shot.subject,
+        )
+    ).scalars().first()
 
 
 def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project: StoryProject) -> str:
@@ -97,15 +135,48 @@ def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project
     )
     return compile_shot_prompt(
         shot, project, character_bible=(character.bible if character is not None else None),
-        location=location,
+        location=location, position=shot_position(session, shot, project),
     )
 
 
-def _shot_price(provider: CinematicVideoProvider, shot: FableShot, project: StoryProject):
-    """This shot's estimated price, as (amount, currency). An estimate the
-    provider marks unknown yields (None, None), which assert_within_budget
-    refuses under a live budget rather than treating as free."""
-    estimate = provider.estimate_cost(estimate_request_for_shot(shot, project))
+def shot_position(session, shot: FableShot, project: StoryProject) -> ShotPosition | None:
+    """Where this shot sits across the WHOLE film, and what precedes it.
+
+    Computed here rather than in the compiler because it needs the other
+    scenes: a shot knows its order within its own scene, which says
+    nothing about the film. Ordered by (scene_order, shot_order), the same
+    order render_final concatenates in -- so "the shot before this one" in
+    the prompt is the shot the audience actually sees before it."""
+    ordered = list(session.execute(
+        select(FableShot)
+        .join(FableScene, FableShot.scene_id == FableScene.id)
+        .where(FableScene.project_id == project.id)
+        .order_by(FableScene.scene_order, FableShot.shot_order)
+    ).scalars())
+    if len(ordered) <= 1:
+        return None
+    for index, candidate in enumerate(ordered):
+        if candidate.id == shot.id:
+            previous = ordered[index - 1].action if index > 0 else None
+            return ShotPosition(
+                index=index + 1, total=len(ordered), previous_action=previous,
+            )
+    return None
+
+
+def _shot_price(
+    provider: CinematicVideoProvider, shot: FableShot, project: StoryProject,
+    duration_sec: float | None = None,
+):
+    """This shot's estimated price, as (amount, currency). Priced at the
+    duration that will ACTUALLY be requested -- a provider billing per
+    second and generating 8s for a 3s plan would otherwise be budgeted at
+    a third of the real charge. An estimate the provider marks unknown
+    yields (None, None), which assert_within_budget refuses under a live
+    budget rather than treating as free."""
+    estimate = provider.estimate_cost(
+        estimate_request_for_shot(shot, project, duration_sec=duration_sec)
+    )
     if not estimate.known:
         return None, None
     return estimate.amount, estimate.currency
@@ -140,10 +211,37 @@ def _seed_for_attempt(fingerprint: str, attempt_number: int) -> int:
     return int(digest[:8], 16) % 2_147_483_647
 
 
+
+def _poll_until_settled(
+    provider, handle, sleep, timeout_sec: float, interval_sec: float, monotonic,
+) -> tuple[CinematicGenerationStatus, bool]:
+    """Polls until the generation settles or the deadline passes.
+
+    Returns (status, timed_out). The deadline is wall-clock rather than a
+    poll COUNT because a count silently means different things at
+    different intervals -- the bug this replaced was a 60-poll budget that
+    happened to mean twelve seconds.
+
+    The first poll happens before any sleep, so a provider that answers
+    immediately (the fake and demo tiers) costs nothing extra.
+    """
+    deadline = monotonic() + timeout_sec
+    while True:
+        status = provider.get_generation_status(handle)
+        if status.state != "generating":
+            return status, False
+        if monotonic() >= deadline:
+            return status, True
+        sleep(interval_sec)
+
+
 def run_shot(
     session, shot: FableShot, provider: CinematicVideoProvider, storage: StorageBackend,
     lease_token: str | None = None, sleep=time.sleep, allow_paid_generation: bool = False,
     takes_per_shot: int = 1,
+    generation_timeout_sec: float = DEFAULT_GENERATION_TIMEOUT_SEC,
+    poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
+    monotonic=time.monotonic,
 ) -> FableShot:
     """Generates `takes_per_shot` candidate takes for one leased shot.
 
@@ -177,6 +275,7 @@ def run_shot(
         outcome, detail = _run_one_take(
             session, shot, scene, project, provider, storage, prompt, fingerprint,
             attempt_number, lease_token, sleep, allow_paid_generation,
+            generation_timeout_sec, poll_interval_sec, monotonic,
         )
         if outcome == "produced":
             produced += 1
@@ -221,6 +320,9 @@ def _run_one_take(
     provider: CinematicVideoProvider, storage: StorageBackend, prompt: str,
     fingerprint: str, attempt_number: int, lease_token: str | None, sleep,
     allow_paid_generation: bool,
+    generation_timeout_sec: float = DEFAULT_GENERATION_TIMEOUT_SEC,
+    poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
+    monotonic=time.monotonic,
 ) -> tuple[str, tuple[str, str] | None]:
     """One candidate take.
 
@@ -230,16 +332,39 @@ def _run_one_take(
     already committed either way; the SHOT's final status is the
     caller's decision, because it depends on what the other takes in the
     batch did."""
-    request = CinematicGenerationRequest(
-        prompt=prompt,
-        duration_sec=shot.duration_sec or 2.0,
-        aspect_ratio=project.aspect_ratio,
-        resolution=DEFAULT_SHOT_RESOLUTION,
-        seed=_seed_for_attempt(fingerprint, attempt_number),
-        correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
-    )
-
     try:
+        # Order matters. Asking the provider to quote the PLANNED shot
+        # comes first because an unconfigured provider raises here, and
+        # "not configured" is the truer reason than any conclusion drawn
+        # from its deliberately-empty placeholder capabilities -- reading
+        # those first would misreport a broken configuration as a plan
+        # conflict a human is expected to resolve.
+        _shot_price(provider, shot, project)
+
+        # What the PROVIDER can actually generate, not what the fake
+        # tier's constants assume. Before this the worker hardcoded 360p
+        # and passed the planned duration straight through, so every
+        # real-provider shot failed validate_request before a frame
+        # existed.
+        try:
+            parameters = resolve_parameters(
+                provider.capabilities, shot.duration_sec or 2.0, DEFAULT_SHOT_RESOLUTION,
+            )
+        except GenerationPlanConflict as exc:
+            return "refused", ("GENERATION_PLAN_CONFLICT", str(exc)[:500])
+
+        character = subject_character(session, shot, project)
+        references = select_reference_images(character, provider.capabilities)
+        request = CinematicGenerationRequest(
+            prompt=prompt,
+            duration_sec=parameters.duration_sec,
+            aspect_ratio=project.aspect_ratio,
+            resolution=parameters.resolution,
+            reference_image_paths=references,
+            seed=_seed_for_attempt(fingerprint, attempt_number),
+            correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
+        )
+
         # The cost gates run before validate_request, so a project that
         # must not spend money never reaches a provider call at all. They
         # run per TAKE, not per shot: each candidate is its own paid
@@ -254,7 +379,9 @@ def _run_one_take(
         # FAILURE, not a budget refusal.
         try:
             assert_paid_generation_allowed(project, provider.provider_id, allow_paid_generation)
-            assert_within_budget(project, *_shot_price(provider, shot, project))
+            assert_within_budget(
+                project, *_shot_price(provider, shot, project, parameters.duration_sec),
+            )
         except (
             PaidGenerationNotAllowedError, BudgetExceededError, BudgetCurrencyMismatchError,
         ) as exc:
@@ -271,25 +398,42 @@ def _run_one_take(
             provider_job_reference=handle.provider_job_reference,
             prompt_fingerprint=fingerprint, status="SUBMITTED",
             generation_seed=request.seed,
+            # WHICH reference sheet this take was generated from. Without
+            # it a take generated before a character was re-cast is
+            # indistinguishable from one generated after, and the column
+            # existed unpopulated until this was wired up.
+            reference_fingerprint=(
+                character.reference_fingerprint if references and character else None
+            ),
         )
         session.add(take)
         apply_shot_transition(shot, FableShotStatus.GENERATING)
         if not _fenced_commit(session, shot, lease_token):
             return "fenced", None
 
-        for _ in range(_POLL_LIMIT):
-            status = provider.get_generation_status(handle)
-            if status.state != "generating":
-                break
-            sleep(_POLL_INTERVAL_SEC)
-        else:
-            status = provider.get_generation_status(handle)
+        status, timed_out = _poll_until_settled(
+            provider, handle, sleep, generation_timeout_sec, poll_interval_sec, monotonic,
+        )
 
         if status.state == "moderated":
             take.status = "MODERATED"
             take.rejection_reasons = {"moderation": status.moderation_reason}
             _fenced_commit(session, shot, lease_token)
             return "refused", ("CONTENT_POLICY_REVIEW", status.moderation_reason or "")
+        if timed_out:
+            # The generation is STILL RUNNING at the provider and has
+            # almost certainly been billed. Calling that "transient" would
+            # invite a retry that pays for the same shot twice, so it gets
+            # its own code and the provider's job reference is named in
+            # the message -- that reference is the only way to find the
+            # work afterwards. The take keeps its GENERATING status rather
+            # than being marked FAILED, because it did not fail.
+            _fenced_commit(session, shot, lease_token)
+            return "refused", (
+                "GENERATION_TIMEOUT",
+                f"still generating after {generation_timeout_sec:.0f}s and already billed -- "
+                f"provider job {handle.provider_job_reference}",
+            )
         if status.state != "succeeded":
             take.status = "FAILED"
             _fenced_commit(session, shot, lease_token)

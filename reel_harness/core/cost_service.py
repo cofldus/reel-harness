@@ -44,6 +44,7 @@ from reel_harness.db.cinematic_models import (
     FableTake,
     StoryProject,
 )
+from reel_harness.pipeline.generation_plan import resolve_parameters
 from reel_harness.providers.base import CinematicCostEstimate, CinematicGenerationRequest
 from reel_harness.providers.registry import provider_charges_money
 
@@ -77,6 +78,17 @@ class ProjectCostEstimate:
     shot_count: int
     unpriced_shot_count: int
     detail: str
+    # What the shot plan asks for versus what the provider will actually
+    # generate. They differ whenever a provider cannot produce a shot's
+    # planned length -- Veo, driven by references, generates 8s whatever
+    # the beat was written for. Reported so the approval gate can show the
+    # difference instead of the operator finding it in the finished cut.
+    planned_runtime_sec: float = 0.0
+    generated_runtime_sec: float = 0.0
+
+    @property
+    def runtime_differs(self) -> bool:
+        return round(self.planned_runtime_sec, 3) != round(self.generated_runtime_sec, 3)
 
 
 @dataclass(frozen=True)
@@ -92,7 +104,9 @@ class BudgetStatus:
     unpriced_take_count: int
 
 
-def estimate_request_for_shot(shot: FableShot, project: StoryProject) -> CinematicGenerationRequest:
+def estimate_request_for_shot(
+    shot: FableShot, project: StoryProject, duration_sec: float | None = None,
+) -> CinematicGenerationRequest:
     """The request shape used purely for PRICING a shot. The prompt is
     deliberately empty: every provider surveyed for Fable prices a
     generation by duration/resolution/aspect ratio, never by prompt
@@ -101,10 +115,16 @@ def estimate_request_for_shot(shot: FableShot, project: StoryProject) -> Cinemat
     duration/aspect/resolution values are the same ones
     worker.fable_runner will actually request, which is what makes the
     estimate comparable to the eventual bill.
+
+    `duration_sec` overrides the plan when the provider cannot generate
+    the planned length (see pipeline.generation_plan). Pricing the PLAN
+    while generating something longer would under-report the bill by
+    whatever the provider rounds up to -- for a per-second tariff and a
+    3s shot generated at 8s, by a factor of nearly three.
     """
     return CinematicGenerationRequest(
         prompt="",
-        duration_sec=shot.duration_sec or 2.0,
+        duration_sec=duration_sec if duration_sec is not None else (shot.duration_sec or 2.0),
         aspect_ratio=project.aspect_ratio,
         resolution=DEFAULT_SHOT_RESOLUTION,
         correlation_id=f"{project.id}:{shot.id}:estimate",
@@ -125,9 +145,19 @@ def estimate_project_cost(
     total = 0.0
     currencies: set[str] = set()
     unpriced = 0
+    planned_runtime = 0.0
+    generated_runtime = 0.0
     for shot in shots:
+        # Priced at what the provider will actually generate. A plan the
+        # provider cannot satisfy at all raises out of here, which is what
+        # makes the approval gate refuse before anything is spent.
+        parameters = resolve_parameters(
+            provider.capabilities, shot.duration_sec or 2.0, DEFAULT_SHOT_RESOLUTION,
+        )
+        planned_runtime += parameters.planned_duration_sec
+        generated_runtime += parameters.duration_sec
         estimate: CinematicCostEstimate = provider.estimate_cost(
-            estimate_request_for_shot(shot, project)
+            estimate_request_for_shot(shot, project, duration_sec=parameters.duration_sec)
         )
         if not estimate.known or estimate.amount is None:
             unpriced += 1
@@ -144,6 +174,8 @@ def estimate_project_cost(
                 f"provider priced shots in more than one currency "
                 f"({', '.join(sorted(currencies))}) -- not summed"
             ),
+            planned_runtime_sec=round(planned_runtime, 3),
+            generated_runtime_sec=round(generated_runtime, 3),
         )
 
     currency = next(iter(currencies), None)
@@ -160,6 +192,8 @@ def estimate_project_cost(
     return ProjectCostEstimate(
         known=known, amount=_round(total) if currencies else None, currency=currency,
         shot_count=len(shots), unpriced_shot_count=unpriced, detail=detail,
+        planned_runtime_sec=round(planned_runtime, 3),
+        generated_runtime_sec=round(generated_runtime, 3),
     )
 
 

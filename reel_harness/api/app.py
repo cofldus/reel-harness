@@ -676,6 +676,9 @@ class FableCostEstimateResponse(BaseModel):
     shot_count: int
     unpriced_shot_count: int
     detail: str
+    planned_runtime_sec: float = 0.0
+    generated_runtime_sec: float = 0.0
+    runtime_differs: bool = False
 
 
 class CreateFableProjectRequest(BaseModel):
@@ -826,6 +829,9 @@ def estimate_fable_cost(
         known=estimate.known, amount=estimate.amount, currency=estimate.currency,
         shot_count=estimate.shot_count, unpriced_shot_count=estimate.unpriced_shot_count,
         detail=estimate.detail,
+        planned_runtime_sec=estimate.planned_runtime_sec,
+        generated_runtime_sec=estimate.generated_runtime_sec,
+        runtime_differs=estimate.runtime_differs,
     )
 
 

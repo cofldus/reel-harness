@@ -127,8 +127,16 @@ def test_shot_happy_path() -> None:
     assert shot.status == "SELECTED"
 
 
-def test_shot_selected_is_terminal() -> None:
-    assert ALLOWED_SHOT_TRANSITIONS[FableShotStatus.SELECTED] == set()
+def test_a_selection_can_be_revised_but_only_backwards() -> None:
+    """Choosing a take is a judgement, so it must be undoable -- but only
+    back to review. A SELECTED shot cannot jump anywhere else, and the
+    service additionally refuses once the film has been cut."""
+    assert ALLOWED_SHOT_TRANSITIONS[FableShotStatus.SELECTED] == {
+        FableShotStatus.REVIEW_REQUIRED,
+    }
+    shot = _FakeShot(status="SELECTED")
+    apply_shot_transition(shot, FableShotStatus.REVIEW_REQUIRED)
+    assert shot.status == "REVIEW_REQUIRED"
 
 
 def test_shot_failure_requires_bookkeeping_and_allows_manual_retry() -> None:

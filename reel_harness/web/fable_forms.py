@@ -240,7 +240,32 @@ def validate_new_fable_form(
     ))
 
 
-def validate_budget_form(limit_amount: str, currency: str) -> BudgetFormResult:
+# Offered ceilings, with what each one actually buys at current list
+# prices. Presets exist so setting a budget is one click rather than a
+# number pulled out of the air -- but a preset is still an explicit
+# choice: nothing is applied until the operator picks one. The paid gate
+# requires a DECISION, and quietly defaulting one would hollow it out.
+BUDGET_PRESETS: tuple[tuple[float, str], ...] = (
+    (2.0, "$2 — 레퍼런스 시트만 (배우 2~4명)"),
+    (5.0, "$5 — 단편 1편 (8초 x 4샷)"),
+    (10.0, "$10 — 여유 있게 (재생성 포함)"),
+    (25.0, "$25 — 여러 편 작업"),
+)
+
+# Pre-selected in the form. The most restrictive preset that still
+# completes a film, so the default errs toward stopping early rather than
+# overspending -- the two directions are not symmetric.
+DEFAULT_BUDGET_PRESET = 5.0
+
+# Above this, the form asks for a second confirmation. Not a cap: an
+# operator who means it can spend more, but a mistyped extra zero should
+# not sail through on one click.
+BUDGET_CONFIRM_THRESHOLD = 50.0
+
+
+def validate_budget_form(
+    limit_amount: str, currency: str, confirm_large: bool = False,
+) -> BudgetFormResult:
     """A budget limit is the per-project half of the paid-generation gate,
     so a malformed one is refused rather than coerced -- a typo that
     silently became a bigger number would be the worst possible failure
@@ -265,6 +290,14 @@ def validate_budget_form(limit_amount: str, currency: str) -> BudgetFormResult:
         errors["currency"] = "통화를 입력해주세요."
     elif not _CURRENCY_RE.match(cleaned_currency):
         errors["currency"] = "통화 코드 형식이 올바르지 않습니다."
+
+    # A large ceiling is allowed, but only when explicitly confirmed --
+    # the difference between $5 and $50 is a keystroke, and only one of
+    # them is recoverable.
+    if amount is not None and amount > BUDGET_CONFIRM_THRESHOLD and not confirm_large:
+        errors["limit_amount"] = (
+            f"${amount:,.0f}는 큰 금액입니다. 확인란을 체크하면 설정됩니다."
+        )
 
     if errors or amount is None:
         return BudgetFormResult(value=None, errors=errors)

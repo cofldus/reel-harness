@@ -36,7 +36,19 @@
 </ol>
 
 {% if error %}
-<div class="alert alert-error" role="alert"><p>{{ error }}</p></div>
+{# Classified rather than dumped: the title says what happened, the body
+   says what to do, and the exact service message stays available under a
+   disclosure so nothing is lost to prettiness. #}
+<div class="alert alert-{{ error.severity }}" role="alert">
+  <p class="alert-title">{{ error.title }}</p>
+  {% if error.explanation %}<p class="alert-body">{{ error.explanation }}</p>{% endif %}
+  {% if error.action_label and error.action_anchor %}
+  <p class="alert-action"><a class="btn btn-sm" href="#{{ error.action_anchor }}">{{ error.action_label }}</a></p>
+  {% endif %}
+  {% if error.detail %}
+  <details class="alert-detail"><summary>기술 정보</summary><p>{{ error.detail }}</p></details>
+  {% endif %}
+</div>
 {% endif %}
 
 {% include "fragments/fable_status.html" %}
@@ -201,7 +213,23 @@
             <button type="submit" class="btn btn-sm">반려 · 다시 생성</button>
           </form>
           {% endif %}
+          {# Always rendered so the reason is visible, disabled when a shot
+             still names this actor -- an absent button would leave the
+             operator guessing why. #}
+          <form method="post" action="/fable/characters/{{ character.character_id }}/delete"
+                class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="project_id" value="{{ project.project_id }}">
+            <button type="submit" class="btn btn-ghost btn-sm btn-danger"
+                    {{ 'disabled' if not character.can_delete }}
+                    title="{{ character.delete_blocked_reason or '이 배우를 프로젝트에서 제거합니다' }}">삭제</button>
+          </form>
         </div>
+        {% if not character.can_delete and character.delete_blocked_reason %}
+        <p class="hint">{{ character.delete_blocked_reason }}</p>
+        {% elif character.cost_amount %}
+        <p class="hint">삭제해도 이미 생성된 이미지 파일은 남습니다 — 비용이 든 자산이라 지우지 않습니다.</p>
+        {% endif %}
       </div>
     </li>
     {% endfor %}
@@ -252,7 +280,9 @@
         <li class="take {{ 'take-selected' if take.selected }}">
           <div class="take-frame">
             {% if take.video_url %}
-            <video controls preload="metadata" src="{{ take.video_url }}"></video>
+            <video controls preload="metadata" src="{{ take.video_url }}"
+                   data-enlarge="take-{{ take.take_id }}"
+                   data-caption="샷 {{ shot.shot_order }} · TAKE {{ '%02d' | format(take.attempt_number) }}"></video>
             {% else %}
             <span class="take-placeholder">{{ take.status_label }}</span>
             {% endif %}
@@ -268,7 +298,16 @@
             <button type="submit" class="btn btn-sm btn-block take-pick">이 컷으로</button>
           </form>
           {% elif take.selected %}
-          <span class="take-state">선택됨</span>
+          <div class="take-selected-row">
+            <span class="take-state">선택됨</span>
+            {% if take.can_deselect %}
+            <form method="post" action="/fable/takes/{{ take.take_id }}/deselect" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="project_id" value="{{ project.project_id }}">
+              <button type="submit" class="btn btn-ghost btn-sm">선택 해제</button>
+            </form>
+            {% endif %}
+          </div>
           {% endif %}
         </li>
         {% endfor %}
@@ -307,7 +346,7 @@
 {% endif %}
 
 {# ---- Budget: something you check, not something you read ------------- #}
-<details class="budget">
+<details class="budget" id="budget" {{ 'open' if project.budget.limit_amount is none }}>
   <summary>
     <span class="eyebrow">예산</span>
     <span class="budget-figure">
@@ -331,21 +370,42 @@
     {% endif %}
     {# Always rendered, disabled rather than hidden: a page that hides a
        whole form also hides its CSRF field. #}
+    {# One click per preset, so a ceiling is a choice rather than a number
+       pulled out of the air -- but still an explicit choice. Nothing is
+       applied until one is pressed, because the paid gate exists to
+       require a decision. #}
+    <div class="budget-presets">
+      {% for amount, label in budget_presets %}
+      <form method="post" action="/fable/{{ project.project_id }}/budget" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="limit_amount" value="{{ amount }}">
+        <input type="hidden" name="currency" value="USD">
+        <button type="submit"
+                class="btn btn-sm {{ 'btn-primary' if amount == default_budget_preset and project.budget.limit_amount is none else 'btn-ghost' }}"
+                {{ 'disabled' if project.is_terminal }}>{{ label }}</button>
+      </form>
+      {% endfor %}
+    </div>
+
     <form method="post" action="/fable/{{ project.project_id }}/budget">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="field-grid">
         <div class="form-field">
-          <label for="limit_amount">한도</label>
+          <label for="limit_amount">직접 입력</label>
           <input type="text" id="limit_amount" name="limit_amount" inputmode="decimal"
                  value="{{ project.budget.limit_amount if project.budget.limit_amount is not none else '' }}"
                  {{ 'disabled' if project.is_terminal }}>
         </div>
         <div class="form-field">
           <label for="currency">통화</label>
-          <input type="text" id="currency" name="currency" value="{{ project.budget.currency or '' }}"
+          <input type="text" id="currency" name="currency" value="{{ project.budget.currency or 'USD' }}"
                  placeholder="USD" {{ 'disabled' if project.is_terminal }}>
         </div>
       </div>
+      <label class="checkbox">
+        <input type="checkbox" name="confirm_large" value="true" {{ 'disabled' if project.is_terminal }}>
+        ${{ budget_confirm_threshold | int }} 초과 금액으로 설정합니다
+      </label>
       <div class="actions">
         <button type="submit" class="btn btn-primary" {{ 'disabled' if project.is_terminal }}>저장</button>
       </div>
@@ -372,4 +432,16 @@
 {% endif %}
 
 </div>
+
+{# One lightbox for every take on the page. Rendered once rather than per
+   card, so opening one does not mean the browser has parsed forty. #}
+<dialog id="take-lightbox" aria-label="테이크 크게 보기">
+  <div class="lightbox-body">
+    <video controls playsinline></video>
+    <div class="lightbox-bar">
+      <span data-lightbox-caption></span>
+      <form method="dialog"><button class="btn btn-sm">닫기</button></form>
+    </div>
+  </div>
+</dialog>
 {% endblock %}

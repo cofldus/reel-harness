@@ -32,6 +32,7 @@ _FAKE_CAPABILITIES = CinematicCapabilities(
     last_frame=False,
     character_reference=True,
     multiple_references=True,
+    max_character_references=4,
     video_reference=False,
     native_audio=False,
     lip_sync=False,

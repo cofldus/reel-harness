@@ -180,6 +180,18 @@ class Settings(BaseSettings):
             "REEL_HARNESS_FABLE_MUTE_AUDIO", "FABLE_MUTE_AUDIO"))
     # A transition-bearing assembly re-encodes every frame; the default
     # subprocess timeout is sized for a stream copy, not for that.
+    # How long one shot generation may take before the worker stops
+    # waiting. A real video model takes one to three minutes; the old
+    # hardcoded budget was twelve SECONDS, so every real generation was
+    # written off as transient and billed anyway.
+    fable_generation_timeout_seconds: float = Field(
+        600.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_GENERATION_TIMEOUT_SECONDS",
+            "FABLE_GENERATION_TIMEOUT_SECONDS"))
+    fable_generation_poll_interval_seconds: float = Field(
+        5.0, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_GENERATION_POLL_INTERVAL_SECONDS",
+            "FABLE_GENERATION_POLL_INTERVAL_SECONDS"))
     fable_render_timeout_seconds: float = Field(
         1800.0, validation_alias=_llm_alias(
             "REEL_HARNESS_FABLE_RENDER_TIMEOUT_SECONDS", "FABLE_RENDER_TIMEOUT_SECONDS"))

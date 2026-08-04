@@ -247,3 +247,45 @@ document.addEventListener("submit", function (event) {
     if (event.target.dataset.status !== page.dataset.projectStatus) window.location.reload();
   });
 })();
+
+/* Click a take to see it big.
+ *
+ * The grid crops thumbnails to fill their tile, which makes a contact
+ * sheet readable and makes judging a shot impossible -- you cannot decide
+ * between four takes from four cropped postage stamps. Clicking opens the
+ * whole 9:16 frame, uncropped.
+ *
+ * Uses <dialog>, so Escape and focus handling come from the platform
+ * rather than from hand-rolled key listeners. */
+(function () {
+  var dialog = document.getElementById("take-lightbox");
+  if (!dialog) return;
+  var player = dialog.querySelector("video");
+  var caption = dialog.querySelector("[data-lightbox-caption]");
+
+  document.addEventListener("click", function (event) {
+    var source = event.target.closest("video[data-enlarge]");
+    if (!source) return;
+    event.preventDefault();
+    player.src = source.getAttribute("src");
+    if (caption) caption.textContent = source.getAttribute("data-caption") || "";
+    dialog.showModal();
+    player.play().catch(function () {
+      /* Autoplay may be refused; the controls still work. */
+    });
+  });
+
+  function close() {
+    player.pause();
+    // Releasing the source stops the browser buffering a clip nobody is
+    // watching once the dialog is shut.
+    player.removeAttribute("src");
+    player.load();
+  }
+  dialog.addEventListener("close", close);
+  dialog.addEventListener("click", function (event) {
+    // Clicking the backdrop (the dialog element itself, not its contents)
+    // closes -- the gesture everyone expects from a lightbox.
+    if (event.target === dialog) dialog.close();
+  });
+})();

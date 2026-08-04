@@ -747,6 +747,12 @@ def cmd_fable_estimate(args: argparse.Namespace, ctx: AppContext) -> int:
         "currency": estimate.currency,
         "shot_count": estimate.shot_count,
         "unpriced_shot_count": estimate.unpriced_shot_count,
+        # What the plan asks for versus what the provider will actually
+        # generate. They differ when a provider cannot produce a shot's
+        # planned length -- worth seeing BEFORE approving, not in the cut.
+        "planned_runtime_sec": estimate.planned_runtime_sec,
+        "generated_runtime_sec": estimate.generated_runtime_sec,
+        "runtime_differs": estimate.runtime_differs,
         "detail": estimate.detail,
     }, indent=2))
     return 0
@@ -3263,6 +3269,8 @@ def cmd_fable_worker_run(args: argparse.Namespace, ctx: AppContext) -> int:
         stop_on_error=args.stop_on_error,
         allow_paid_generation=settings.allow_paid_generation,
         takes_per_shot=settings.fable_takes_per_shot,
+        generation_timeout_seconds=settings.fable_generation_timeout_seconds,
+        generation_poll_interval_seconds=settings.fable_generation_poll_interval_seconds,
     )
     daemon = FableDaemon(
         ctx.session_factory, ctx.fable_storage, ctx.cinematic_provider_for_shot, config,

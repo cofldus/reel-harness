@@ -225,6 +225,10 @@ class Supervisor:
                 stop_on_error=base.stop_on_error if base else False,
                 allow_paid_generation=self._ctx.settings.allow_paid_generation,
                 takes_per_shot=self._ctx.settings.fable_takes_per_shot,
+                generation_timeout_seconds=(
+                    self._ctx.settings.fable_generation_timeout_seconds),
+                generation_poll_interval_seconds=(
+                    self._ctx.settings.fable_generation_poll_interval_seconds),
             )
             daemon = FableDaemon(
                 self._ctx.session_factory, self._ctx.fable_storage,
