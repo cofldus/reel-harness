@@ -166,9 +166,13 @@ def shot_position(session, shot: FableShot, project: StoryProject) -> ShotPositi
         return None
     for index, candidate in enumerate(ordered):
         if candidate.id == shot.id:
-            previous = ordered[index - 1].action if index > 0 else None
+            prior = ordered[index - 1] if index > 0 else None
             return ShotPosition(
-                index=index + 1, total=len(ordered), previous_action=previous,
+                index=index + 1, total=len(ordered),
+                previous_action=prior.action if prior else None,
+                previous_subject=prior.subject if prior else None,
+                previous_blocking=prior.blocking if prior else None,
+                previous_shot_size=prior.shot_size if prior else None,
             )
     return None
 

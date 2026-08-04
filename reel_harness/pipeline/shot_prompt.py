@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v4"
+COMPILER_VERSION = "fable-shot-v5"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -43,6 +43,16 @@ _SPOKEN_LANGUAGE_NAMES = {
 # Appended to every prompt: the quality floor and the artifact
 # prohibitions that apply regardless of shot content.
 _VISUAL_QUALITY = "photorealistic cinematic footage, natural human motion, filmic depth of field"
+# Every shot in a scene is generated separately, so nothing but the words
+# keeps the set from being redesigned between cuts. Naming it explicitly
+# is the cheapest continuity available without frame-to-frame
+# conditioning.
+_SET_CONTINUITY = (
+    "the same physical set, camera height and lighting as the other shots in this scene, "
+    "consistent screen direction, matched colour and exposure so the cut is invisible, "
+    "no relocation, no redecoration, no change of time of day"
+)
+
 _PROHIBITED_ARTIFACTS = (
     "no distorted faces, no extra or malformed fingers, no duplicated limbs, "
     "no morphing clothing, no text overlays, no watermark, no subtitles, "
@@ -128,7 +138,7 @@ def compile_shot_prompt(
         # what the audience just saw. Without it every shot is generated
         # with identical context -- all four sharing one scene's beat --
         # and the result is four unrelated clips rather than a sequence.
-        _narrative_position(position),
+        _narrative_position(position, shot.subject or ""),
         str(continuity.get("source_beat", "")),
         # 14 spoken dialogue. Three things have to be present together or
         # the shot comes back silent: WHAT is said, that it is SPOKEN
@@ -137,7 +147,8 @@ def compile_shot_prompt(
         # speaking shot was generated as a silent one and the project's
         # language never reached the model.
         _dialogue_slot(shot, project, character_bible),
-        # 15 quality floor, 16 prohibitions
+        # 15 continuity contract, 16 quality floor, 17 prohibitions
+        _SET_CONTINUITY,
         _VISUAL_QUALITY,
         _PROHIBITED_ARTIFACTS,
     ]
@@ -155,9 +166,15 @@ class ShotPosition:
     index: int          # 1-based, across the whole film
     total: int
     previous_action: str | None = None
+    # What the previous frame actually LEFT ON SCREEN. An action alone
+    # says what happened, not where anyone ended up, so the next shot
+    # re-invents the staging and the cut reads as a jump.
+    previous_subject: str | None = None
+    previous_blocking: str | None = None
+    previous_shot_size: str | None = None
 
 
-def _narrative_position(position: ShotPosition | None) -> str:
+def _narrative_position(position: ShotPosition | None, subject: str = "") -> str:
     """States the shot's place in the sequence and what immediately
     precedes it.
 
@@ -174,7 +191,34 @@ def _narrative_position(position: ShotPosition | None) -> str:
     else:
         where = f"shot {position.index} of {position.total} in a continuous short film"
     if position.previous_action:
-        where += f", continuing directly from: {position.previous_action}"
+        # Describe the frame being cut FROM, not merely the verb in it.
+        # Watching a real film, the shots did not feel continuous: each
+        # clip is generated independently, and "continuing from: she
+        # looks out of the window" leaves the model free to restage the
+        # room, move the actor and relight the set between every cut.
+        tail = f"the previous shot showed {position.previous_subject or 'the actor'} "
+        tail += position.previous_action
+        if position.previous_blocking:
+            tail += f", positioned {position.previous_blocking}"
+        if position.previous_shot_size:
+            tail += f", framed {position.previous_shot_size.replace('_', ' ')}"
+        # Only tell the model to hold a person's staging when the shot is
+        # still ABOUT that person. On a cut to someone else -- which is
+        # most of a two-hander -- "keep that person where they were" aims
+        # the instruction at the wrong actor, and the previous subject
+        # gets dragged into a frame they should have left.
+        same_subject = bool(
+            subject and position.previous_subject
+            and subject.strip() == position.previous_subject.strip()
+        )
+        carry = (
+            "keep that person in the same place, in the same clothes, carrying whatever "
+            "they were carrying"
+            if same_subject else
+            "the space, the light and everything already established in it continue "
+            "unchanged from that frame"
+        )
+        where += f", continuing directly from that moment -- {tail}; {carry}"
     return where
 
 

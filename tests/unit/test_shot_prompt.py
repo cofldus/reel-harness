@@ -206,3 +206,65 @@ def test_a_speaking_shot_still_works_without_a_bible() -> None:
     text = _dialogue_slot(_shot(dialogue_line="가져가세요."), _project(), None)
     assert '"가져가세요."' in text
     assert "same voice" not in text
+
+
+# -- continuity ----------------------------------------------------------
+#
+# Watching a real film, the four shots did not read as continuous. Each
+# clip is generated independently, so nothing but the words stops the
+# model restaging the room, moving the actor and relighting the set
+# between cuts.
+
+def test_a_shot_describes_the_frame_it_cuts_from_not_just_the_verb() -> None:
+    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
+
+    text = _narrative_position(ShotPosition(
+        index=3, total=4,
+        previous_action="우산을 건넨다",
+        previous_subject="준호",
+        previous_blocking="계산대 뒤에 서서",
+        previous_shot_size="medium_close_up",
+    ), "준호")
+    assert "준호" in text and "우산을 건넨다" in text
+    assert "계산대 뒤에 서서" in text
+    assert "medium close up" in text
+    assert "same place" in text and "carrying whatever" in text
+
+
+def test_the_first_shot_has_nothing_to_continue_from() -> None:
+    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
+
+    text = _narrative_position(ShotPosition(index=1, total=4))
+    assert "opening shot" in text
+    assert "continuing directly" not in text
+
+
+def test_every_shot_carries_the_set_continuity_contract() -> None:
+    """Applies to all shots, including the first: the set has to be
+    consistent with the shots that follow it too."""
+    from reel_harness.pipeline.shot_prompt import compile_shot_prompt
+
+    text = compile_shot_prompt(_shot(dialogue_line=None), _project(), _bible())
+    assert "same physical set" in text
+    assert "consistent screen direction" in text
+    assert "no redecoration" in text
+
+
+def test_a_cut_to_a_different_person_does_not_hold_the_previous_one() -> None:
+    """Most of a two-hander is cuts between people. Telling the model to
+    keep the previous subject where they were aims the instruction at the
+    wrong actor and drags them into a frame they should have left."""
+    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
+
+    position = ShotPosition(
+        index=4, total=4, previous_action="우산을 건넨다",
+        previous_subject="준호", previous_blocking="계산대 뒤에 서서",
+    )
+    same = _narrative_position(position, "준호")
+    assert "keep that person in the same place" in same
+
+    switched = _narrative_position(position, "노인")
+    assert "keep that person in the same place" not in switched
+    assert "the space, the light" in switched
+    # The frame being cut from is still described either way.
+    assert "준호" in switched and "우산을 건넨다" in switched
