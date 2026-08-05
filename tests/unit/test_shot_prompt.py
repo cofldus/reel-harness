@@ -284,37 +284,28 @@ def test_the_prompt_forbids_broken_bodies_not_only_bad_faces() -> None:
     assert "impossible angles" in text
 
 
-def test_a_character_who_was_already_here_does_not_arrive_again() -> None:
-    """The shots of a two-hander alternate, so a character's own last
-    appearance is almost never the previous shot. Without carrying it,
-    the clerk who had been behind his counter all film walked in through
-    the front door."""
+def test_a_prompt_never_stages_anyone_but_its_own_subject() -> None:
+    """A clause naming another character used to be added here, to stop a
+    clerk who never left his counter walking in through the door. It made
+    things worse: the same person was described twice in one prompt, once
+    as the subject and once as already present, and the model rendered
+    them twice -- two old men in a shop that holds one.
+
+    Reference images pin a face for the SUBJECT only, so anyone else a
+    prompt mentions is invented regardless. Naming them more multiplies
+    them."""
     from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
 
     text = _narrative_position(ShotPosition(
-        index=3, total=4,
-        previous_action="문을 열고 들어온다", previous_subject="노인",
-        previous_blocking="문가에 서 있다",
+        index=3, total=4, previous_action="문을 열고 들어온다",
+        previous_subject="노인", previous_blocking="문가에 서 있다",
         subject_last_action="젖은 창밖을 바라본다",
         subject_last_blocking="계산대 안에 서 있다",
     ), "준호")
-    assert "준호 is already in this location" in text
-    assert "계산대 안에 서 있다" in text
-    assert "they do not enter or arrive" in text
-
-
-def test_the_reminder_is_skipped_when_the_shot_stays_on_one_person() -> None:
-    """Staying on the same person is already covered by holding their
-    staging; saying both would be noise."""
-    from reel_harness.pipeline.shot_prompt import ShotPosition, _narrative_position
-
-    text = _narrative_position(ShotPosition(
-        index=2, total=4, previous_action="창밖을 바라본다",
-        previous_subject="준호", previous_blocking="계산대 안에 서 있다",
-        subject_last_blocking="계산대 안에 서 있다",
-    ), "준호")
     assert "already in this location" not in text
-    assert "keep that person in the same place" in text
+    assert "they are already here" not in text
+    # The frame being cut FROM is still described -- that names no one new.
+    assert "노인" in text and "문을 열고 들어온다" in text
 
 
 def test_objects_are_required_to_behave_physically() -> None:

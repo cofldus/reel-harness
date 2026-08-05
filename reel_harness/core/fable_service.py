@@ -1161,6 +1161,8 @@ class FableService:
             audio_duration_argv,
             check_fits,
             cue_start_times,
+            film_streams_argv,
+            has_audio_stream,
             mix_dialogue_argv,
             parse_audio_duration,
         )
@@ -1225,9 +1227,15 @@ class FableService:
             check_fits(cue, durations[index])
             cues.append(cue)
 
+        # A film generated with the video model's audio off has no audio
+        # stream, and a graph referencing [0:a] on it fails with a message
+        # that names the filtergraph rather than the missing track.
+        streams = run(film_streams_argv(ffprobe, final_path))
+        ambience = has_audio_stream(streams.stdout) if streams.returncode == 0 else True
+
         mixed_path = final_path.with_name("final.mixed.mp4")
         mix = run(
-            mix_dialogue_argv(ffmpeg, final_path, cues, mixed_path),
+            mix_dialogue_argv(ffmpeg, final_path, cues, mixed_path, has_ambience=ambience),
             timeout=self._render_timeout_seconds,
         )
         if mix.returncode != 0:

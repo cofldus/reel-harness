@@ -66,9 +66,30 @@ def check_fits(cue: DialogueCue, shot_duration: float, tolerance_sec: float = 0.
         )
 
 
+def has_audio_stream(ffprobe_stdout: str) -> bool:
+    """Whether a probe found an audio track.
+
+    A film generated with the video model's audio switched off has no
+    audio stream at all, and a filtergraph that references [0:a] on such
+    a file fails with "Error binding filtergraph inputs/outputs" -- an
+    ffmpeg message that says nothing about the actual cause.
+    """
+    return "audio" in (ffprobe_stdout or "").split()
+
+
+def film_streams_argv(ffprobe_path: Path, film_path: Path) -> list[str]:
+    return [
+        str(ffprobe_path), "-v", "error",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0",
+        str(film_path),
+    ]
+
+
 def mix_dialogue_argv(
     ffmpeg_path: Path, film_path: Path, cues: list[DialogueCue], output_path: Path,
     *, ambience_gain: float = 0.45, dialogue_gain: float = 1.0,
+    has_ambience: bool = True,
 ) -> list[str]:
     """The ffmpeg call that lays `cues` over `film_path`.
 
@@ -86,14 +107,21 @@ def mix_dialogue_argv(
         raise ValueError("mix_dialogue_argv called with no cues")
 
     argv: list[str] = [str(ffmpeg_path), "-y", "-i", str(film_path)]
+    # A silent bed when the film has no audio of its own. amix needs
+    # something to mix INTO, and lines summed against nothing produce a
+    # track that ends with the last cue rather than with the picture.
+    if not has_ambience:
+        argv += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
     for cue in cues:
         argv += ["-i", str(cue.audio_path)]
 
     # Delay each spoken line to its shot's start, then sum everything.
     # adelay wants milliseconds, and both channels.
-    filters: list[str] = [f"[0:a]volume={ambience_gain}[bed]"]
+    bed_input = "0:a" if has_ambience else "1:a"
+    first_cue_index = 1 if has_ambience else 2
+    filters: list[str] = [f"[{bed_input}]volume={ambience_gain if has_ambience else 1.0}[bed]"]
     labels = ["[bed]"]
-    for index, cue in enumerate(cues, start=1):
+    for index, cue in enumerate(cues, start=first_cue_index):
         delay_ms = max(0, int(round(cue.start_sec * 1000)))
         filters.append(
             f"[{index}:a]adelay={delay_ms}|{delay_ms},volume={dialogue_gain}[d{index}]"
@@ -106,6 +134,8 @@ def mix_dialogue_argv(
     argv += [
         "-filter_complex", ";".join(filters),
         "-map", "0:v", "-map", "[out]",
+        # anullsrc never ends, so the picture decides where the file does.
+        *(["-shortest"] if not has_ambience else []),
         # Copy the picture: mixing audio must never re-encode video and
         # cost a generation's worth of quality.
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v8"
+COMPILER_VERSION = "fable-shot-v9"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -242,19 +242,17 @@ def _narrative_position(position: ShotPosition | None, subject: str = "") -> str
         )
         where += f", continuing directly from that moment -- {tail}; {carry}"
 
-    # A character who was on screen earlier is already somewhere. Saying
-    # so is what stops the clerk who has been behind his counter all film
-    # from walking in through the front door: the shots alternate between
-    # two people, so his own last appearance is never the previous shot,
-    # and the staging clause above never covers him.
-    if not same_subject and position.subject_last_blocking and subject:
-        where += (
-            f"; {subject} is already in this location and was last seen "
-            f"{position.subject_last_blocking}"
-        )
-        if position.subject_last_action:
-            where += f" after they {position.subject_last_action}"
-        where += " -- they do not enter or arrive, they are already here"
+    # A clause naming a character who is NOT this shot's subject used to
+    # live here: "준호 is already in this location and was last seen ...".
+    # It was meant to stop a clerk who never left his counter walking in
+    # through the door. It made things worse -- the same person ended up
+    # described twice in one prompt, once as the subject and once as
+    # already present, and the model rendered them TWICE, two old men in
+    # a shop that holds one.
+    #
+    # Reference images pin a face for the SUBJECT only, so every other
+    # person a prompt mentions is invented anyway. Naming them more does
+    # not fix that; it multiplies them.
     return where
 
 

@@ -97,3 +97,32 @@ def test_audio_duration_is_probed_with_the_right_tool() -> None:
     # A missing or malformed value must not crash a render.
     assert parse_audio_duration("") == 0.0
     assert parse_audio_duration("N/A") == 0.0
+
+
+def test_a_film_with_no_audio_track_gets_a_silent_bed() -> None:
+    """With the video model's audio switched off the film has no audio
+    stream at all, and a graph referencing [0:a] fails with "Error
+    binding filtergraph inputs/outputs" -- a message that names the graph
+    rather than the missing track."""
+    from reel_harness.media.dialogue_mix import has_audio_stream
+
+    argv = mix_dialogue_argv(
+        FFMPEG, Path("silent.mp4"), [_cue(0.0)], Path("out.mp4"), has_ambience=False,
+    )
+    assert "anullsrc=r=48000:cl=stereo" in argv
+    graph = argv[argv.index("-filter_complex") + 1]
+    assert "[0:a]" not in graph, "the film has no audio track to read"
+    assert "[1:a]" in graph
+    # anullsrc never ends, so the picture has to decide where the file does.
+    assert "-shortest" in argv
+
+    assert has_audio_stream("video\naudio\n") is True
+    assert has_audio_stream("video\n") is False
+    assert has_audio_stream("") is False
+
+
+def test_a_film_that_has_ambience_still_reads_it() -> None:
+    argv = mix_dialogue_argv(FFMPEG, Path("film.mp4"), [_cue(0.0)], Path("out.mp4"))
+    assert "anullsrc" not in " ".join(argv)
+    assert "-shortest" not in argv
+    assert "[0:a]volume=0.45[bed]" in argv[argv.index("-filter_complex") + 1]
