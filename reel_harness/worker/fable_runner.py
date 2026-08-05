@@ -62,7 +62,7 @@ from reel_harness.observability import log_worker_event
 from reel_harness.pipeline.generation_plan import (
     GenerationPlanConflict,
     resolve_parameters,
-    select_reference_images,
+    select_reference_images_for_shot,
 )
 from reel_harness.pipeline.shot_prompt import (
     ShotPosition,
@@ -391,8 +391,17 @@ def _run_one_take(
         except GenerationPlanConflict as exc:
             return "refused", ("GENERATION_PLAN_CONFLICT", str(exc)[:500])
 
+        # Everyone in the frame, not only the subject. With the subject
+        # taking every reference slot, the second person in a two-hander
+        # was invented fresh each time -- the old man in a black coat came
+        # back as an elderly woman.
+        cast = list(session.execute(
+            select(FableCharacter).where(FableCharacter.project_id == project.id)
+        ).scalars())
+        references = select_reference_images_for_shot(shot, cast, provider.capabilities)
+        # The subject is still the take's provenance anchor: a re-cast of
+        # the person the shot is ABOUT is what makes an old take stale.
         character = subject_character(session, shot, project)
-        references = select_reference_images(character, provider.capabilities)
         request = CinematicGenerationRequest(
             prompt=prompt,
             duration_sec=parameters.duration_sec,

@@ -400,3 +400,115 @@ def test_a_veo_shaped_provider_now_completes_a_shot(project_env) -> None:
         take = session.query(FableTake).filter(FableTake.shot_id == shot.id).one()
         assert take.status == "DOWNLOADED"
         assert take.reference_fingerprint
+
+
+# -- references for everyone in the frame --------------------------------
+#
+# A shot names one `subject`, and the reference slots all went to them.
+# But a two-hander puts two people on screen, and the one without a
+# reference is invented fresh every time -- in a real generated shot the
+# old man in a black coat came back as an elderly woman.
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class _Char:
+    id: str
+    name: str
+    reference_approved: bool = True
+    reference_images: dict = field(default_factory=dict)
+
+
+@dataclass
+class _Shot:
+    subject: str = ""
+    action: str = ""
+    blocking: str = ""
+
+
+@dataclass
+class _Caps:
+    character_reference: bool = True
+    multiple_references: bool = True
+    max_character_references: int = 3
+
+
+def _sheet(tmp_path, name: str, views=("face", "three_quarter", "full_body")) -> dict:
+    made = {}
+    for view in views:
+        path = tmp_path / f"{name}_{view}.png"
+        path.write_bytes(b"\x89PNG")
+        made[view] = str(path)
+    return made
+
+
+def test_a_second_person_on_screen_gets_reference_slots(tmp_path) -> None:
+    from reel_harness.pipeline.generation_plan import select_reference_images_for_shot
+
+    cast = [
+        _Char("a", "준호", reference_images=_sheet(tmp_path, "junho")),
+        _Char("b", "노인", reference_images=_sheet(tmp_path, "noin")),
+    ]
+    shot = _Shot(subject="준호", action="우산을 노인에게 건넨다", blocking="계산대 뒤에서")
+
+    paths = [p.name for p in select_reference_images_for_shot(shot, cast, _Caps())]
+    assert len(paths) == 3
+    assert sum(1 for p in paths if p.startswith("junho")) == 2
+    assert sum(1 for p in paths if p.startswith("noin")) == 1
+
+
+def test_a_lone_subject_still_gets_every_slot(tmp_path) -> None:
+    from reel_harness.pipeline.generation_plan import select_reference_images_for_shot
+
+    cast = [
+        _Char("a", "준호", reference_images=_sheet(tmp_path, "junho")),
+        _Char("b", "노인", reference_images=_sheet(tmp_path, "noin")),
+    ]
+    shot = _Shot(subject="준호", action="창밖을 바라본다", blocking="계산대 뒤에서")
+
+    paths = [p.name for p in select_reference_images_for_shot(shot, cast, _Caps())]
+    assert len(paths) == 3
+    assert all(p.startswith("junho") for p in paths)
+
+
+def test_someone_only_spoken_about_is_not_put_in_the_frame(tmp_path) -> None:
+    """A line can name an absent person. "지우는 왔어?" does not put 지우
+    on screen, so dialogue is deliberately not searched."""
+    from reel_harness.pipeline.generation_plan import characters_in_shot
+
+    cast = [_Char("a", "준호"), _Char("b", "지우")]
+    shot = _Shot(subject="준호", action="창밖을 바라본다", blocking="계산대 뒤에서")
+    shot.dialogue_line = "지우는 왔어?"
+
+    present = [c.name for c in characters_in_shot(shot, cast)]
+    assert present == ["준호"]
+
+
+def test_the_subject_leads_and_nobody_present_gets_zero() -> None:
+    """A character with no reference is a character the model invents,
+    which is a worse error than one that is slightly less anchored."""
+    from reel_harness.pipeline.generation_plan import split_reference_slots
+
+    assert split_reference_slots(1, 3) == [3]
+    assert split_reference_slots(2, 3) == [2, 1]
+    assert split_reference_slots(3, 3) == [1, 1, 1]
+    # More people than slots: the tail misses out, nothing better exists.
+    assert split_reference_slots(4, 3) == [1, 1, 1]
+    assert split_reference_slots(2, 0) == []
+
+
+def test_an_unapproved_castmate_is_left_out(tmp_path) -> None:
+    """Approval is what the casting gate MEANS; an unapproved sheet
+    reaching paid generation would make it decorative."""
+    from reel_harness.pipeline.generation_plan import select_reference_images_for_shot
+
+    cast = [
+        _Char("a", "준호", reference_images=_sheet(tmp_path, "junho")),
+        _Char("b", "노인", reference_approved=False,
+              reference_images=_sheet(tmp_path, "noin")),
+    ]
+    shot = _Shot(subject="준호", action="우산을 노인에게 건넨다")
+
+    paths = [p.name for p in select_reference_images_for_shot(shot, cast, _Caps())]
+    assert all(p.startswith("junho") for p in paths)

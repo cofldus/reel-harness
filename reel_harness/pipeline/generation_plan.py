@@ -151,3 +151,99 @@ def select_reference_images(character, capabilities) -> list[Path]:
         if path.is_file():
             paths.append(path)
     return paths
+
+
+def characters_in_shot(shot, characters) -> list:
+    """Everyone who appears in this shot, subject first.
+
+    A shot names one `subject`, but a two-hander puts two people in the
+    frame and the writing says so: "우산을 노인에게 건넨다" mentions the
+    other character by the exact name the adaptation gave them. Matching
+    those names is a lookup, not a guess.
+
+    This matters because reference images anchor only the people they are
+    sent for. With the subject taking every slot, the second person was
+    invented fresh each time -- in one real shot the old man in a black
+    coat came out as an elderly woman.
+    """
+    named = {c.name: c for c in characters if getattr(c, "name", "")}
+    subject = named.get((getattr(shot, "subject", "") or "").strip())
+    present = [subject] if subject is not None else []
+
+    # Only the text that describes what is ON SCREEN. A dialogue line
+    # can name somebody who is absent -- "지우는 왔어?" does not put 지우
+    # in the frame -- so lines are deliberately not searched.
+    text = " ".join(
+        str(getattr(shot, field, "") or "") for field in ("action", "blocking")
+    )
+    for name, character in named.items():
+        if character in present:
+            continue
+        if name and name in text:
+            present.append(character)
+    return present
+
+
+def split_reference_slots(count: int, limit: int) -> list[int]:
+    """How many views each present character gets, subject first.
+
+    The subject keeps the larger share because the shot is about them,
+    but nobody on screen gets zero: a character with no reference is a
+    character the model invents, and an invented face is a worse error
+    than a slightly less-anchored one. With fewer slots than people the
+    tail simply misses out -- there is nothing better available.
+    """
+    if count <= 0 or limit <= 0:
+        return []
+    share = [1] * min(count, limit)
+    for index in range(limit - len(share)):
+        share[index % len(share)] += 1
+    return share
+
+
+def select_reference_images_for_shot(shot, characters, capabilities) -> list[Path]:
+    """Reference views for everyone in the frame, within the cap.
+
+    Google's guidance is one element per image, tightly cropped -- so
+    these stay separate stills rather than being composited into one
+    picture, which would leave the model unable to tell which part is
+    which ingredient.
+    """
+    if not getattr(capabilities, "character_reference", False):
+        return []
+    limit = getattr(capabilities, "max_character_references", 0) or 0
+    if not getattr(capabilities, "multiple_references", False):
+        limit = min(limit, 1)
+    if limit <= 0:
+        return []
+
+    present = [
+        c for c in characters_in_shot(shot, characters)
+        if getattr(c, "reference_approved", False)
+    ]
+    if not present:
+        return []
+
+    paths: list[Path] = []
+    # strict=False on purpose: with more people on screen than slots the
+    # allowance list is deliberately shorter, and the tail characters
+    # simply get nothing.
+    allowances = split_reference_slots(len(present), limit)
+    for character, allowance in zip(present, allowances, strict=False):
+        paths.extend(_views_for(character, allowance))
+    return paths[:limit]
+
+
+def _views_for(character, limit: int) -> list[Path]:
+    images = getattr(character, "reference_images", None) or {}
+    chosen: list[Path] = []
+    for view in REFERENCE_PRIORITY:
+        if len(chosen) >= limit:
+            break
+        raw = images.get(view)
+        if not raw:
+            continue
+        path = Path(raw)
+        if path.is_file():
+            chosen.append(path)
+    return chosen
