@@ -294,10 +294,12 @@ def test_a_plan_that_ignores_the_requested_runtime_is_sent_back() -> None:
             _shot(3), _shot(4, camera_angle="high_angle")]
     model, source = _plan(four)
     errors = _craft_errors(model, source, target_shot_count=15)
-    assert any("4 shots" in e and "needs 15" in e for e in errors)
+    assert any("4 shots" in e and "needs exactly 15" in e for e in errors)
 
-    # Within one either way is room to end on a beat, not a defect.
-    assert not [e for e in _craft_errors(model, source, target_shot_count=5) if "needs" in e]
+    # Exact, not approximate: every shot is a fixed eight seconds, so one
+    # extra shot is eight extra seconds. A 32-second film came back at 40.
+    assert [e for e in _craft_errors(model, source, target_shot_count=5) if "needs exactly" in e]
+    assert not [e for e in _craft_errors(model, source, target_shot_count=4) if "needs exactly" in e]
 
 
 def test_quoted_speech_in_the_source_must_survive_into_some_shot() -> None:

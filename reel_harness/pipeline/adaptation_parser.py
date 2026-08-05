@@ -205,14 +205,17 @@ def _craft_errors(
         return errors
 
     if target_shot_count:
-        # +/-1 rather than exact: the model needs room to end on a beat
-        # rather than mid-sentence, but half the requested runtime is a
-        # different film from the one that was ordered.
-        low, high = max(1, target_shot_count - 1), target_shot_count + 1
-        if not low <= len(shots) <= high:
+        # Exact, not +/-1. The tolerance was borrowed from pipelines where
+        # a shot's length is the writer's choice, so one shot either way
+        # is a rounding difference. Here every reference-driven shot is
+        # exactly SHOT_SECONDS long, so one extra shot is eight extra
+        # seconds -- a 32-second film came back at 40, a quarter longer
+        # than was asked for and a quarter dearer.
+        if len(shots) != target_shot_count:
             errors.append(
-                f"the plan has {len(shots)} shots but the requested runtime needs "
-                f"{target_shot_count} (allowed {low}-{high}) -- add or merge shots to fit"
+                f"the plan has {len(shots)} shots but the requested runtime needs exactly "
+                f"{target_shot_count} -- every shot is {SHOT_SECONDS} seconds, so the count "
+                "IS the runtime; add or merge shots to fit"
             )
 
     # Speech that exists in the source must survive into the film. The

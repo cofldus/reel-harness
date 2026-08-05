@@ -247,3 +247,22 @@ def _views_for(character, limit: int) -> list[Path]:
         if path.is_file():
             chosen.append(path)
     return chosen
+
+
+def reference_set_fingerprint(paths) -> str:
+    """Stable identity of the exact reference stills a generation is
+    given.
+
+    Take reuse used to key on the PROMPT alone. Re-cast an actor and the
+    prompt is unchanged -- the writing still says "노인" -- so the old
+    take was replayed and the approved new face never reached the screen.
+    That makes the casting gate decorative, which is the one thing it must
+    never be.
+
+    Sorted, so the order slots happen to be filled in is not part of the
+    identity; only WHICH stills were sent.
+    """
+    import hashlib
+
+    joined = "".join(sorted(str(path) for path in paths))
+    return hashlib.sha256(joined.encode()).hexdigest()[:32]

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -61,6 +62,7 @@ from reel_harness.db.cinematic_models import (
 from reel_harness.observability import log_worker_event
 from reel_harness.pipeline.generation_plan import (
     GenerationPlanConflict,
+    reference_set_fingerprint,
     resolve_parameters,
     select_reference_images_for_shot,
 )
@@ -298,7 +300,23 @@ def run_shot(
         session, shot, scene, project, spoken_by_video=spoken_by_video,
     )
     fingerprint = prompt_fingerprint(prompt)
-    existing = len([t for t in shot.takes if t.prompt_fingerprint == fingerprint])
+
+    # The reference stills are part of what a take IS, so they are part of
+    # what makes an existing one a replay. Keyed on the prompt alone, a
+    # re-cast actor left the prompt unchanged -- the writing still says
+    # "노인" -- and the old face was served back while the approved new
+    # one never reached the screen.
+    cast = list(session.execute(
+        select(FableCharacter).where(FableCharacter.project_id == project.id)
+    ).scalars())
+    references = select_reference_images_for_shot(shot, cast, provider.capabilities)
+    reference_id = reference_set_fingerprint(references)
+
+    existing = len([
+        take for take in shot.takes
+        if take.prompt_fingerprint == fingerprint
+        and (take.reference_fingerprint or "") == (reference_id if references else "")
+    ])
     wanted = max(0, takes_per_shot - existing)
     if wanted == 0:
         # Every take this shot was asked for already exists -- a replay
@@ -314,6 +332,7 @@ def run_shot(
             session, shot, scene, project, provider, storage, prompt, fingerprint,
             attempt_number, lease_token, sleep, allow_paid_generation,
             generation_timeout_sec, poll_interval_sec, monotonic,
+            references, reference_id,
         )
         if outcome == "produced":
             produced += 1
@@ -361,6 +380,8 @@ def _run_one_take(
     generation_timeout_sec: float = DEFAULT_GENERATION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
     monotonic=time.monotonic,
+    references: list[Path] | None = None,
+    reference_id: str = "",
 ) -> tuple[str, tuple[str, str] | None]:
     """One candidate take.
 
@@ -370,6 +391,9 @@ def _run_one_take(
     already committed either way; the SHOT's final status is the
     caller's decision, because it depends on what the other takes in the
     batch did."""
+    # Computed once by the caller: the same stills are used for every
+    # attempt at this shot, and they are part of the take's identity.
+    reference_paths: list[Path] = list(references or [])
     try:
         # Order matters. Asking the provider to quote the PLANNED shot
         # comes first because an unconfigured provider raises here, and
@@ -395,19 +419,13 @@ def _run_one_take(
         # taking every reference slot, the second person in a two-hander
         # was invented fresh each time -- the old man in a black coat came
         # back as an elderly woman.
-        cast = list(session.execute(
-            select(FableCharacter).where(FableCharacter.project_id == project.id)
-        ).scalars())
-        references = select_reference_images_for_shot(shot, cast, provider.capabilities)
-        # The subject is still the take's provenance anchor: a re-cast of
-        # the person the shot is ABOUT is what makes an old take stale.
-        character = subject_character(session, shot, project)
+
         request = CinematicGenerationRequest(
             prompt=prompt,
             duration_sec=parameters.duration_sec,
             aspect_ratio=project.aspect_ratio,
             resolution=parameters.resolution,
-            reference_image_paths=references,
+            reference_image_paths=reference_paths,
             seed=_seed_for_attempt(fingerprint, attempt_number),
             correlation_id=f"{project.id}:{shot.id}:{attempt_number}:{fingerprint}",
         )
@@ -450,7 +468,7 @@ def _run_one_take(
             # indistinguishable from one generated after, and the column
             # existed unpopulated until this was wired up.
             reference_fingerprint=(
-                character.reference_fingerprint if references and character else None
+                reference_id if reference_paths else None
             ),
         )
         session.add(take)

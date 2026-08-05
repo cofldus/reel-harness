@@ -512,3 +512,36 @@ def test_an_unapproved_castmate_is_left_out(tmp_path) -> None:
 
     paths = [p.name for p in select_reference_images_for_shot(shot, cast, _Caps())]
     assert all(p.startswith("junho") for p in paths)
+
+
+def test_a_recast_actor_invalidates_an_existing_take(tmp_path) -> None:
+    """Take reuse keyed on the PROMPT alone, and re-casting leaves the
+    prompt unchanged -- the writing still says "노인". So the old face was
+    served back and the newly approved one never reached the screen,
+    which makes the casting gate decorative."""
+    from reel_harness.pipeline.generation_plan import reference_set_fingerprint
+
+    before = reference_set_fingerprint([tmp_path / "old_face.png"])
+    after = reference_set_fingerprint([tmp_path / "new_face.png"])
+    assert before != after
+
+
+def test_the_reference_fingerprint_ignores_slot_order(tmp_path) -> None:
+    """Which stills were sent is the identity; the order the slots
+    happened to be filled in is not."""
+    from reel_harness.pipeline.generation_plan import reference_set_fingerprint
+
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    assert reference_set_fingerprint([a, b]) == reference_set_fingerprint([b, a])
+
+
+def test_adding_a_castmate_changes_the_reference_identity(tmp_path) -> None:
+    """The two-hander fix changes which stills go out. Takes generated
+    before it must not be replayed as though nothing moved."""
+    from reel_harness.pipeline.generation_plan import reference_set_fingerprint
+
+    subject_only = reference_set_fingerprint([tmp_path / "junho_face.png"])
+    with_costar = reference_set_fingerprint(
+        [tmp_path / "junho_face.png", tmp_path / "noin_face.png"],
+    )
+    assert subject_only != with_costar
