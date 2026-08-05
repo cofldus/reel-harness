@@ -217,6 +217,18 @@ class Settings(BaseSettings):
     # exceed. Each additional character costs one reference sheet --
     # five stills, about USD 0.34 -- which is cheap beside a person the
     # video model has to invent.
+    # Where spoken lines come from. "video" asks the video model to
+    # perform them lip-synced; "tts" keeps the video silent of speech and
+    # mixes synthesised dialogue over it.
+    #
+    # tts trades lip movement -- the one thing the video path does that
+    # this cannot -- for everything else: one voice per character that
+    # never drifts between shots, the right gender and age, correct
+    # pronunciation, and no burned-in captions, which the video model
+    # adds regardless of being told not to.
+    fable_dialogue_source: str = Field(
+        "video", validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_DIALOGUE_SOURCE", "FABLE_DIALOGUE_SOURCE"))
     fable_max_characters: int = Field(
         4, validation_alias=_llm_alias(
             "REEL_HARNESS_FABLE_MAX_CHARACTERS", "FABLE_MAX_CHARACTERS"))

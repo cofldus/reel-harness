@@ -105,6 +105,7 @@ def fixed_identity_values(character_bible: dict | None) -> list[str]:
 
 def compile_shot_prompt(
     shot, project, character_bible: dict | None = None, location: dict | None = None,
+    spoken_by_video: bool = True,
     position: ShotPosition | None = None,
 ) -> str:
     """Assembles the canonical prompt. `shot` is a FableShot,
@@ -158,7 +159,7 @@ def compile_shot_prompt(
         # dialogue_line was previously compiled into nothing at all, so a
         # speaking shot was generated as a silent one and the project's
         # language never reached the model.
-        _dialogue_slot(shot, project, character_bible),
+        _dialogue_slot(shot, project, character_bible, spoken_by_video=spoken_by_video),
         # 15 continuity contract, 16 quality floor, 17 prohibitions
         _SET_CONTINUITY,
         _VISUAL_QUALITY,
@@ -254,7 +255,9 @@ def _narrative_position(position: ShotPosition | None, subject: str = "") -> str
     return where
 
 
-def _dialogue_slot(shot, project, character_bible: dict | None = None) -> str:
+def _dialogue_slot(
+    shot, project, character_bible: dict | None = None, *, spoken_by_video: bool = True,
+) -> str:
     """The audio-performance fragment: what is said, by whom, in what
     voice — or an explicit instruction to stay quiet.
 
@@ -275,7 +278,11 @@ def _dialogue_slot(shot, project, character_bible: dict | None = None) -> str:
     pinned the voice.
     """
     line = (getattr(shot, "dialogue_line", None) or "").strip()
-    if not line:
+    # When dialogue is synthesised separately, the video model must not
+    # speak at all -- two voices saying the same line over each other is
+    # worse than either alone. It still generates ambience, which is
+    # worth keeping: rain and room tone are exactly what it is good at.
+    if not line or not spoken_by_video:
         return "no spoken dialogue in this shot, ambient sound only, no narration, no voiceover"
 
     language = _SPOKEN_LANGUAGE_NAMES.get(
