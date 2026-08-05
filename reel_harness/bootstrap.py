@@ -63,6 +63,7 @@ class AppContext:
             allow_paid_generation=self.settings.allow_paid_generation,
             reference_provider_resolver=self.reference_provider_for_project,
             takes_per_shot=self.settings.fable_takes_per_shot,
+            max_characters=self.settings.fable_max_characters,
             edit_plan=edit_plan_from_settings(self.settings),
             render_timeout_seconds=self.settings.fable_render_timeout_seconds,
         )

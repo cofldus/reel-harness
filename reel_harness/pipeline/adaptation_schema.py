@@ -25,7 +25,14 @@ from pydantic import BaseModel, Field, field_validator
 from reel_harness.core.cinematic_state import CameraAngle, CameraMovement, ShotSize
 
 MIN_CHARACTERS = 1
-MAX_CHARACTERS = 2
+# 4, not 2. Two was a short-form default and it silently cut people out
+# of real stories: a test film's mother -- who the plot turns on -- was
+# dropped entirely, so the hospital and crash shots held a person with no
+# reference sheet. The video model invented her, and made her male. This
+# is the absolute ceiling; a project asks for fewer through
+# Settings.fable_max_characters, which reaches the director as a prompt
+# constraint.
+MAX_CHARACTERS = 4
 MIN_LOCATIONS = 1
 MAX_LOCATIONS = 3
 MIN_SCENES = 1

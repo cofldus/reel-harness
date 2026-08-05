@@ -211,6 +211,15 @@ class Settings(BaseSettings):
     # content. A shot plan itself is only a few thousand tokens, so the
     # extra headroom costs nothing on models that do not reason and
     # rescues the ones that do.
+    # How many characters an adaptation may introduce. Two is enough for
+    # a two-hander and too few for anything with a family in it; the
+    # schema's own ceiling (MAX_CHARACTERS) is the hard bound this cannot
+    # exceed. Each additional character costs one reference sheet --
+    # five stills, about USD 0.34 -- which is cheap beside a person the
+    # video model has to invent.
+    fable_max_characters: int = Field(
+        4, validation_alias=_llm_alias(
+            "REEL_HARNESS_FABLE_MAX_CHARACTERS", "FABLE_MAX_CHARACTERS"))
     narrative_max_output_tokens: int = Field(
         24000, validation_alias=_llm_alias(
             "REEL_HARNESS_NARRATIVE_MAX_OUTPUT_TOKENS", "NARRATIVE_MAX_OUTPUT_TOKENS"))

@@ -343,3 +343,13 @@ def test_render_final_requires_editing_status(fable) -> None:
 def test_cancel_from_any_active_state(fable) -> None:
     project = _create(fable)
     assert fable.cancel_project(project.id).status == "CANCELLED"
+
+
+def test_the_service_carries_the_configured_character_cap(fable) -> None:
+    """A cap that lives only in Settings and never reaches the request is
+    a setting that does nothing."""
+    from reel_harness.pipeline.adaptation_schema import MAX_CHARACTERS
+
+    # Built without an opinion: permissive, because being quietly
+    # restrictive is how a story's third character goes missing.
+    assert fable._max_characters == MAX_CHARACTERS

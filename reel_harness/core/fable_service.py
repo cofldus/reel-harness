@@ -48,6 +48,7 @@ from reel_harness.db.cinematic_models import (
     StoryProject,
 )
 from reel_harness.media.film_editor import EditPlan, FilmEditError, edit_film_argv
+from reel_harness.pipeline.adaptation_schema import MAX_CHARACTERS
 from reel_harness.pipeline.generation_plan import (
     GenerationPlanConflict,
     resolve_parameters,
@@ -80,6 +81,7 @@ class FableService:
         allow_paid_generation: bool = False, reference_provider=None,
         reference_provider_resolver=None, takes_per_shot: int = 1,
         edit_plan: EditPlan | None = None, render_timeout_seconds: float | None = None,
+        max_characters: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -116,6 +118,12 @@ class FableService:
         # long film takes far longer than a stream copy -- the default
         # subprocess timeout is sized for the copy path.
         self._render_timeout_seconds = render_timeout_seconds
+        # Settings.fable_max_characters. Defaults to the schema's own
+        # ceiling rather than to 1, so a service built without an opinion
+        # is permissive here -- the schema is what actually enforces the
+        # bound, and being quietly restrictive is how a story's third
+        # character goes missing without anyone being told.
+        self._max_characters = max_characters or MAX_CHARACTERS
 
     # -- creation / read -------------------------------------------------
 
@@ -447,6 +455,7 @@ class FableService:
             genre=project.genre, tone=project.tone,
             target_duration_sec=project.target_duration_sec,
             aspect_ratio=project.aspect_ratio,
+            max_characters=self._max_characters,
         )
 
     def _persist_adaptation(self, session, project: StoryProject, adaptation) -> None:

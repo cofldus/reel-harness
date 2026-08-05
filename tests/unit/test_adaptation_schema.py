@@ -410,3 +410,26 @@ def test_silence_is_allowed_where_it_is_the_point() -> None:
         _shot(3), _shot(4),
     ])
     assert not [e for e in _craft_errors(model, source, None) if "carry a dialogue_line" in e]
+
+
+def test_a_story_may_introduce_more_than_two_characters() -> None:
+    """Two was a short-form default and it silently cut people out of
+    real stories. A test film's mother -- who the plot turns on -- was
+    dropped, so the hospital and crash shots held a person with no
+    reference sheet: the video model invented her, and made her male."""
+    from reel_harness.pipeline.adaptation_schema import MAX_CHARACTERS
+
+    assert MAX_CHARACTERS >= 4
+
+
+def test_the_character_cap_reaches_the_director_as_a_constraint() -> None:
+    """The schema is the gate, but the prompt is what stops the model
+    writing a cast it will then have to cut."""
+    from reel_harness.providers.base import AdaptationRequest
+    from reel_harness.providers.narrative_prompts import build_user_prompt
+
+    prompt = build_user_prompt(AdaptationRequest(
+        source_text="짧은 이야기입니다.", language="ko", genre=None, tone=None,
+        target_duration_sec=64, aspect_ratio="9:16", max_characters=4,
+    ))
+    assert "Maximum characters: 4" in prompt
