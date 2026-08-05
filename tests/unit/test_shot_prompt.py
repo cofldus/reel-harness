@@ -325,3 +325,20 @@ def test_objects_are_required_to_behave_physically() -> None:
     assert "doors, handles and objects move the way real ones do" in compile_shot_prompt(
         _shot(), _project(), _bible(),
     )
+
+
+def test_the_video_model_is_silenced_when_dialogue_is_synthesised() -> None:
+    """Two voices saying the same line over each other is worse than
+    either alone, so when speech is synthesised separately the video
+    model must not speak at all -- while still producing ambience, which
+    is what it is good at."""
+    from reel_harness.pipeline.shot_prompt import compile_shot_prompt
+
+    shot = _shot(dialogue_line="우산 있나?")
+    spoken = compile_shot_prompt(shot, _project(), _bible(), spoken_by_video=True)
+    assert '"우산 있나?"' in spoken and "speaks aloud" in spoken
+
+    silent = compile_shot_prompt(shot, _project(), _bible(), spoken_by_video=False)
+    assert "우산 있나?" not in silent
+    assert "no spoken dialogue" in silent
+    assert "ambient sound only" in silent

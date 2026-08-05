@@ -81,3 +81,19 @@ def test_the_argv_is_a_list_of_strings() -> None:
     from an adaptation."""
     argv = mix_dialogue_argv(FFMPEG, Path("film.mp4"), [_cue(0.0)], Path("out.mp4"))
     assert all(isinstance(part, str) for part in argv)
+
+
+def test_audio_duration_is_probed_with_the_right_tool() -> None:
+    """The film validator asks for a video stream and raises when a WAV
+    has none -- probing speech with it reads as "the render broke" rather
+    than "wrong tool", which is exactly how it was first written."""
+    from reel_harness.media.dialogue_mix import audio_duration_argv, parse_audio_duration
+
+    argv = audio_duration_argv(Path("ffprobe"), Path("line.wav"))
+    assert "format=duration" in argv
+    assert "line.wav" in argv[-1]
+
+    assert parse_audio_duration("7.42\n") == pytest.approx(7.42)
+    # A missing or malformed value must not crash a render.
+    assert parse_audio_duration("") == 0.0
+    assert parse_audio_duration("N/A") == 0.0

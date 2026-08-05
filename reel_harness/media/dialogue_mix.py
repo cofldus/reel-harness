@@ -113,3 +113,35 @@ def mix_dialogue_argv(
         str(output_path),
     ]
     return argv
+
+
+def audio_duration_argv(ffprobe_path: Path, audio_path: Path) -> list[str]:
+    """Duration of an audio file, in seconds, on stdout.
+
+    Separate from ffprobe_validate's builder, which asks for a video
+    stream and raises when a WAV has none -- probing speech with the film
+    validator is a mistake that reads as "the render broke" rather than
+    "wrong tool".
+    """
+    return [
+        str(ffprobe_path), "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+
+
+def parse_audio_duration(stdout: str) -> float:
+    """Zero when the value is missing or unparseable.
+
+    A missing duration must not crash a render: the fit check simply
+    cannot fire, which is the same position the code was in before this
+    existed.
+    """
+    text = (stdout or "").strip().splitlines()
+    if not text:
+        return 0.0
+    try:
+        return float(text[0])
+    except ValueError:
+        return 0.0

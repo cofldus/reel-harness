@@ -47,6 +47,10 @@ class FableDaemonConfig:
     # can only ever run the free tiers -- the safe default for a switch
     # about money.
     allow_paid_generation: bool = False
+    # Settings.fable_dialogue_source == "video". False keeps speech out
+    # of the generated clip so synthesised dialogue can be mixed over it
+    # without two voices saying the same line.
+    spoken_by_video: bool = True
     # Settings.fable_takes_per_shot. A project may override it for itself;
     # this is the operator-wide default the override falls back to.
     takes_per_shot: int = 1
@@ -186,6 +190,7 @@ class FableDaemon:
                     session, shot, provider, self._storage, lease_token=lease_token,
                     allow_paid_generation=cfg.allow_paid_generation,
                     takes_per_shot=takes_per_shot_for(project, cfg.takes_per_shot),
+                    spoken_by_video=cfg.spoken_by_video,
                     generation_timeout_sec=cfg.generation_timeout_seconds,
                     poll_interval_sec=cfg.generation_poll_interval_seconds,
                 )

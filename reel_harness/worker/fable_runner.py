@@ -116,7 +116,10 @@ def subject_character(session, shot: FableShot, project: StoryProject):
     ).scalars().first()
 
 
-def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project: StoryProject) -> str:
+def compile_prompt_for_shot(
+    session, shot: FableShot, scene: FableScene, project: StoryProject,
+    *, spoken_by_video: bool = True,
+) -> str:
     """Loads this shot's subject character and its scene's location, then
     delegates to the canonical provider-neutral compiler
     (pipeline.shot_prompt) -- the compiler itself stays a pure function."""
@@ -145,6 +148,7 @@ def compile_prompt_for_shot(session, shot: FableShot, scene: FableScene, project
     return compile_shot_prompt(
         shot, project, character_bible=character_bible,
         location=location, position=shot_position(session, shot, project),
+        spoken_by_video=spoken_by_video,
     )
 
 
@@ -268,6 +272,9 @@ def run_shot(
     session, shot: FableShot, provider: CinematicVideoProvider, storage: StorageBackend,
     lease_token: str | None = None, sleep=time.sleep, allow_paid_generation: bool = False,
     takes_per_shot: int = 1,
+    # False keeps speech out of the generated clip so synthesised
+    # dialogue can be mixed over it without two voices saying the line.
+    spoken_by_video: bool = True,
     generation_timeout_sec: float = DEFAULT_GENERATION_TIMEOUT_SEC,
     poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
     monotonic=time.monotonic,
@@ -287,7 +294,9 @@ def run_shot(
     project = session.get(StoryProject, scene.project_id)
     assert project is not None
 
-    prompt = compile_prompt_for_shot(session, shot, scene, project)
+    prompt = compile_prompt_for_shot(
+        session, shot, scene, project, spoken_by_video=spoken_by_video,
+    )
     fingerprint = prompt_fingerprint(prompt)
     existing = len([t for t in shot.takes if t.prompt_fingerprint == fingerprint])
     wanted = max(0, takes_per_shot - existing)

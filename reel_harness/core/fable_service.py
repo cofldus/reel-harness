@@ -82,6 +82,7 @@ class FableService:
         reference_provider_resolver=None, takes_per_shot: int = 1,
         edit_plan: EditPlan | None = None, render_timeout_seconds: float | None = None,
         max_characters: int | None = None,
+        dialogue_source: str = "video", tts_resolver=None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
@@ -124,6 +125,11 @@ class FableService:
         # bound, and being quietly restrictive is how a story's third
         # character goes missing without anyone being told.
         self._max_characters = max_characters or MAX_CHARACTERS
+        # Settings.fable_dialogue_source, and the speech provider it needs.
+        # Defaults to the video path so a service built without an opinion
+        # behaves as it always has.
+        self._dialogue_source = dialogue_source
+        self._tts_resolver = tts_resolver
 
     # -- creation / read -------------------------------------------------
 
@@ -1136,6 +1142,92 @@ class FableService:
 
     # -- final render ----------------------------------------------------
 
+    def _mix_dialogue(
+        self, session, project_id: str, final_path: Path, *,
+        ffmpeg: Path, ffprobe: Path, clip_paths: list[Path],
+    ) -> None:
+        """Synthesise every spoken line and lay it over the finished film.
+
+        Failure is deliberately loud rather than silent. A film that
+        quietly comes back with no dialogue looks identical to one where
+        the synthesiser was never called, and the operator has already
+        paid for the video by this point -- so a synthesis or mix failure
+        raises, the project stays in EDITING, and re-running the render
+        retries it without regenerating a single shot.
+        """
+        from reel_harness.core.errors import ValidationFailedError
+        from reel_harness.media.dialogue_mix import (
+            DialogueCue,
+            audio_duration_argv,
+            check_fits,
+            cue_start_times,
+            mix_dialogue_argv,
+            parse_audio_duration,
+        )
+        from reel_harness.media.runner import run
+        from reel_harness.pipeline.dialogue_voice import assign_voices
+
+        if self._tts_resolver is None:
+            raise InvalidActionError(
+                "fable_dialogue_source is 'tts' but no speech provider is configured"
+            )
+
+        shots = self._shots_for_project(session, project_id)
+        characters = list(session.execute(
+            select(FableCharacter).where(FableCharacter.project_id == project_id)
+        ).scalars())
+        voices = assign_voices(characters)
+        by_name = {c.name: c for c in characters}
+
+        speaking = [(index, shot, (shot.dialogue_line or "").strip())
+                    for index, shot in enumerate(shots)
+                    if (shot.dialogue_line or "").strip()]
+        if not speaking:
+            return
+
+        durations = self._clip_durations(ffprobe, clip_paths)
+        starts = cue_start_times(durations)
+        provider = self._tts_resolver()
+        speech_dir = self._storage.path_for(project_id, "speech")  # type: ignore[union-attr]
+        speech_dir.mkdir(parents=True, exist_ok=True)
+
+        cues: list[DialogueCue] = []
+        for index, shot, line in speaking:
+            character = by_name.get(shot.subject or "")
+            assignment = voices.get(getattr(character, "id", ""), None)
+            voice = assignment.voice if assignment else ""
+            try:
+                spoken = provider.synthesize(line, voice, "ko", speech_dir)
+            except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
+                raise ValidationFailedError(
+                    f"speech synthesis failed for shot {shot.shot_order} "
+                    f"({shot.subject}): {type(exc).__name__}: {str(exc)[:200]}"
+                ) from exc
+
+            audio_path = Path(spoken.audio_path)
+            probe = run(audio_duration_argv(ffprobe, audio_path))
+            spoken_duration = (
+                parse_audio_duration(probe.stdout) if probe.returncode == 0 else 0.0
+            )
+            cue = DialogueCue(
+                audio_path=audio_path, start_sec=starts[index],
+                duration_sec=spoken_duration, shot_order=shot.shot_order,
+                speaker=shot.subject or "?",
+            )
+            check_fits(cue, durations[index])
+            cues.append(cue)
+
+        mixed_path = final_path.with_name("final.mixed.mp4")
+        mix = run(
+            mix_dialogue_argv(ffmpeg, final_path, cues, mixed_path),
+            timeout=self._render_timeout_seconds,
+        )
+        if mix.returncode != 0:
+            raise ValidationFailedError(f"dialogue mix failed: {mix.stderr[-300:]}")
+        # Replace only once the mix succeeded, so a failure leaves the
+        # assembled film intact rather than a half-written one.
+        mixed_path.replace(final_path)
+
     def render_final(self, project_id: str, plan=None) -> Path:
         """EDITING: assembles the selected takes in scene/shot order into
         final/final.mp4 under the project's storage root, validates with
@@ -1203,6 +1295,18 @@ class FableService:
             result = run(argv, timeout=self._render_timeout_seconds)
             if result.returncode != 0:
                 raise ValidationFailedError(f"final assembly failed: {result.stderr[-300:]}")
+
+            # Dialogue, when it is synthesised rather than performed by
+            # the video model. After assembly because a cue's position is
+            # its shot's position in the FINISHED film, and before the
+            # probe so a mix that breaks the file is caught by the same
+            # validation as the assembly.
+            if self._dialogue_source == "tts":
+                self._mix_dialogue(
+                    session, project_id, final_path,
+                    ffmpeg=deps.ffmpeg.path, ffprobe=deps.ffprobe.path,
+                    clip_paths=selected_paths,
+                )
 
             probe = run(build_ffprobe_argv(deps.ffprobe.path, final_path))
             if probe.returncode != 0:

@@ -64,6 +64,8 @@ class AppContext:
             reference_provider_resolver=self.reference_provider_for_project,
             takes_per_shot=self.settings.fable_takes_per_shot,
             max_characters=self.settings.fable_max_characters,
+            dialogue_source=self.settings.fable_dialogue_source,
+            tts_resolver=self.speech_provider_for_dialogue,
             edit_plan=edit_plan_from_settings(self.settings),
             render_timeout_seconds=self.settings.fable_render_timeout_seconds,
         )
@@ -148,6 +150,18 @@ class AppContext:
             publisher=publisher, session_store=UploadSessionStore(self._get_secret_store()),
             journal=self.publish_journal(),
         )
+
+    def speech_provider_for_dialogue(self):
+        """The TTS provider that speaks a film's dialogue.
+
+        Resolved lazily, per render, from current settings rather than
+        pinned at construction: a project's spoken lines are synthesised
+        at assembly time, long after creation, and there is no reason to
+        hold a client open for the whole life of the process.
+        """
+        from reel_harness.providers.registry import resolve_tts_provider
+
+        return resolve_tts_provider(self.settings.tts_provider, self.settings)
 
     def narrative_director_for_project(self, project):
         """The Narrative Director for one project, honoring its
