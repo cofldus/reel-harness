@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # is part of a take's identity, so a shot compiled before dialogue existed
 # and the same shot compiled after are genuinely different requests and
 # must not be mistaken for a replay of each other.
-COMPILER_VERSION = "fable-shot-v7"
+COMPILER_VERSION = "fable-shot-v8"
 
 # Human-readable language names for the speech instruction. A model is
 # told "speaking in Korean", not "ko" -- the ISO code is what this
@@ -49,7 +49,10 @@ _VISUAL_QUALITY = "photorealistic cinematic footage, natural human motion, filmi
 # conditioning.
 _SET_CONTINUITY = (
     "the same physical set, camera height and lighting as the other shots in this scene, "
-    "consistent screen direction, matched colour and exposure so the cut is invisible, "
+    "the same spatial layout with entrances and furniture in the same places, "
+    "consistent screen direction -- whoever enters does so from the side the location "
+    "describes, and whoever is already inside stays on their side of it, "
+    "matched colour and exposure so the cut is invisible, "
     "no relocation, no redecoration, no change of time of day"
 )
 

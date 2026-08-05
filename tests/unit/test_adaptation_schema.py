@@ -433,3 +433,39 @@ def test_the_character_cap_reaches_the_director_as_a_constraint() -> None:
         target_duration_sec=64, aspect_ratio="9:16", max_characters=4,
     ))
     assert "Maximum characters: 4" in prompt
+
+
+def test_the_director_is_told_a_location_must_state_its_layout() -> None:
+    """A description that is only mood leaves every shot to invent the
+    room again. The one that produced a clerk entering his own shop said
+    "작은 계산대와 유리문이 있는 편의점" -- true, and useless for staging."""
+    from reel_harness.providers.base import AdaptationRequest
+    from reel_harness.providers.narrative_prompts import build_user_prompt
+
+    prompt = build_user_prompt(AdaptationRequest(
+        source_text="짧은 이야기입니다.", language="ko", genre=None, tone=None,
+        target_duration_sec=32, aspect_ratio="9:16",
+    ))
+    assert "GEOGRAPHY" in prompt
+    assert "which direction is outside" in prompt
+    assert "never against the frame alone" in prompt
+
+
+def test_every_adaptation_rule_reaches_the_adaptation_prompt() -> None:
+    """Three rules were written into the REFINEMENT prompt by mistake and
+    the adaptation never saw any of them, so an apparent improvement in
+    logline and field quality was the model change alone. Rules about
+    adapting belong where adapting is asked for."""
+    from reel_harness.providers.base import AdaptationRequest
+    from reel_harness.providers.narrative_prompts import (
+        REFINEMENT_SYSTEM_PROMPT,
+        build_user_prompt,
+    )
+
+    prompt = build_user_prompt(AdaptationRequest(
+        source_text="짧은 이야기입니다.", language="ko", genre=None, tone=None,
+        target_duration_sec=32, aspect_ratio="9:16",
+    ))
+    for rule in ("NUMBERING", "GEOGRAPHY", "FIELD DISCIPLINE"):
+        assert rule in prompt, f"{rule} never reaches the director"
+        assert rule not in REFINEMENT_SYSTEM_PROMPT, f"{rule} is still in the wrong prompt"

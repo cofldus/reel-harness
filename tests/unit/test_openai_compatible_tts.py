@@ -52,7 +52,10 @@ def _audio_response(body: bytes, content_type: str = "audio/wav", request_id: st
 
 
 def _synthesize(provider, tmp_path: Path):
-    return provider.synthesize("hello from the contract test", "ignored-voice", "en", tmp_path / "scene_0")
+    # Empty, so the configured voice is what gets used. The caller's
+    # voice now wins when it names one -- Fable casts a voice per
+    # character and the operator's single setting must not override it.
+    return provider.synthesize("hello from the contract test", "", "en", tmp_path / "scene_0")
 
 
 def test_successful_wav_synthesis_normalizes_validates_and_checksums(tmp_path) -> None:
@@ -74,7 +77,7 @@ def test_successful_wav_synthesis_normalizes_validates_and_checksums(tmp_path) -
 
     result = _synthesize(provider, tmp_path)
     assert result.provider_id == "openai-compatible"
-    assert result.voice_id == "test-voice", "configured voice must win over the pipeline placeholder"
+    assert result.voice_id == "test-voice", "configured voice is the fallback when none is named"
     assert result.request_id == "tts-req-1"
     assert result.duration_sec > 0
     assert result.audio_path.name == "tts.wav"
@@ -254,3 +257,31 @@ def test_no_file_written_on_synthesis_ever_contains_the_key(tmp_path) -> None:
     for path in tmp_path.rglob("*"):
         if path.is_file():
             assert FAKE_KEY.encode() not in path.read_bytes()
+
+
+def _capture_voice(seen: dict):
+    def handler(request):
+        import json as _json
+
+        seen.update(_json.loads(request.content))
+        return _audio_response(_wav_bytes())
+
+    return handler
+
+
+def test_the_caller_s_voice_wins_over_the_configured_default(tmp_path) -> None:
+    """Fable casts a voice per character. Under the old precedence the
+    operator's single configured voice overrode all of them and every
+    character in a film sounded identical -- the exact problem that
+    synthesising dialogue was meant to solve."""
+    seen: dict = {}
+    provider = _provider(_capture_voice(seen), voice="onyx")
+    provider.synthesize("대사", "nova", "ko", tmp_path / "a")
+    assert seen["voice"] == "nova"
+
+
+def test_the_configured_voice_is_the_fallback_not_the_override(tmp_path) -> None:
+    seen: dict = {}
+    provider = _provider(_capture_voice(seen), voice="onyx")
+    provider.synthesize("대사", "", "ko", tmp_path / "b")
+    assert seen["voice"] == "onyx"

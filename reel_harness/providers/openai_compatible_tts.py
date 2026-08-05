@@ -103,9 +103,21 @@ class OpenAICompatibleTTSProvider:
         self._client.close()
 
     def synthesize(self, text: str, voice_id: str, lang: str, dest_dir: Path) -> TTSResult:
-        # The configured voice always wins over the pipeline's placeholder
-        # default; the snapshot pins it per job.
-        voice = self.voice_id or voice_id
+        # The CALLER's voice wins when it names one, and the configured
+        # voice is the fallback.
+        #
+        # This used to be the other way round, which was right when every
+        # job had one narrator: the pipeline passed a placeholder and the
+        # operator's setting pinned it. Fable casts a different voice per
+        # character, decided from the adaptation, and under the old
+        # precedence every character in a film came out sounding
+        # identical -- the exact problem synthesising dialogue was meant
+        # to solve.
+        #
+        # Safe for the short-form path, which passes the provider's own
+        # voice_id straight back (see pipeline.stages), so the result
+        # there is unchanged either way.
+        voice = voice_id or self.voice_id
         started = time.monotonic()
         audio_bytes, request_id = self._fetch(text, voice)
         self.last_latency_ms = (time.monotonic() - started) * 1000

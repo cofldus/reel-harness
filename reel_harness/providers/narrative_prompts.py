@@ -110,6 +110,36 @@ SHOOTING REQUIREMENTS -- these are checked, and a plan that misses them is sent 
   as coverage rather than a single setup.
 - Do not leave every shot locked off. At least one shot needs a motivated camera move, and
   the move must come from the story beat rather than from decoration.
+NUMBERING -- `shot_order` restarts at 1 in every scene. It is the shot's place WITHIN
+its scene, not its place in the film. A scene of two shots is [1, 2] whether it is the
+first scene or the last; do not number straight through from the previous scene.
+
+GEOGRAPHY -- a location's `description` must state its LAYOUT, not just its mood.
+Say what is where and which side is which: where the entrance is relative to the
+counter, which direction is outside, what the camera has on its left and right. Every
+shot in that location is staged against this one description, and a shot list that only
+says "screen centre" leaves the video model to invent a different room each time -- a
+clerk who never left his counter walked in through the front door because nothing said
+where the door was.
+
+Then `blocking` places the body against that layout ("behind the counter, the door
+over his right shoulder"), never against the frame alone ("screen centre"). Whoever
+enters a space must enter from the side the layout says the entrance is on, and whoever
+is already inside stays on their side of it.
+
+FIELD DISCIPLINE -- each of these has one job:
+- `logline` is one sentence stating who wants what and what happens. It must be
+  literally true of the story and must not attribute feelings the source never
+  states. A real run produced "the lonely clerk ... then they look at each other's
+  backs", which is both invented and physically impossible. If you cannot say it
+  plainly, the sentence is wrong.
+- `expression` is a FACIAL expression: what the face is doing. "wet", "tired from
+  work", "in a black coat" are states or costume, not expressions, and they reach
+  the video model as a direction it cannot act on.
+- `blocking` is where the body is in the SPACE the location described, not merely where
+  it sits in the frame. "behind the counter, facing the door" is stageable across shots;
+  "screen centre" is not.
+
 - A scene is a place and a continuous moment, not a single beat. If you write more than one
   scene, each one must hold at least two shots. Do not split one location into a scene per
   shot -- cutting between scenes tells the audience that time or place jumped.
@@ -248,21 +278,6 @@ WHAT TO FIX, and only this:
    ("he regretted it") with the physical behaviour that shows them.
 5. There must be at least one visible change: a decision, a discovery, a
    refusal. If the original already has one, leave it alone.
-
-NUMBERING -- `shot_order` restarts at 1 in every scene. It is the shot's place WITHIN
-its scene, not its place in the film. A scene of two shots is [1, 2] whether it is the
-first scene or the last; do not number straight through from the previous scene.
-
-FIELD DISCIPLINE -- each of these has one job:
-- `logline` is one sentence stating who wants what and what happens. It must be
-  literally true of the story and must not attribute feelings the source never
-  states. A real run produced "the lonely clerk ... then they look at each other's
-  backs", which is both invented and physically impossible. If you cannot say it
-  plainly, the sentence is wrong.
-- `expression` is a FACIAL expression: what the face is doing. "wet", "tired from
-  work", "in a black coat" are states or costume, not expressions, and they reach
-  the video model as a direction it cannot act on.
-- `blocking` is where the body is in the frame, not what it feels.
 
 Return a single JSON object and nothing else:
 {"refined_text": "<the rewritten story>",

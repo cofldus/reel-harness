@@ -66,14 +66,21 @@ def assign_voice(character, override: str | None = None) -> VoiceAssignment:
     style = _voice_style(bible).lower()
     age = str(getattr(character, "age_range", "") or "").strip().lower()
 
-    older = age in _OLDER_BANDS or any(m in style for m in _LOW_MARKERS)
-    pool = OLDER_VOICES if older else YOUNGER_VOICES
-    reason = (
-        f"age {age}" if age in _OLDER_BANDS
-        else "low register in voice_style" if older
-        else f"age {age}" if age
-        else "no age or register stated"
-    )
+    # Age decides the pool whenever the adaptation stated one. A stated
+    # low register used to override it, and the result was a twenty-year-
+    # old clerk voiced as a sixty-year-old because his description said
+    # "낮고 조용한" -- soft-spoken, which is a manner, not an age. Register
+    # only decides when there is no age to go on.
+    if age in _OLDER_BANDS:
+        pool, reason = OLDER_VOICES, f"age {age}"
+    elif age:
+        pool, reason = YOUNGER_VOICES, f"age {age}"
+    elif any(m in style for m in _LOW_MARKERS):
+        pool, reason = OLDER_VOICES, "low register, no age stated"
+    elif any(m in style for m in _HIGH_MARKERS):
+        pool, reason = YOUNGER_VOICES, "high register, no age stated"
+    else:
+        pool, reason = YOUNGER_VOICES, "no age or register stated"
 
     # Hash the character's own id, not its index: adding a character to
     # the cast must not re-voice everyone already in it.

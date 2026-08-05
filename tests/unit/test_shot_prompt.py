@@ -342,3 +342,15 @@ def test_the_video_model_is_silenced_when_dialogue_is_synthesised() -> None:
     assert "우산 있나?" not in silent
     assert "no spoken dialogue" in silent
     assert "ambient sound only" in silent
+
+
+def test_the_set_contract_names_the_layout_not_just_the_dressing() -> None:
+    """"Consistent screen direction" alone told the model nothing about
+    WHICH direction. A clerk who never left his counter walked in through
+    the front door because nothing said where the door was."""
+    from reel_harness.pipeline.shot_prompt import compile_shot_prompt
+
+    text = compile_shot_prompt(_shot(), _project(), _bible())
+    assert "same spatial layout" in text
+    assert "enters does so from the side the location describes" in text
+    assert "stays on their side of it" in text

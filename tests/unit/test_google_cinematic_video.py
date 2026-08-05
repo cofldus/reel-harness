@@ -463,3 +463,26 @@ def test_the_sdk_is_never_imported_at_module_level() -> None:
         if line.startswith(("import google", "from google"))
     ]
     assert module_level == [], f"SDK imported at module level: {module_level}"
+
+
+def test_veo_audio_is_off_when_dialogue_is_synthesised_separately() -> None:
+    """Telling the video model "no spoken dialogue" is not enough -- it
+    was asked politely and spoke anyway, and the film ended up with two
+    different voices saying the same line. The audio switch is the one
+    instruction it cannot ignore."""
+    from reel_harness.config import Settings
+    from reel_harness.providers.registry import resolve_cinematic_video_provider
+
+    base = dict(
+        google_project="p", google_location="us-central1",
+        google_use_vertex=True, cinematic_generate_audio=True,
+    )
+    speaking = resolve_cinematic_video_provider(
+        "google", Settings(**base, fable_dialogue_source="video"),
+    )
+    assert speaking._generate_audio is True
+
+    silent = resolve_cinematic_video_provider(
+        "google", Settings(**base, fable_dialogue_source="tts"),
+    )
+    assert silent._generate_audio is False

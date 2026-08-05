@@ -126,3 +126,24 @@ def test_synthesis_failure_stops_the_render_rather_than_shipping_a_mute_film(tmp
     assert "speech synthesis failed" in str(excinfo.value)
     # Still EDITING, so re-running retries without regenerating a shot.
     assert ctx.fable.get_project(project.id).status == "EDITING"
+
+
+def test_each_line_gets_its_own_audio_file(tmp_path) -> None:
+    """Every provider writes a fixed filename into the directory it is
+    handed, so a shared directory means the second line overwrites the
+    first and two shots play the same words. The mix still succeeds,
+    which is why this was invisible until the files were counted."""
+    ctx = _ctx(tmp_path, "tts")
+    project = _project_to_editing(ctx)
+
+    lines = [
+        shot for shot in ctx.fable.project_shots(project.id)
+        if (shot.dialogue_line or "").strip()
+    ]
+    assert len(lines) >= 2, "the fixture needs at least two spoken lines to be meaningful"
+
+    ctx.fable.render_final(project.id)
+
+    speech_root = ctx.fable_storage.path_for(project.id, "speech")
+    produced = sorted(speech_root.rglob("*.wav"))
+    assert len(produced) == len(lines), f"expected one file per line, got {produced}"

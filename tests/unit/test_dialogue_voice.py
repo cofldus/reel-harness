@@ -37,13 +37,20 @@ def test_an_older_character_is_drawn_from_the_older_pool() -> None:
     assert assign_voice(_Character("c-3", "도윤", "20s")).voice in YOUNGER_VOICES
 
 
-def test_a_stated_low_register_outranks_a_young_age() -> None:
-    """The director wrote the description; it is more specific than the
-    age band."""
+def test_a_soft_spoken_young_person_is_not_given_an_old_voice() -> None:
+    """Register used to outrank age, and a twenty-year-old clerk came out
+    voiced as a sixty-year-old because his description said "낮고 조용한"
+    -- soft-spoken, which is a manner, not an age."""
     young_but_low = _Character(
         "c-4", "준호", "20s", {"voice_profile": {"style": "낮고 조용한 말투"}},
     )
-    assert assign_voice(young_but_low).voice in OLDER_VOICES
+    assert assign_voice(young_but_low).voice in YOUNGER_VOICES
+
+
+def test_register_decides_only_when_no_age_was_stated() -> None:
+    low = _Character("c-6", "목소리", "", {"voice_profile": {"style": "낮고 굵은 목소리"}})
+    assert assign_voice(low).voice in OLDER_VOICES
+    assert "no age stated" in assign_voice(low).reason
 
 
 def test_a_vague_description_is_not_guessed_from() -> None:

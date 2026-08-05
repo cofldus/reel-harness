@@ -522,7 +522,19 @@ def _build_google_cinematic_video(settings: Settings | None) -> CinematicVideoPr
         use_vertex=settings.google_use_vertex,
         model=settings.cinematic_model,
         price_per_second_usd=settings.cinematic_price_per_second_usd,
-        generate_audio=settings.cinematic_generate_audio,
+        # Silenced outright when dialogue is synthesised separately.
+        # Telling the video model "no spoken dialogue" is not enough --
+        # it was asked politely and spoke anyway, and the result was two
+        # different voices saying the same line over each other. The
+        # audio switch is the only instruction it cannot ignore.
+        #
+        # The cost is real: Veo's rain and room tone go with it, so a
+        # film in this mode has no ambience bed until one is added.
+        # Double dialogue is the worse of the two problems.
+        generate_audio=(
+            settings.cinematic_generate_audio
+            and settings.fable_dialogue_source != "tts"
+        ),
     )
 
 

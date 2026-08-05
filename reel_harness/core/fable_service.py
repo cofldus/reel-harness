@@ -1197,7 +1197,15 @@ class FableService:
             assignment = voices.get(getattr(character, "id", ""), None)
             voice = assignment.voice if assignment else ""
             try:
-                spoken = provider.synthesize(line, voice, "ko", speech_dir)
+                # One directory per shot. Every provider writes a
+                # fixed filename into the directory it is given, so a
+                # shared directory means the second line silently
+                # overwrites the first and two shots end up playing the
+                # same words -- which is exactly what happened, and the
+                # mix still "worked", which is why it was invisible.
+                spoken = provider.synthesize(
+                    line, voice, "ko", speech_dir / f"shot_{shot.shot_order}_{index}",
+                )
             except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
                 raise ValidationFailedError(
                     f"speech synthesis failed for shot {shot.shot_order} "
